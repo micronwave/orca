@@ -1,0 +1,44 @@
+{
+  "verifier_result_id": "vr-phase0-001",
+  "capsule_id": "cap-phase0-sentiment-fix-001",
+  "verdicts": [
+    {
+      "obligation_id": "OBL-1",
+      "verdict": "satisfied",
+      "evidence": "evidence_artifacts.json#ev-test-run — test output confirms the defect existed (test was intentionally red per its docstring) and the fix resolves it",
+      "notes": "Pre-fix failure documented in test file header; post-fix all assertions pass"
+    },
+    {
+      "obligation_id": "OBL-2",
+      "verdict": "satisfied",
+      "evidence": "transcript_raw.md — defect identified at api/services/sentiment_aggregator.py lines 220-222, method compute_market_sentiment()",
+      "notes": "File and symbol confirmed by reading source"
+    },
+    {
+      "obligation_id": "OBL-3",
+      "verdict": "satisfied",
+      "evidence": "patch_artifact.json#diff — fix confined to compute_market_sentiment(); neutral_pct derived as residual",
+      "notes": "4 lines removed, 8 lines added, all within the target method"
+    },
+    {
+      "obligation_id": "OBL-4",
+      "verdict": "satisfied",
+      "evidence": "evidence_artifacts.json#ev-test-run — exit code 0, 5 passed 0 failed",
+      "notes": "All three test sections pass"
+    },
+    {
+      "obligation_id": "OBL-5",
+      "verdict": "satisfied",
+      "evidence": "evidence_artifacts.json#ev-git-diff-scope — git diff confirms single file scope",
+      "notes": "No other files appear in diff"
+    },
+    {
+      "obligation_id": "OBL-6",
+      "verdict": "satisfied",
+      "evidence": "agent_sidecar.json#unresolved_risks — two risks documented: negative neutral_pct if upstream count bug, float epsilon normalised by round()",
+      "notes": "Non-blocking obligation; risks are pre-existing, not introduced by fix"
+    }
+  ],
+  "recommendation": "accept",
+  "recommendation_rationale": "All 6 obligations satisfied. All blocking obligations have concrete evidence (exit code, diff). No scope violations. No new risks introduced."
+}

@@ -1,0 +1,26 @@
+{
+  "evidence_artifacts": [
+    {
+      "evidence_id": "ev-test-run",
+      "command": "python -X utf8 tests/test_sentiment_pct_sum.py",
+      "working_directory": "E:/narrative_engine",
+      "exit_code": 0,
+      "summary": "5 passed, 0 failed across 3 sections. Section 1 (1/1/1 split), Section 2 (2/2/2 split), and Section 3 (empty list) all pass.",
+      "inline_output": "============================================================\nSection                                   Pass  Fail\n------------------------------------------------------------\n  1: market_sentiment pct sum equals 100.0 (1 bullish / 1 bearish / 1 neutral)     1     0\n  2: market_sentiment pct sum equals 100.0 (2/2/2 even split)     1     0\n  3: empty ticker list returns zeroed structure (existing behaviour, sanity check)     3     0\n============================================================\n  TOTAL: 5 passed, 0 failed out of 5 tests\n============================================================",
+      "obligations_supported": ["OBL-1", "OBL-4"],
+      "obligations_weakened": [],
+      "timestamp": "2026-05-17T00:00:00Z"
+    },
+    {
+      "evidence_id": "ev-git-diff-scope",
+      "command": "git -C E:/narrative_engine diff HEAD -- api/services/sentiment_aggregator.py",
+      "working_directory": "E:/orca",
+      "exit_code": 0,
+      "summary": "Diff confirms only api/services/sentiment_aggregator.py was modified. 4 lines removed, 8 lines added, all within compute_market_sentiment(). No other files appear in diff output.",
+      "inline_output": "See patch_artifact.json#diff for full diff text.",
+      "obligations_supported": ["OBL-5"],
+      "obligations_weakened": [],
+      "timestamp": "2026-05-17T00:00:00Z"
+    }
+  ]
+}

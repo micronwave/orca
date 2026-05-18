@@ -1,0 +1,26 @@
+{
+  "goal_id": "phase0-sentiment-pct-sum",
+  "original_intent": "Fix the percentage-sum rounding defect in SentimentAggregator.compute_market_sentiment() so that bullish_pct + bearish_pct + neutral_pct always equals 100.0",
+  "goal_conditions": [
+    "GC-1: compute_market_sentiment() returns bullish_pct + bearish_pct + neutral_pct == 100.0 for any non-empty ticker list",
+    "GC-2: The fix applies to the independent-rounding defect — neutral_pct must be derived as the residual (100.0 - bullish_pct - bearish_pct) rather than computed and rounded independently",
+    "GC-3: The empty-ticker edge case continues to return all three percentages as 0.0",
+    "GC-4: No other methods in the file are modified",
+    "GC-5: All existing tests that import sentiment_aggregator continue to pass"
+  ],
+  "scope_constraints": {
+    "allowed_files": ["api/services/sentiment_aggregator.py"],
+    "forbidden_files": [
+      "tests/*",
+      "api/**/*.py (any file other than sentiment_aggregator.py)",
+      "repository.py",
+      "pipeline.py",
+      "settings.py"
+    ],
+    "forbidden_actions": ["add dependencies", "alter DB schema", "modify test files", "broad refactor"]
+  },
+  "risk_level": "low",
+  "risk_justification": "Single arithmetic expression change in one private method. No new dependencies. Semantically equivalent for passing cases; strictly corrects failing 1/3-1/3-1/3 split case. Rollback is one git checkout.",
+  "created_at": "2026-05-17T00:00:00Z",
+  "status": "complete"
+}

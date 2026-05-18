@@ -1,0 +1,16 @@
+{
+  "patch_id": "patch-phase0-sentiment-fix-001",
+  "capsule_id": "cap-phase0-sentiment-fix-001",
+  "base_commit": "0d752c5862605043e8a63a2006e92bb87851072d",
+  "changed_files": ["api/services/sentiment_aggregator.py"],
+  "diff_path": "inline",
+  "diff": "diff --git a/api/services/sentiment_aggregator.py b/api/services/sentiment_aggregator.py\nindex c23fea7..a6a50b8 100644\n--- a/api/services/sentiment_aggregator.py\n+++ b/api/services/sentiment_aggregator.py\n@@ -215,11 +215,15 @@ class SentimentAggregator:\n             if r.get(\"spike_detected\")\n         ]\n \n+        bullish_pct = round(bullish / total * 100, 1)\n+        bearish_pct = round(bearish / total * 100, 1)\n+        neutral_pct = round(100.0 - bullish_pct - bearish_pct, 1)\n+\n         return {\n             \"market_score\": market_score,\n-            \"bullish_pct\": round(bullish / total * 100, 1),\n-            \"bearish_pct\": round(bearish / total * 100, 1),\n-            \"neutral_pct\": round(neutral / total * 100, 1),\n+            \"bullish_pct\": bullish_pct,\n+            \"bearish_pct\": bearish_pct,\n+            \"neutral_pct\": neutral_pct,\n             \"top_bullish\": top_bullish,\n             \"top_bearish\": top_bearish,\n             \"spikes\": spikes,",
+  "summary": "Extract bullish_pct and bearish_pct as local variables (rounded independently). Derive neutral_pct as round(100.0 - bullish_pct - bearish_pct, 1) instead of rounding independently. Change confined to compute_market_sentiment(), 4 lines removed, 8 lines added.",
+  "obligation_ids_claimed": ["OBL-3", "OBL-5"],
+  "risk_notes": [
+    "bullish+bearish cannot exceed total by design; if they did neutral_pct would go negative — this risk pre-existed the fix",
+    "float subtraction epsilon handled by round(); no observed drift in tested range"
+  ],
+  "status": "accepted",
+  "scope_violations": []
+}

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(git *)",
+      "PowerShell(Get-Command *)",
+      "Bash(go build *)",
+      "PowerShell(Get-ChildItem *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git add *)"
+    ]
+  }
+}

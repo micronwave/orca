@@ -1,0 +1,49 @@
+{
+  "capsule_id": "cap-phase0-sentiment-fix-001",
+  "obligation_ids": ["OBL-1", "OBL-2", "OBL-3", "OBL-4", "OBL-5", "OBL-6"],
+  "agent": "claude-sonnet-4-6",
+  "role": "implementer",
+  "context_projection_id": "executor_projection.md",
+  "allowed_paths": [
+    "api/services/sentiment_aggregator.py"
+  ],
+  "forbidden_paths": [
+    "tests/**",
+    "repository.py",
+    "pipeline.py",
+    "settings.py",
+    "api/**/*.py (all except sentiment_aggregator.py)",
+    ".env",
+    "*.db"
+  ],
+  "allowed_tools": ["Read", "Edit", "Bash (read-only: git diff, python test run)"],
+  "forbidden_actions": [
+    "git commit",
+    "git push",
+    "pip install",
+    "modify test files",
+    "write to any file except api/services/sentiment_aggregator.py",
+    "network requests"
+  ],
+  "required_outputs": [
+    "modified api/services/sentiment_aggregator.py with fix applied",
+    "patch_artifact.json",
+    "agent_sidecar.json",
+    "evidence_artifacts.json with test run exit code"
+  ],
+  "verifier_gates": [
+    "test exit code == 0",
+    "git diff shows only api/services/sentiment_aggregator.py",
+    "pct sum == 100.0 for 1/3 and 2/6 splits"
+  ],
+  "budget": {
+    "max_file_edits": 1,
+    "max_lines_changed": 10,
+    "max_tool_calls": 20
+  },
+  "sandbox": {
+    "network": false,
+    "write_scope": "api/services/sentiment_aggregator.py only",
+    "destructive_actions": false
+  }
+}
