@@ -143,7 +143,7 @@ func (l *FileLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.done {
-		return ErrClosed
+		return nil
 	}
 	if err := l.f.Sync(); err != nil {
 		_ = l.f.Close()
@@ -273,9 +273,15 @@ func (l *FileLog) scan(afterSeq int64, limit int, pred func(schema.Event) bool) 
 			return nil, fmt.Errorf("eventlog: parse event: %w", err)
 		}
 		if e.SequenceNum <= afterSeq {
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return nil, fmt.Errorf("eventlog: scan read: %w", readErr)
+			}
 			continue
 		}
 		if !pred(e) {
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return nil, fmt.Errorf("eventlog: scan read: %w", readErr)
+			}
 			continue
 		}
 		out = append(out, e)

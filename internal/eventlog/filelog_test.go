@@ -133,6 +133,16 @@ func TestAppend_ReturnsErrClosedAfterClose(t *testing.T) {
 	}
 }
 
+func TestClose_IsIdempotent(t *testing.T) {
+	l := openLog(t)
+	if err := l.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
 func TestClose_ReadsReturnErrClosedAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.log")

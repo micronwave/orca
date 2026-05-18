@@ -426,13 +426,14 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p.Role = schema.ProjectionRoleExecutor
+	saved := *p
+	saved.Role = schema.ProjectionRoleExecutor
 	// GoalID not directly available; emit event with empty goalID.
-	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", p.ContextProjectionID, p)
+	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", saved.ContextProjectionID, &saved)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirProjExecutor, p.ContextProjectionID), p))
+	return materializationError(ev, s.writeFile(s.artifactPath(dirProjExecutor, saved.ContextProjectionID), &saved))
 }
 
 func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error {
@@ -441,12 +442,13 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p.Role = schema.ProjectionRoleHumanSummary
-	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", p.ContextProjectionID, p)
+	saved := *p
+	saved.Role = schema.ProjectionRoleHumanSummary
+	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", saved.ContextProjectionID, &saved)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirProjHuman, p.ContextProjectionID), p))
+	return materializationError(ev, s.writeFile(s.artifactPath(dirProjHuman, saved.ContextProjectionID), &saved))
 }
 
 func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*schema.ContextProjection, error) {

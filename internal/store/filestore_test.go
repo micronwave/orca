@@ -486,11 +486,29 @@ func TestProjection_SaveEnforcesReplayRole(t *testing.T) {
 	if err := e.st.SaveHumanSummaryProjection(e.ctx, human); err != nil {
 		t.Fatalf("SaveHumanSummaryProjection: %v", err)
 	}
-	if exec.Role != schema.ProjectionRoleExecutor {
-		t.Fatalf("SaveProjection did not normalize role: %s", exec.Role)
+
+	// SaveProjection and SaveHumanSummaryProjection do NOT mutate the caller's
+	// struct — role normalization is a persistence-layer invariant. Verify the
+	// in-memory structs are unchanged and the stored artifacts have correct roles.
+	if exec.Role != schema.ProjectionRoleHumanSummary {
+		t.Fatalf("SaveProjection must not mutate caller's struct: role changed to %s", exec.Role)
 	}
-	if human.Role != schema.ProjectionRoleHumanSummary {
-		t.Fatalf("SaveHumanSummaryProjection did not normalize role: %s", human.Role)
+	if human.Role != schema.ProjectionRoleExecutor {
+		t.Fatalf("SaveHumanSummaryProjection must not mutate caller's struct: role changed to %s", human.Role)
+	}
+	loadedExec, err := e.st.LoadProjection(e.ctx, "CTX-exec")
+	if err != nil {
+		t.Fatalf("LoadProjection after save: %v", err)
+	}
+	if loadedExec.Role != schema.ProjectionRoleExecutor {
+		t.Fatalf("SaveProjection did not normalize role in stored artifact: got %s", loadedExec.Role)
+	}
+	loadedHuman, err := e.st.LoadHumanSummaryProjection(e.ctx, "CTX-human")
+	if err != nil {
+		t.Fatalf("LoadHumanSummaryProjection after save: %v", err)
+	}
+	if loadedHuman.Role != schema.ProjectionRoleHumanSummary {
+		t.Fatalf("SaveHumanSummaryProjection did not normalize role in stored artifact: got %s", loadedHuman.Role)
 	}
 
 	wipeArtifacts(t, e)
