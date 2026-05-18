@@ -45,8 +45,9 @@ import (
 //  6. Patch review: model or human review for risk, assumptions, obligation fit
 //  7. Merge readiness: all blocking obligations satisfied or waived
 //
-// The first blocking failure in stages 1–4 stops the pipeline; later stages are
-// skipped. Stages 5–7 always run for their applicable obligation types.
+// Stages 1–4 run in order; the first blocking failure within that group stops
+// the remaining stages in 1–4. Stages 5–7 always run for their applicable
+// obligation types regardless of any stage 1–4 blocking failure.
 type VerifierEngine interface {
 	// ProposeObligations derives the initial Obligation set from the GoalIR
 	// for goalID, persists each obligation via SaveObligation, and returns the

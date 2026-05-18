@@ -9,19 +9,24 @@
 //
 //	Reads  (store):   VerifierResult via LoadVerifierResultForPatch,
 //	                  PatchArtifact via LoadPatch,
-//	                  Obligations via LoadObligation,
+//	                  Obligations via LoadObligation (one per ObligationVerdict),
 //	                  EvidenceArtifacts via LoadEvidence,
 //	                  FailureFingerprints via LoadFailuresForCapsule
 //	                    (to build follow-up obligations from runner failures),
+//	                  ClaimArtifacts via LoadClaimsForCapsule
+//	                    (to perform claim verification on patch acceptance),
 //	                  BudgetRecords via LoadBudgetForGoal
 //	Writes (store):   Obligation status via UpdateObligationStatus,
 //	                  Patch status via UpdatePatchStatus,
+//	                  Claim status via UpdateClaimStatus (proposed → verified for
+//	                    claims whose evidence_ids all resolve to store artifacts),
 //	                  new Obligations via SaveObligation (follow-ups from failures),
 //	                  DecisionRecords via SaveDecision,
 //	                  BudgetRecords via UpdateBudgetRecord,
 //	                  StateSnapshot via SaveSnapshot
 //	Writes (log):     EventObligationStatusUpdated before UpdateObligationStatus,
 //	                  EventPatchAccepted or EventPatchRejected before UpdatePatchStatus,
+//	                  EventClaimStatusUpdated before UpdateClaimStatus,
 //	                  EventObligationCreated (for follow-up obligations),
 //	                  EventDecisionRecordCreated, EventMergeApplied
 //

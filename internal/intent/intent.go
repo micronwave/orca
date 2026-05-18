@@ -3,7 +3,9 @@
 //
 // Dependency contract:
 //
-//	Reads  (store):   nothing — takes raw user input only
+//	Reads  (store):   GoalIR via LoadActiveGoal (to enforce one active goal per
+//	                  repo: return an error if a non-nil goal is returned before
+//	                  creating a new one)
 //	Writes (store):   GoalIR via SaveGoal (conditions embedded in GoalIR)
 //	Writes (log):     EventGoalCreated
 //

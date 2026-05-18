@@ -9,17 +9,18 @@
 //	Reads  (store):   GoalIR via LoadGoal, GoalConditions via LoadGoalCondition,
 //	                  open Obligations via LoadOpenObligations,
 //	                  FailureFingerprints via LoadAllFailures
-//	Writes (store):   Obligations via SaveObligation,
-//	                  ExecutionCapsules via SaveCapsule,
+//	Writes (store):   ExecutionCapsules via SaveCapsule,
 //	                  DecisionRecord (topology decision) via SaveDecision
 //	Writes (log):     none directly — the ArtifactStore implementation emits
-//	                  obligation_created, capsule_created, decision_record_created
-//	                  events on each Save call
+//	                  capsule_created, decision_record_created events on each Save call
 //
 //	Must NOT import:  internal/runner, internal/verifier, internal/reconciler,
 //	                  internal/projector, internal/budget, internal/gate
-//	Must NOT call:    store.SavePatch, store.SaveEvidence, store.SaveClaim,
-//	                  store.SaveVerifierResult, store.SaveBudgetRecord
+//	Must NOT call:    store.SaveObligation, store.SavePatch, store.SaveEvidence,
+//	                  store.SaveClaim, store.SaveVerifierResult, store.SaveBudgetRecord
+//	                  (initial obligations are created by VerifierEngine.ProposeObligations;
+//	                  follow-up obligations are created by Reconciler — the planner
+//	                  only reads open obligations and creates capsules for them)
 package planner
 
 import (
@@ -39,6 +40,12 @@ import (
 // Capsules must be created with State = CapsuleStatePending. The CapsuleRunner
 // owns the transition pending → worktree_created as its first action, ensuring
 // the stored state never claims a worktree exists before the runner creates it.
+//
+// Capsules must have TopologyDecisionID set to the DecisionRecord.DecisionID
+// returned by SaveDecision before SaveCapsule is called. The ContextCompiler
+// uses this field to load the topology rationale for HumanSummaryProjection.Topology
+// via store.LoadDecision(capsule.TopologyDecisionID).
+//
 // PlanResult is returned by ObligationPlanner.Plan. It carries the capsule IDs
 // plus the topology decision so the orchestrator can emit topology_selected to
 // the event log without querying state it did not observe directly.

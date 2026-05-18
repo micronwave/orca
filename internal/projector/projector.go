@@ -11,6 +11,9 @@
 //	                  EvidenceArtifacts via LoadEvidenceForObligation,
 //	                  FailureFingerprints via LoadFailuresForFiles,
 //	                  ExecutionCapsule via LoadCapsule,
+//	                  DecisionRecord via LoadDecision (topology decision, using
+//	                    capsule.TopologyDecisionID, to populate
+//	                    HumanSummaryProjection.Topology.Rationale),
 //	                  StateSnapshot via LoadLatestSnapshot
 //	Writes (store):   ContextProjection via SaveProjection,
 //	                  HumanSummaryProjection via SaveHumanSummaryProjection
