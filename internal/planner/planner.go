@@ -1,0 +1,81 @@
+// Package planner defines the ObligationPlanner and TopologyClassifier interfaces.
+//
+// The ObligationPlanner creates ExecutionCapsules for open obligations and records
+// the topology decision. The TopologyClassifier is an internal dependency of the
+// planner; nothing outside this package calls it directly.
+//
+// Dependency contract (ObligationPlanner):
+//
+//	Reads  (store):   GoalIR via LoadGoal, GoalConditions via LoadGoalCondition,
+//	                  open Obligations via LoadOpenObligations,
+//	                  FailureFingerprints via LoadAllFailures
+//	Writes (store):   Obligations via SaveObligation,
+//	                  ExecutionCapsules via SaveCapsule,
+//	                  DecisionRecord (topology decision) via SaveDecision
+//	Writes (log):     none directly — the ArtifactStore implementation emits
+//	                  obligation_created, capsule_created, decision_record_created
+//	                  events on each Save call
+//
+//	Must NOT import:  internal/runner, internal/verifier, internal/reconciler,
+//	                  internal/projector, internal/budget, internal/gate
+//	Must NOT call:    store.SavePatch, store.SaveEvidence, store.SaveClaim,
+//	                  store.SaveVerifierResult, store.SaveBudgetRecord
+package planner
+
+import (
+	"github.com/micronwave/orca/internal/schema"
+)
+
+// ObligationPlanner reads open obligations for a goal, classifies topology,
+// generates ExecutionCapsules, and returns the new capsule IDs ready for
+// projection and execution.
+//
+// The planner calls TopologyClassifier before creating capsules. The topology
+// decision is persisted as a DecisionRecord so the ContextCompiler and
+// HumanGatekeeper can surface the rationale without re-running classification.
+//
+// Capsules must be created with State = CapsuleStatePending. The CapsuleRunner
+// owns the transition pending → worktree_created as its first action, ensuring
+// the stored state never claims a worktree exists before the runner creates it.
+// PlanResult is returned by ObligationPlanner.Plan. It carries the capsule IDs
+// plus the topology decision so the orchestrator can emit topology_selected to
+// the event log without querying state it did not observe directly.
+type PlanResult struct {
+	// CapsuleIDs contains the IDs of the newly created ExecutionCapsules,
+	// one per obligation group after topology selection.
+	CapsuleIDs []string
+
+	// Topology is the topology the classifier selected for this plan cycle.
+	Topology schema.Topology
+
+	// DecisionID is the ID of the persisted DecisionRecord that records the
+	// topology selection rationale.
+	DecisionID string
+}
+
+type ObligationPlanner interface {
+	// Plan reads open obligations under goalID, selects topology via the
+	// TopologyClassifier, creates one or more ExecutionCapsules, persists all
+	// artifacts, and returns a PlanResult. The orchestrator uses Topology and
+	// DecisionID to emit topology_selected to the event log.
+	Plan(goalID string) (PlanResult, error)
+}
+
+// TopologyClassifier selects the execution topology for an obligation set.
+// It is called only by ObligationPlanner; no other package imports it.
+//
+// Reads:  obligations and fingerprints passed directly (not from the store)
+// Writes: returns the chosen topology and a rationale string; the caller
+//
+//	(ObligationPlanner) is responsible for persisting the DecisionRecord
+//
+// The three MVP topologies are defined in orca.md §7. Inputs that drive
+// classification: obligation count and risk, expected file overlap, failure
+// fingerprints in affected areas, whether reproduction is needed, whether
+// tests already exist, user approval policy, cost budget.
+type TopologyClassifier interface {
+	// Classify returns the selected Topology and a human-readable rationale.
+	// The rationale must name the specific classifier inputs that drove the
+	// decision (e.g. "high-risk obligations, 3 prior failures in affected files").
+	Classify(obligations []*schema.Obligation, fingerprints []*schema.FailureFingerprint) (topology schema.Topology, rationale string, err error)
+}
