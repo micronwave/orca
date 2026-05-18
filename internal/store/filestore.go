@@ -251,6 +251,24 @@ func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR
 	return readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
 }
 
+// LoadActiveGoal scans all goal files and returns the one with status "active".
+// Returns (nil, nil) when no active goal exists. The MVP enforces one active goal
+// per repo; the IntentCompiler calls this before creating a new goal.
+func (s *FileStore) LoadActiveGoal(ctx context.Context) (*schema.GoalIR, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range goals {
+		if g.Status == schema.GoalStatusActive {
+			return g, nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status schema.GoalStatus) error {
 	if err := validateArtifactID("goal", goalID); err != nil {
 		return err
@@ -605,6 +623,22 @@ func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []stri
 				out = append(out, c)
 				break
 			}
+		}
+	}
+	return out, nil
+}
+
+func (s *FileStore) LoadClaimsForCapsule(ctx context.Context, capsuleID string) ([]*schema.ClaimArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	if err != nil {
+		return nil, err
+	}
+	var out []*schema.ClaimArtifact
+	for _, c := range all {
+		if c.SourceCapsuleID == capsuleID {
+			out = append(out, c)
 		}
 	}
 	return out, nil

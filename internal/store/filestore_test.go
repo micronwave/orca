@@ -720,6 +720,84 @@ func TestClaim_LoadVerifiedForFiles(t *testing.T) {
 	}
 }
 
+func TestClaim_LoadForCapsule(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedCapsule(t, "CAP-2", "OB-1")
+	for _, cl := range []*schema.ClaimArtifact{
+		{ClaimID: "CL-1", SourceCapsuleID: "CAP-1", Status: schema.ClaimProposed},
+		{ClaimID: "CL-2", SourceCapsuleID: "CAP-1", Status: schema.ClaimVerified},
+		{ClaimID: "CL-3", SourceCapsuleID: "CAP-2", Status: schema.ClaimProposed},
+	} {
+		if err := e.st.SaveClaim(e.ctx, cl); err != nil {
+			t.Fatalf("SaveClaim %s: %v", cl.ClaimID, err)
+		}
+	}
+	out, err := e.st.LoadClaimsForCapsule(e.ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadClaimsForCapsule: %v", err)
+	}
+	if len(out) != 2 {
+		t.Errorf("expected 2 claims for CAP-1, got %d", len(out))
+	}
+	for _, c := range out {
+		if c.SourceCapsuleID != "CAP-1" {
+			t.Errorf("unexpected SourceCapsuleID %s in result", c.SourceCapsuleID)
+		}
+	}
+}
+
+func TestClaim_LoadForCapsule_Empty(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	out, err := e.st.LoadClaimsForCapsule(e.ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadClaimsForCapsule empty: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected 0 claims, got %d", len(out))
+	}
+}
+
+func TestGoal_LoadActiveGoal(t *testing.T) {
+	e := newEnv(t)
+
+	// No goal at all — must return nil, nil.
+	active, err := e.st.LoadActiveGoal(e.ctx)
+	if err != nil {
+		t.Fatalf("LoadActiveGoal (none): %v", err)
+	}
+	if active != nil {
+		t.Errorf("expected nil when no goals exist, got %+v", active)
+	}
+
+	// Seed an active goal.
+	e.seedGoal(t, "G-1", "GC-1") // seedGoal creates status=active
+	active, err = e.st.LoadActiveGoal(e.ctx)
+	if err != nil {
+		t.Fatalf("LoadActiveGoal: %v", err)
+	}
+	if active == nil || active.GoalID != "G-1" {
+		t.Errorf("expected G-1, got %+v", active)
+	}
+
+	// After completing the goal it must no longer be returned.
+	if err := e.st.UpdateGoalStatus(e.ctx, "G-1", schema.GoalStatusComplete); err != nil {
+		t.Fatalf("UpdateGoalStatus: %v", err)
+	}
+	active, err = e.st.LoadActiveGoal(e.ctx)
+	if err != nil {
+		t.Fatalf("LoadActiveGoal after complete: %v", err)
+	}
+	if active != nil {
+		t.Errorf("expected nil after completion, got %+v", active)
+	}
+}
+
 // ── Failure Fingerprints ──────────────────────────────────────────────────────
 
 func TestFailure_SaveLoad(t *testing.T) {

@@ -79,4 +79,9 @@ type ExecutionCapsule struct {
 	Budget              CapsuleBudget  `json:"budget"`
 	Sandbox             CapsuleSandbox `json:"sandbox"`
 	State               CapsuleState   `json:"state"`
+	// TopologyDecisionID is the ID of the DecisionRecord that captures the topology
+	// classifier's selection and rationale for this capsule's plan cycle. Set by the
+	// ObligationPlanner when it creates the capsule. The ContextCompiler loads this
+	// via store.LoadDecision to populate HumanSummaryProjection.Topology.Rationale.
+	TopologyDecisionID string `json:"topology_decision_id,omitempty"`
 }

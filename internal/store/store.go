@@ -32,6 +32,11 @@ type ArtifactStore interface {
 	// Callers must append goal_status_updated before calling this method.
 	UpdateGoalStatus(ctx context.Context, goalID string, status schema.GoalStatus) error
 
+	// LoadActiveGoal returns the GoalIR with status "active", or (nil, nil) when
+	// no active goal exists. The MVP constraint is one active goal per repo;
+	// IntentCompiler calls this before creating a new goal to enforce that constraint.
+	LoadActiveGoal(ctx context.Context) (*schema.GoalIR, error)
+
 	// LoadGoalCondition finds a single GoalCondition by its ID within the stored GoalIR.
 	// Returns an error if the goal or condition is not found.
 	LoadGoalCondition(ctx context.Context, conditionID string) (*schema.GoalCondition, error)
@@ -89,6 +94,11 @@ type ArtifactStore interface {
 	// intersect the given file list. Proposed and stale claims are excluded; the
 	// context_compiler injects only verified claims as facts.
 	LoadVerifiedClaimsForFiles(ctx context.Context, files []string) ([]*schema.ClaimArtifact, error)
+	// LoadClaimsForCapsule returns all ClaimArtifacts whose SourceCapsuleID matches
+	// capsuleID, regardless of status. Used by the Reconciler to verify claims on
+	// patch acceptance: for each claim whose evidence_ids all resolve to artifacts
+	// in the store, call UpdateClaimStatus(verified). orca.md §16.
+	LoadClaimsForCapsule(ctx context.Context, capsuleID string) ([]*schema.ClaimArtifact, error)
 	// Callers must append claim_status_updated before calling this method.
 	UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error
 
