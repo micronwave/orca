@@ -217,7 +217,7 @@ Fields:
 }
 ```
 
-Capsule lifecycle states: `worktree_created` → `workspace_attached` → `setup_run` → `agent_running` → `completed|failed`. The capsule runner must track and expose these states; partial failures must leave no ambiguous intermediate state.
+Capsule lifecycle states: `pending` → `worktree_created` → `workspace_attached` → `setup_run` → `agent_running` → `completed|failed`. The `pending` state is set by the Obligation Planner when it creates the capsule contract; the capsule runner transitions it to `worktree_created` as its first action. The capsule runner must track and expose all states; partial failures must leave no ambiguous intermediate state.
 
 Capsules replace loose prompts. A legacy CLI can still run inside a capsule, but terminal execution is an adapter detail.
 
@@ -489,6 +489,7 @@ Fields:
 ```json
 {
   "failure_id": "FAIL-1",
+  "source_capsule_id": "CAP-1",
   "failure_type": "test|lint|typecheck|runtime|merge|policy|infra|agent",
   "summary": "string",
   "affected_files": [],
@@ -496,6 +497,8 @@ Fields:
   "error_signature": "string"
 }
 ```
+
+`source_capsule_id` is required. It links a fingerprint to the capsule that produced it, which allows the store to satisfy capsule-scoped failure lookup (`LoadFailuresForCapsule`) without scanning all fingerprints.
 
 Prior attempt history, likely cause inference, and recommended action generation are deferred to Phase 3. The MVP fingerprint records what failed and where; the orchestrator creates follow-up obligations mechanically from that record.
 

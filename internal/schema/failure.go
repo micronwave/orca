@@ -18,7 +18,10 @@ const (
 // Prior attempt history, likely cause inference, and recommended action generation
 // are deferred to Phase 3. orca.md §5.9.
 type FailureFingerprint struct {
-	FailureID       string      `json:"failure_id"`
+	FailureID string `json:"failure_id"`
+	// SourceCapsuleID is the capsule that produced this failure. Required so the
+	// store can satisfy LoadFailuresForCapsule without scanning all fingerprints.
+	SourceCapsuleID string      `json:"source_capsule_id"`
 	FailureType     FailureType `json:"failure_type"`
 	Summary         string      `json:"summary"`
 	AffectedFiles   []string    `json:"affected_files"`
