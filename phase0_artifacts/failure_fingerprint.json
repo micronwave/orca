@@ -1,5 +1,0 @@
-{
-  "failure_id": null,
-  "status": "no_failure",
-  "summary": "All 6 obligations satisfied. Verifier recommends accept. No failing obligation exists that would require a retry contract. The defect documented by test_sentiment_pct_sum.py was fixed in a single capsule run."
-}
