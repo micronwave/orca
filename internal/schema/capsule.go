@@ -1,0 +1,78 @@
+package schema
+
+// AgentType identifies the coding agent that runs inside a capsule. orca.md §5.3.
+type AgentType string
+
+const (
+	AgentCodex   AgentType = "codex"
+	AgentClaude  AgentType = "claude"
+	AgentCopilot AgentType = "copilot"
+	AgentTool    AgentType = "tool"
+)
+
+// CapsuleRole is the functional role the agent plays inside the capsule.
+type CapsuleRole string
+
+const (
+	RoleExecutor     CapsuleRole = "executor"
+	RoleReviewer     CapsuleRole = "reviewer"
+	RoleTester       CapsuleRole = "tester"
+	RoleInvestigator CapsuleRole = "investigator"
+)
+
+// CapsuleState is the lifecycle state of an execution capsule.
+// The capsule runner must track and expose these states;
+// partial failures must leave no ambiguous intermediate state. orca.md §5.3.
+type CapsuleState string
+
+const (
+	CapsuleStateWorktreeCreated   CapsuleState = "worktree_created"
+	CapsuleStateWorkspaceAttached CapsuleState = "workspace_attached"
+	CapsuleStateSetupRun          CapsuleState = "setup_run"
+	CapsuleStateAgentRunning      CapsuleState = "agent_running"
+	CapsuleStateCompleted         CapsuleState = "completed"
+	CapsuleStateFailed            CapsuleState = "failed"
+)
+
+// NetworkPolicy controls outbound network access inside a capsule sandbox.
+type NetworkPolicy string
+
+const (
+	NetworkDeny      NetworkPolicy = "deny"
+	NetworkAllowlist NetworkPolicy = "allowlist"
+	NetworkAllow     NetworkPolicy = "allow"
+)
+
+// CapsuleBudget limits the resources a capsule may consume. orca.md §5.3.
+type CapsuleBudget struct {
+	MaxTokens          int `json:"max_tokens"`
+	MaxWallTimeSeconds int `json:"max_wall_time_seconds"`
+	MaxRetries         int `json:"max_retries"`
+}
+
+// CapsuleSandbox defines the isolation policy for a capsule. orca.md §5.3.
+type CapsuleSandbox struct {
+	WorktreePath string        `json:"worktree_path"`
+	Network      NetworkPolicy `json:"network"`
+	// WriteScope describes allowed write targets, e.g. "worktree_only".
+	WriteScope string `json:"write_scope"`
+}
+
+// ExecutionCapsule is the contract for one agent or tool run.
+// It is the most important primitive in Orca. orca.md §5.3.
+type ExecutionCapsule struct {
+	CapsuleID           string         `json:"capsule_id"`
+	ObligationIDs       []string       `json:"obligation_ids"`
+	Agent               AgentType      `json:"agent"`
+	Role                CapsuleRole    `json:"role"`
+	ContextProjectionID string         `json:"context_projection_id"`
+	AllowedPaths        []string       `json:"allowed_paths"`
+	ForbiddenPaths      []string       `json:"forbidden_paths"`
+	AllowedTools        []string       `json:"allowed_tools"`
+	ForbiddenActions    []string       `json:"forbidden_actions"`
+	RequiredOutputs     []string       `json:"required_outputs"`
+	VerifierGates       []string       `json:"verifier_gates"`
+	Budget              CapsuleBudget  `json:"budget"`
+	Sandbox             CapsuleSandbox `json:"sandbox"`
+	State               CapsuleState   `json:"state"`
+}
