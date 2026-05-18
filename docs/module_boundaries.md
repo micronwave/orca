@@ -106,15 +106,17 @@ shadowing the stdlib `context` package in import declarations.
 
 | | |
 |---|---|
-| **Reads (store)** | nothing — takes raw user input only |
+| **Reads (store)** | `GoalIR` via `LoadActiveGoal` (to enforce one active goal per repo) |
 | **Writes (store)** | `GoalIR` (with embedded `GoalConditions`) via `SaveGoal` |
 | **Writes (log)** | `goal_created` directly |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | Obligations or Capsules (planner's job) |
 
 The compiler is the entry point for one user intent string. It may call a model
-to clarify ambiguous goal conditions, but it must reject a second `Compile` call
-when a goal is already active (one active goal per repo, MVP constraint).
+to clarify ambiguous goal conditions, but it must not create Obligations or
+Capsules — those belong to the ObligationPlanner. The one-active-goal-per-repo
+MVP constraint is enforced by calling `store.LoadActiveGoal` before creating a
+new goal and returning an error if a non-nil goal is returned.
 
 ---
 
@@ -123,16 +125,18 @@ when a goal is already active (one active goal per repo, MVP constraint).
 | | |
 |---|---|
 | **Reads (store)** | `GoalIR`, `GoalConditions`, open `Obligations`, `FailureFingerprints` |
-| **Writes (store)** | `Obligations`, `ExecutionCapsules`, `DecisionRecord` (topology decision) |
-| **Writes (log)** | none directly — store emits `obligation_created`, `capsule_created`, `decision_record_created`; orchestrator emits `topology_selected` after `Plan` returns |
+| **Writes (store)** | `ExecutionCapsules` via `SaveCapsule`, `DecisionRecord` (topology decision) via `SaveDecision` |
+| **Writes (log)** | none directly — store emits `capsule_created`, `decision_record_created`; orchestrator emits `topology_selected` after `Plan` returns |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
-| **Must NOT call** | `store.SavePatch`, `store.SaveEvidence`, `store.SaveClaim`, `store.SaveVerifierResult`, `store.SaveBudgetRecord` |
+| **Must NOT call** | `store.SaveObligation`, `store.SavePatch`, `store.SaveEvidence`, `store.SaveClaim`, `store.SaveVerifierResult`, `store.SaveBudgetRecord` |
 | **Must NOT know about** | how capsules execute, verifier internals, context projection content |
 
 `TopologyClassifier` is an internal dependency of `ObligationPlanner`. Nothing
 outside `internal/planner` calls it. It is a pure function: receives obligations
 and fingerprints, returns topology + rationale. The planner wraps the decision in
-a `DecisionRecord` and persists it.
+a `DecisionRecord` and persists it. Initial obligations are created by
+`VerifierEngine.ProposeObligations`; follow-up obligations are created by the
+`Reconciler` — the planner only reads open obligations and creates capsules.
 
 MVP topologies: `single`, `implementer_reviewer`, `human_gated` only. Do not
 implement `parallel`, `test_first`, or `investigate_then_implement` until Phase 2.
@@ -141,13 +145,18 @@ Capsules are created with `State = CapsuleStatePending`. The CapsuleRunner owns
 the first transition: `pending → worktree_created`. This ensures the stored state
 never claims a worktree exists before the runner has allocated one.
 
+Each capsule must have `TopologyDecisionID` set to the `DecisionRecord.DecisionID`
+returned by `SaveDecision` before `SaveCapsule` is called. The ContextCompiler
+reads this field via `store.LoadDecision(capsule.TopologyDecisionID)` to populate
+`HumanSummaryProjection.Topology.Rationale`.
+
 ---
 
 ### context_compiler (`internal/projector`)
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), verified `ClaimArtifacts`, `EvidenceArtifacts`, `FailureFingerprints`, `ExecutionCapsule`, `StateSnapshot` |
+| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), verified `ClaimArtifacts` via `LoadVerifiedClaimsForFiles`, `EvidenceArtifacts` via `LoadEvidenceForObligation`, `FailureFingerprints` via `LoadFailuresForFiles`, `ExecutionCapsule` via `LoadCapsule`, `DecisionRecord` via `LoadDecision` (topology decision, via `capsule.TopologyDecisionID`), `StateSnapshot` via `LoadLatestSnapshot` |
 | **Writes (store)** | `ContextProjection` (executor), `HumanSummaryProjection` |
 | **Writes (log)** | none directly — store emits `context_projection_created` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/budget`, `internal/gate` |
@@ -160,6 +169,10 @@ not after. It is a pre-execution design document for the developer, not a post-h
 diff summary. The `executor_projection` is the agent's minimal working briefing.
 These two documents are always separate. Merging them wastes agent tokens or
 strips the developer of go/no-go information. orca.md §5.4.
+
+The topology rationale for `HumanSummaryProjection.Topology` is obtained by calling
+`store.LoadDecision(capsule.TopologyDecisionID)`. The planner sets this field when
+creating the capsule (see obligation_planner section above).
 
 ---
 
@@ -217,9 +230,9 @@ not create new evidence by running agents.
 
 | | |
 |---|---|
-| **Reads (store)** | `VerifierResult`, `PatchArtifact`, `Obligations`, `EvidenceArtifacts`, `FailureFingerprints` via `LoadFailuresForCapsule`, `BudgetRecords` |
-| **Writes (store)** | Obligation status, Patch status, new follow-up `Obligations`, `DecisionRecords`, `BudgetRecords`, `StateSnapshot` |
-| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `obligation_created` (follow-ups), `decision_record_created`, `merge_applied` |
+| **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence`, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule`, `BudgetRecords` via `LoadBudgetForGoal` |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status via `UpdateClaimStatus` (proposed → verified), new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot` |
+| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status updates; `obligation_created` (follow-ups), `decision_record_created`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
 | **Must NOT accept** | a patch without mapping evidence to every blocking obligation |
