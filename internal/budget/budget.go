@@ -9,14 +9,14 @@
 // Dependency contract:
 //
 //	Reads  (log):     all events for a goal; specifically capsule_created (for budget
-//	                  limits in the payload), capsule_started/completed (for spend),
+//	                  limits in the payload), budget_record_saved/updated (for spend),
 //	                  patch_accepted, evidence artifact events (for reuse counts)
 //	Writes (log):     none — budget enforcement decisions are recorded as
 //	                  DecisionRecords by the orchestrator, not by BudgetController
 //
 //	Must NOT import:  internal/planner, internal/runner, internal/verifier,
 //	                  internal/reconciler, internal/projector, internal/gate
-//	Must NOT read:    artifact_store — budget state is derived entirely from events.
+//	Must NOT read:    artifact_store — live budget state is derived entirely from events.
 //	                  Budget limits are read from the capsule_created event payload
 //	                  (which includes the full ExecutionCapsule.Budget).
 package budget
@@ -29,7 +29,7 @@ import (
 
 // BudgetController enforces capsule budget limits and computes ROI metrics.
 // Budget limits come from the capsule_created event payload; accumulated spend
-// comes from capsule_completed event payloads in the event log.
+// comes from budget_record_saved/updated event payloads in the event log.
 type BudgetController interface {
 	// CheckCapsuleBudget reads accumulated spend and budget limits from the
 	// event log for capsuleID and returns whether execution is permitted.

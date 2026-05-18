@@ -29,6 +29,7 @@ type ArtifactStore interface {
 
 	SaveGoal(ctx context.Context, g *schema.GoalIR) error
 	LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR, error)
+	// Callers must append goal_status_updated before calling this method.
 	UpdateGoalStatus(ctx context.Context, goalID string, status schema.GoalStatus) error
 
 	// LoadGoalCondition finds a single GoalCondition by its ID within the stored GoalIR.
@@ -45,12 +46,14 @@ type ArtifactStore interface {
 	LoadObligationsForCondition(ctx context.Context, conditionID string) ([]*schema.Obligation, error)
 	// UpdateObligationStatus transitions an obligation and records the evidence IDs
 	// that satisfy it (satisfiedBy may be nil for failed/waived transitions).
+	// Callers must append obligation_status_updated before calling this method.
 	UpdateObligationStatus(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy []string) error
 
 	// --- Execution Capsules ---
 
 	SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule) error
 	LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error)
+	// Callers must append capsule_started or capsule_completed before calling this method.
 	UpdateCapsuleState(ctx context.Context, capsuleID string, state schema.CapsuleState) error
 
 	// --- Context Projections ---
@@ -66,6 +69,7 @@ type ArtifactStore interface {
 
 	SavePatch(ctx context.Context, p *schema.PatchArtifact) error
 	LoadPatch(ctx context.Context, patchID string) (*schema.PatchArtifact, error)
+	// Callers must append patch_accepted or patch_rejected before calling this method.
 	UpdatePatchStatus(ctx context.Context, patchID string, status schema.PatchStatus) error
 	// LoadPatchesForCapsule returns all PatchArtifacts produced by capsuleID.
 	LoadPatchesForCapsule(ctx context.Context, capsuleID string) ([]*schema.PatchArtifact, error)
@@ -85,6 +89,7 @@ type ArtifactStore interface {
 	// intersect the given file list. Proposed and stale claims are excluded; the
 	// context_compiler injects only verified claims as facts.
 	LoadVerifiedClaimsForFiles(ctx context.Context, files []string) ([]*schema.ClaimArtifact, error)
+	// Callers must append claim_status_updated before calling this method.
 	UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error
 
 	// --- Failure Fingerprints ---

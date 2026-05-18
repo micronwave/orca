@@ -7,7 +7,12 @@
       "PowerShell(Get-ChildItem *)",
       "Bash(git rm *)",
       "Bash(git commit -m ' *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git push *)",
+      "PowerShell(go build *)",
+      "Bash(cmd *)",
+      "PowerShell(go *)",
+      "PowerShell(go test *)"
     ]
   }
 }

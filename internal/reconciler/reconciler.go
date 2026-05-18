@@ -20,7 +20,8 @@
 //	                  DecisionRecords via SaveDecision,
 //	                  BudgetRecords via UpdateBudgetRecord,
 //	                  StateSnapshot via SaveSnapshot
-//	Writes (log):     EventPatchAccepted, EventPatchRejected,
+//	Writes (log):     EventObligationStatusUpdated before UpdateObligationStatus,
+//	                  EventPatchAccepted or EventPatchRejected before UpdatePatchStatus,
 //	                  EventObligationCreated (for follow-up obligations),
 //	                  EventDecisionRecordCreated, EventMergeApplied
 //
@@ -48,13 +49,13 @@ import (
 type Reconciler interface {
 	// Reconcile processes the VerifierResult for patchID. It:
 	//   1. Reads the VerifierResult and maps evidence to obligations
-	//   2. Accepts or rejects each obligation based on verdict
-	//   3. Accepts or rejects the patch; updates PatchArtifact status
+	//   2. Emits obligation_status_updated, then accepts/rejects each obligation
+	//   3. Emits patch_accepted/rejected, then updates PatchArtifact status
 	//   4. Creates follow-up Obligations from blocking failures (if rejected)
 	//   5. Updates BudgetRecords with token spend per obligation
 	//   6. Persists a DecisionRecord explaining the outcome
 	//   7. Takes a StateSnapshot
-	//   8. Emits the appropriate event (patch_accepted or patch_rejected)
+	//   8. Emits merge_applied when merge policy permits a merge
 	//
 	// Returns ReconcileResult summarizing the decision. The orchestrator reads
 	// MergeReady and HumanGateRequired to decide whether to surface a merge gate,

@@ -9,10 +9,15 @@ import (
 type EventType string
 
 const (
-	EventGoalCreated               EventType = "goal_created"
-	EventObligationCreated         EventType = "obligation_created"
-	EventTopologySelected          EventType = "topology_selected"
-	EventContextProjectionCreated  EventType = "context_projection_created"
+	EventGoalCreated              EventType = "goal_created"
+	EventObligationCreated        EventType = "obligation_created"
+	EventTopologySelected         EventType = "topology_selected"
+	EventContextProjectionCreated EventType = "context_projection_created"
+	// EventCapsuleCreated is emitted by the ArtifactStore on SaveCapsule.
+	// It captures the full capsule contract at creation time (state=pending),
+	// which is needed for deterministic replay and for the BudgetController to
+	// read capsule budget limits from the event stream. orca.md §9, §12.
+	EventCapsuleCreated            EventType = "capsule_created"
 	EventCapsuleStarted            EventType = "capsule_started"
 	EventCapsuleCompleted          EventType = "capsule_completed"
 	EventPatchArtifactCreated      EventType = "patch_artifact_created"
@@ -21,6 +26,12 @@ const (
 	EventVerifierResultCreated     EventType = "verifier_result_created"
 	EventFailureFingerprintCreated EventType = "failure_fingerprint_created"
 	EventDecisionRecordCreated     EventType = "decision_record_created"
+	EventBudgetRecordSaved         EventType = "budget_record_saved"
+	EventBudgetRecordUpdated       EventType = "budget_record_updated"
+	EventStateSnapshotSaved        EventType = "state_snapshot_saved"
+	EventGoalStatusUpdated         EventType = "goal_status_updated"
+	EventObligationStatusUpdated   EventType = "obligation_status_updated"
+	EventClaimStatusUpdated        EventType = "claim_status_updated"
 	EventPatchAccepted             EventType = "patch_accepted"
 	EventPatchRejected             EventType = "patch_rejected"
 	EventMergeApplied              EventType = "merge_applied"
@@ -31,14 +42,50 @@ const (
 // The event log is the authoritative history; the artifact graph is the
 // materialized state derived from it. orca.md §9.
 type Event struct {
-	EventID     string          `json:"event_id"`
-	Type        EventType       `json:"type"`
-	GoalID      string          `json:"goal_id"`
+	EventID string    `json:"event_id"`
+	Type    EventType `json:"type"`
+	GoalID  string    `json:"goal_id"`
 	// ArtifactID is the ID of the primary artifact this event concerns, if any.
-	ArtifactID  string          `json:"artifact_id,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"`
 	// Payload holds the artifact or metadata specific to this event type.
-	Payload     json.RawMessage `json:"payload"`
-	CreatedAt   time.Time       `json:"created_at"`
-	// SequenceNum is the monotonically increasing event number within a goal.
-	SequenceNum int64           `json:"sequence_num"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt time.Time       `json:"created_at"`
+	// SequenceNum is the monotonically increasing sequence number within the log.
+	SequenceNum int64 `json:"sequence_num"`
+}
+
+// GoalStatusPayload is the event payload for goal_status_updated.
+// Callers that update GoalIR status directly must append this event before
+// calling ArtifactStore.UpdateGoalStatus so replay can reconstruct the change.
+type GoalStatusPayload struct {
+	GoalID string     `json:"goal_id"`
+	Status GoalStatus `json:"status"`
+}
+
+// ObligationStatusPayload is the event payload for obligation_status_updated.
+// SatisfiedBy is optional and mirrors ArtifactStore.UpdateObligationStatus.
+type ObligationStatusPayload struct {
+	ObligationID string           `json:"obligation_id"`
+	Status       ObligationStatus `json:"status"`
+	SatisfiedBy  []string         `json:"satisfied_by,omitempty"`
+}
+
+// ClaimStatusPayload is the event payload for claim_status_updated.
+type ClaimStatusPayload struct {
+	ClaimID string      `json:"claim_id"`
+	Status  ClaimStatus `json:"status"`
+}
+
+// CapsuleTransitionPayload is the required payload for capsule_started and
+// capsule_completed. The runner must append this event before updating the
+// capsule file.
+type CapsuleTransitionPayload struct {
+	CapsuleID string       `json:"capsule_id"`
+	State     CapsuleState `json:"state"`
+}
+
+// PatchStatusPayload is the required payload for patch_accepted and
+// patch_rejected. The event type determines the target status.
+type PatchStatusPayload struct {
+	PatchID string `json:"patch_id"`
 }

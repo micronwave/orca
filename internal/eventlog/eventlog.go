@@ -13,6 +13,7 @@ package eventlog
 
 import (
 	"context"
+	"io"
 
 	"github.com/micronwave/orca/internal/schema"
 )
@@ -20,9 +21,12 @@ import (
 // EventLog is the append-only authoritative event history.
 // All Append calls must be durable before returning; no write-behind buffering.
 type EventLog interface {
+	io.Closer
+
 	// Append adds one event to the log. The implementation assigns SequenceNum;
-	// callers must leave SequenceNum at zero.
-	Append(ctx context.Context, e schema.Event) error
+	// callers must leave SequenceNum at zero. The returned Event is the durable
+	// record, including the assigned EventID, SequenceNum, and CreatedAt.
+	Append(ctx context.Context, e schema.Event) (schema.Event, error)
 
 	// ReadAfter returns up to limit events with SequenceNum > afterSeq,
 	// ordered ascending. Pass afterSeq=0 to read from the beginning.

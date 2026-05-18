@@ -169,7 +169,7 @@ strips the developer of go/no-go information. orca.md §5.4.
 |---|---|
 | **Reads (store)** | `ExecutionCapsule`, `ContextProjection` |
 | **Writes (store)** | `PatchArtifact`, `EvidenceArtifacts`, `ClaimArtifacts`, `FailureFingerprints`, capsule state transitions |
-| **Writes (log)** | `capsule_started`, `capsule_completed`, `patch_artifact_created`, `evidence_artifact_created`, `claim_created`, `failure_fingerprint_created` |
+| **Writes (log)** | `capsule_started` / `capsule_completed` before matching capsule state updates; `patch_artifact_created`, `evidence_artifact_created`, `claim_created`, `failure_fingerprint_created` via store saves |
 | **Must NOT import** | `internal/planner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT call** | `store.SaveGoal`, `store.SaveObligation`, `store.SaveCapsule`, `store.SaveVerifierResult`, `store.SaveBudgetRecord` |
 | **Must NOT advance** | Obligation status — that belongs to the Reconciler |
@@ -219,7 +219,7 @@ not create new evidence by running agents.
 |---|---|
 | **Reads (store)** | `VerifierResult`, `PatchArtifact`, `Obligations`, `EvidenceArtifacts`, `FailureFingerprints` via `LoadFailuresForCapsule`, `BudgetRecords` |
 | **Writes (store)** | Obligation status, Patch status, new follow-up `Obligations`, `DecisionRecords`, `BudgetRecords`, `StateSnapshot` |
-| **Writes (log)** | `patch_accepted`, `patch_rejected`, `obligation_created` (follow-ups), `decision_record_created`, `merge_applied` |
+| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `obligation_created` (follow-ups), `decision_record_created`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
 | **Must NOT accept** | a patch without mapping evidence to every blocking obligation |
@@ -234,13 +234,13 @@ created here are the input to the next `ObligationPlanner.Plan` call.
 
 | | |
 |---|---|
-| **Reads (log)** | `capsule_created` (for budget limits in payload), `capsule_started`, `capsule_completed` (for spend), `patch_accepted`, evidence events (for reuse) |
+| **Reads (log)** | `capsule_created` (for budget limits in payload), `budget_record_saved`, `budget_record_updated` (for spend), `patch_accepted`, evidence events (for reuse) |
 | **Writes (log)** | none |
 | **Reads (store)** | **none** — budget state is derived entirely from events |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/gate` |
 
 Budget limits are read from the `capsule_created` event payload (which includes
-`ExecutionCapsule.Budget`). Accumulated spend is read from `capsule_completed`
+`ExecutionCapsule.Budget`). Accumulated spend is read from `budget_record_*`
 event payloads. `BudgetRecord` artifacts in the store are written by the
 Reconciler, not by BudgetController. BudgetController computes live metrics from
 the event stream and enforces limits before execution.

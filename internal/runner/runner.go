@@ -15,7 +15,8 @@
 //	                  ClaimArtifacts via SaveClaim,
 //	                  FailureFingerprints via SaveFailure,
 //	                  CapsuleState transitions via UpdateCapsuleState
-//	Writes (log):     EventCapsuleStarted, EventCapsuleCompleted,
+//	Writes (log):     EventCapsuleStarted, EventCapsuleCompleted
+//	                  before the matching UpdateCapsuleState call,
 //	                  EventPatchArtifactCreated, EventEvidenceArtifactCreated,
 //	                  EventClaimCreated, EventFailureFingerprintCreated
 //
