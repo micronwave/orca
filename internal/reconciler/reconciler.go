@@ -27,7 +27,12 @@
 //
 //	Must NOT import:  internal/runner, internal/verifier, internal/projector,
 //	                  internal/budget, internal/gate
-//	Must NOT call:    store.SaveCapsule, store.SaveEvidence, store.SaveClaim
+//	Must NOT call:    store.SaveGoal, store.UpdateGoalStatus,
+//	                  store.SaveCapsule, store.UpdateCapsuleState,
+//	                  store.SaveEvidence, store.SaveClaim,
+//	                  store.SaveVerifierResult,
+//	                  store.SaveProjection, store.SaveHumanSummaryProjection,
+//	                  store.SaveFailure
 //	Must NOT run:     verifier stages or agent commands
 //	Must NOT accept:  a patch without mapping evidence to every blocking obligation
 package reconciler
@@ -86,6 +91,9 @@ type ReconcileResult struct {
 	// DecisionID is the ID of the persisted DecisionRecord for this reconciliation.
 	DecisionID string
 
-	// BlockingReason is a human-readable explanation when MergeReady is false.
+	// BlockingReason is a human-readable explanation when PatchAccepted is false
+	// or MergeReady is false. Implementors must populate this field whenever
+	// PatchAccepted is false (evidence-bundle or obligation failure) and whenever
+	// MergeReady is false (open obligations, gate failure, scope violation, etc.).
 	BlockingReason string
 }

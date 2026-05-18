@@ -23,6 +23,8 @@
 package planner
 
 import (
+	"context"
+
 	"github.com/micronwave/orca/internal/schema"
 )
 
@@ -58,7 +60,7 @@ type ObligationPlanner interface {
 	// TopologyClassifier, creates one or more ExecutionCapsules, persists all
 	// artifacts, and returns a PlanResult. The orchestrator uses Topology and
 	// DecisionID to emit topology_selected to the event log.
-	Plan(goalID string) (PlanResult, error)
+	Plan(ctx context.Context, goalID string) (PlanResult, error)
 }
 
 // TopologyClassifier selects the execution topology for an obligation set.

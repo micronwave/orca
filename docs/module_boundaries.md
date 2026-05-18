@@ -287,7 +287,7 @@ Control loop (orca.md §6):
 ```
 1.  intent_compiler.Compile(rawIntent)
 2.  verifier_engine.ProposeObligations(goalID)               [orca.md §6 step 3]
-3.  obligation_planner.Plan(goalID)          → PlanResult{CapsuleIDs, Topology, DecisionID}
+3.  obligation_planner.Plan(ctx, goalID)   → PlanResult{CapsuleIDs, Topology, DecisionID}
     orchestrator emits topology_selected(PlanResult.Topology, PlanResult.DecisionID)
 4.  projector.CompileHumanSummary(capsuleID) → HumanSummaryProjection
 5.  gate.ReviewProjection(capsuleID, reviewWindow) → GateDecision  [if gate required]
@@ -306,6 +306,11 @@ Control loop (orca.md §6):
 **No component other than `cmd/orca` may import two or more of the listed
 internal packages.** If you find yourself importing `internal/verifier` inside
 `internal/reconciler`, something has crossed a boundary.
+
+**Exception — test packages:** `*_test.go` files and packages gated behind
+build tags (such as `integration`) are exempt from this rule. Integration tests
+must exercise the full stack and will necessarily import multiple internal
+packages. The rule targets production runtime code, not test code.
 
 ---
 

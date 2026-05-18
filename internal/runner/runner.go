@@ -15,8 +15,16 @@
 //	                  ClaimArtifacts via SaveClaim,
 //	                  FailureFingerprints via SaveFailure,
 //	                  CapsuleState transitions via UpdateCapsuleState
-//	Writes (log):     EventCapsuleStarted, EventCapsuleCompleted
-//	                  before the matching UpdateCapsuleState call,
+//	Writes (log):     EventCapsuleStarted once, before the first UpdateCapsuleState
+//	                  call (the transition to CapsuleStateWorktreeCreated).
+//	                  EventCapsuleCompleted once, before the final UpdateCapsuleState
+//	                  call (the transition to CapsuleStateCompleted or CapsuleStateFailed).
+//	                  Intermediate transitions (WorktreeCreated → WorkspaceAttached
+//	                  → SetupRun → AgentRunning) do NOT emit log events; state is
+//	                  written directly via UpdateCapsuleState. A crash during these
+//	                  intermediate states replays only to CapsuleStateWorktreeCreated —
+//	                  the last durably logged state. Crash-resumability for
+//	                  mid-execution intermediate states is out of scope for Phase 1.
 //	                  EventPatchArtifactCreated, EventEvidenceArtifactCreated,
 //	                  EventClaimCreated, EventFailureFingerprintCreated
 //
