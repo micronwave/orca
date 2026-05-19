@@ -158,6 +158,7 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 			RiskNotes:            append([]string(nil), output.Risks...),
 			Status:               schema.PatchCandidate,
 			ScopeViolations:      scopeViolations,
+			TokensUsed:           output.TokensUsed,
 		}
 		if patch.Summary == "" {
 			patch.Summary = "capsule output recorded by runner"

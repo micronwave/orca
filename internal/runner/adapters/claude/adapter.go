@@ -57,8 +57,14 @@ func (a *Adapter) Preflight(ctx context.Context, capsule *schema.ExecutionCapsul
 
 // claudeJSONResult is the outer envelope from `claude -p --output-format json`.
 type claudeJSONResult struct {
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
+	Result  string       `json:"result"`
+	IsError bool         `json:"is_error"`
+	Usage   *claudeUsage `json:"usage,omitempty"`
+}
+
+type claudeUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }
 
 func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
@@ -124,6 +130,9 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	}
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
 		return nil, runner.ErrInvalidSidecar
+	}
+	if outer.Usage != nil {
+		sidecar.TokensUsed = outer.Usage.InputTokens + outer.Usage.OutputTokens
 	}
 	return sidecar, nil
 }
