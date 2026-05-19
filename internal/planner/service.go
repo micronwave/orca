@@ -103,9 +103,10 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	}
 
 	return PlanResult{
-		CapsuleIDs: capsuleIDs,
-		Topology:   topology,
-		DecisionID: decision.DecisionID,
+		CapsuleIDs:        capsuleIDs,
+		Topology:          topology,
+		DecisionID:        decision.DecisionID,
+		MaxObligationRisk: maxRisk(obligations),
 	}, nil
 }
 
@@ -174,10 +175,11 @@ func (s *service) defaultSandbox(capsuleID string) schema.CapsuleSandbox {
 }
 
 func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string, error) {
+	summary := classifySummary(input)
 	for _, obligation := range input.Obligations {
 		if obligation.RiskLevel == schema.RiskHigh {
 			return schema.TopologyHumanGated,
-				fmt.Sprintf("obligation %s has risk level high -> human_gated", obligation.ObligationID),
+				fmt.Sprintf("%s; obligation %s has risk level high -> human_gated", summary, obligation.ObligationID),
 				nil
 		}
 	}
@@ -187,18 +189,27 @@ func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string
 			file = failure.AffectedFiles[0]
 		}
 		return schema.TopologyHumanGated,
-			fmt.Sprintf("failure fingerprint %s affects %s -> human_gated", failure.FailureID, file),
+			fmt.Sprintf("%s; failure fingerprint %s affects %s -> human_gated", summary, failure.FailureID, file),
 			nil
 	}
 
-	if len(input.Obligations) > 1 {
-		for _, obligation := range input.Obligations {
-			if obligation.RiskLevel == schema.RiskMedium {
-				return schema.TopologyImplementerReviewer,
-					fmt.Sprintf("obligation %s has risk level medium with %d obligations -> implementer_reviewer", obligation.ObligationID, len(input.Obligations)),
-					nil
-			}
+	for _, obligation := range input.Obligations {
+		if obligation.RiskLevel != schema.RiskMedium {
+			continue
 		}
+		if input.ExpectedFileOverlap {
+			return schema.TopologySingle,
+				fmt.Sprintf("%s; obligation %s is medium risk but expected file overlap is high, so coordination cost exceeds expected value -> single", summary, obligation.ObligationID),
+				nil
+		}
+		if input.BudgetRemaining > 0 && input.BudgetRemaining < 2*defaultReviewerCoordinationTokens {
+			return schema.TopologySingle,
+				fmt.Sprintf("%s; obligation %s is medium risk but budget_remaining=%d is below implementer_reviewer coordination cost -> single", summary, obligation.ObligationID, input.BudgetRemaining),
+				nil
+		}
+		return schema.TopologyImplementerReviewer,
+			fmt.Sprintf("%s; obligation %s has risk level medium -> implementer_reviewer", summary, obligation.ObligationID),
+			nil
 	}
 
 	allLow := len(input.Obligations) > 0
@@ -210,13 +221,39 @@ func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string
 	}
 	if allLow && len(input.Fingerprints) == 0 {
 		return schema.TopologySingle,
-			fmt.Sprintf("all %d obligations are low risk and no failure fingerprints exist -> single", len(input.Obligations)),
+			fmt.Sprintf("%s; all obligations are low risk and no failure fingerprints exist -> single", summary),
 			nil
 	}
 
 	return schema.TopologySingle,
-		fmt.Sprintf("obligation count is %d with no high-risk obligations and no failure fingerprints -> single", len(input.Obligations)),
+		fmt.Sprintf("%s; no high-risk obligations and no failure fingerprints -> single", summary),
 		nil
+}
+
+const defaultReviewerCoordinationTokens = 1000
+
+func classifySummary(input ClassifyInput) string {
+	return fmt.Sprintf(
+		"inputs: obligations=%d max_risk=%s expected_file_overlap=%t fingerprints=%d budget_remaining=%d",
+		len(input.Obligations),
+		maxRisk(input.Obligations),
+		input.ExpectedFileOverlap,
+		len(input.Fingerprints),
+		input.BudgetRemaining,
+	)
+}
+
+func maxRisk(obligations []*schema.Obligation) schema.RiskLevel {
+	max := schema.RiskLow
+	for _, obligation := range obligations {
+		switch obligation.RiskLevel {
+		case schema.RiskHigh:
+			return schema.RiskHigh
+		case schema.RiskMedium:
+			max = schema.RiskMedium
+		}
+	}
+	return max
 }
 
 var _ ObligationPlanner = (*service)(nil)

@@ -65,8 +65,9 @@ func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 		return ROI{}, err
 	}
 	roi := ROI{
-		TotalTokensSpent:     spend.TokensUsed,
-		TotalWallTimeSeconds: spend.WallTimeSeconds,
+		TotalTokensSpent:      spend.TokensUsed,
+		TotalWallTimeSeconds:  spend.WallTimeSeconds,
+		TotalCoordinationCost: spend.CoordinationCostUnits,
 	}
 	for _, record := range records {
 		roi.ObligationsDischarged += record.ObligationsDischarged
@@ -144,6 +145,11 @@ func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[s
 		spend.WallTimeSeconds += record.WallTimeSeconds
 		spend.ToolCalls += record.ToolCalls
 		spend.Retries += record.Retries
+		spend.CoordinationCostUnits += coordinationCost(record)
 	}
 	return spend, records, nil
+}
+
+func coordinationCost(record schema.BudgetRecord) int {
+	return record.Retries + record.DuplicatedFileReads + record.OverlappingEdits + record.HumanInterventions
 }

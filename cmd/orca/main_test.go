@@ -20,10 +20,16 @@ func TestRunLoadsConfigAndInitializesEventLog(t *testing.T) {
 	orcaDir := t.TempDir()
 	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
 
-	err := run([]string{"--goal", "test goal", "--orca-dir", orcaDir})
-	if err == nil {
-		t.Fatalf("run error = nil, want scaffold runtime error")
+	// openRuntime loads the config and creates the event log; we only want
+	// to verify that setup (not the full control loop, which would block on
+	// the interactive gate for a real goal with medium-risk obligations).
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
 	}
+	defer closeFn()
+	_ = rt
+
 	if _, statErr := os.Stat(filepath.Join(orcaDir, "events.log")); statErr != nil {
 		t.Fatalf("events.log was not created: %v", statErr)
 	}
@@ -144,6 +150,7 @@ func TestStatusPrintsActiveGoalAndRuntimeState(t *testing.T) {
 		"Blocking human decisions:",
 		"- none",
 		"Budget totals:",
+		"coordination_cost=",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status output missing %q:\n%s", want, got)
@@ -233,6 +240,21 @@ func TestShouldReviewProjectionForIRTopology(t *testing.T) {
 	if shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskLow) {
 		t.Fatal("IR + low should not require review")
 	}
+}
+
+// TestShouldReviewProjection_IRAlwaysGatesRegardlessOfGoalRisk verifies that the
+// gate fires for implementer_reviewer topology even when goal.RiskLevel is low.
+// The obligation risk (not goal risk) determines whether IR was selected; passing
+// goal.RiskLevel to shouldReviewProjection could silently skip the required gate.
+// Callers must pass plan.MaxObligationRisk, not goal.RiskLevel.
+func TestShouldReviewProjection_IRAlwaysGatesRegardlessOfGoalRisk(t *testing.T) {
+	// The classifier only selects IR for medium/high obligation risk. If goal risk
+	// is low but topology is IR, shouldReviewProjection(IR, medium) must be true.
+	if !shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
+		t.Fatal("IR + medium obligation risk must require gate")
+	}
+	// Reviewer capsules are always excluded from the gate — checked by the caller
+	// using capsule.Role != schema.RoleReviewer before calling shouldReviewProjection.
 }
 
 func TestReviewWindowForGateRules(t *testing.T) {

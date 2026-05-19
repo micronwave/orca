@@ -65,6 +65,9 @@ type Spend struct {
 	WallTimeSeconds float64
 	ToolCalls       int
 	Retries         int
+	// CoordinationCostUnits captures non-token coordination overhead from
+	// retries, duplicated file reads, overlapping edits, and human interventions.
+	CoordinationCostUnits int
 }
 
 // ROI holds the verified-value metrics for a completed or in-progress goal.
@@ -76,6 +79,7 @@ type ROI struct {
 
 	TotalTokensSpent        int
 	TotalWallTimeSeconds    float64
+	TotalCoordinationCost   int
 	ObligationsDischarged   int
 	PatchesAccepted         int
 	PatchesRejected         int

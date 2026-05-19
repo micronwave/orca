@@ -143,6 +143,10 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 		GoalID:                  "G-1",
 		CapsuleID:               "CAP-1",
 		TokensSpent:             100,
+		Retries:                 1,
+		DuplicatedFileReads:     2,
+		OverlappingEdits:        3,
+		HumanInterventions:      4,
 		ObligationsDischarged:   1,
 		PatchesAccepted:         1,
 		EvidenceArtifactsReused: 1,
@@ -154,6 +158,7 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	}
 	record.TokensSpent = 200
 	record.ObligationsDischarged = 2
+	record.OverlappingEdits = 5
 	record.UpdatedAt = time.Now().UTC()
 	if err := e.st.UpdateBudgetRecord(e.ctx, record); err != nil {
 		t.Fatalf("UpdateBudgetRecord: %v", err)
@@ -165,6 +170,9 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	}
 	if roi.TotalTokensSpent != 200 {
 		t.Fatalf("TotalTokensSpent = %d, want latest record value 200", roi.TotalTokensSpent)
+	}
+	if roi.TotalCoordinationCost != 12 {
+		t.Fatalf("TotalCoordinationCost = %d, want 12", roi.TotalCoordinationCost)
 	}
 	if roi.VerifiedValuePer1KTokens <= 0 {
 		t.Fatalf("VerifiedValuePer1KTokens = %f, want non-zero", roi.VerifiedValuePer1KTokens)

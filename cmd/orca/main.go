@@ -241,11 +241,20 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		var lastPatchID string
 		var lastResult reconciler.ReconcileResult
 		for _, capsuleID := range plan.CapsuleIDs {
+			capsule, err := rt.store.LoadCapsule(ctx, capsuleID)
+			if err != nil {
+				return fmt.Errorf("orca: load capsule %s: %w", capsuleID, err)
+			}
 			if _, err := rt.projector.CompileHumanSummary(ctx, capsuleID); err != nil {
 				return err
 			}
-			if shouldReviewProjection(plan.Topology, goal.RiskLevel) {
-				reviewWindow := reviewWindowFor(plan.Topology, goal.RiskLevel, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
+			// Gate only executor capsules: spec says "ReviewProjection blocks before
+			// implementer capsule" (module_boundaries.md). Reviewer capsules do not
+			// require a separate pre-execution gate. Also use plan.MaxObligationRisk
+			// rather than goal.RiskLevel: goal risk and obligation risk are set by
+			// different components and may disagree.
+			if capsule.Role != schema.RoleReviewer && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
+				reviewWindow := reviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
 					return err
@@ -460,9 +469,10 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 	}
 	fmt.Fprintln(out, "Budget spent per obligation:")
 	writeBudgetByObligation(out, budgetRecords)
-	fmt.Fprintf(out, "Budget totals: tokens=%d wall_time_seconds=%.2f value_per_1k_tokens=%.2f\n",
+	fmt.Fprintf(out, "Budget totals: tokens=%d wall_time_seconds=%.2f coordination_cost=%d value_per_1k_tokens=%.2f\n",
 		roi.TotalTokensSpent,
 		roi.TotalWallTimeSeconds,
+		roi.TotalCoordinationCost,
 		roi.VerifiedValuePer1KTokens,
 	)
 	return nil
@@ -603,16 +613,20 @@ func (rt *runtime) blockingHumanDecisions(
 	latest *schema.VerifierResult,
 	openObligations []*schema.Obligation,
 ) ([]string, error) {
+	maxRisk := maxObligationRisk(openObligations)
 	var decisions []string
 	for _, capsule := range capsules {
 		if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
+			continue
+		}
+		if capsule.Role == schema.RoleReviewer {
 			continue
 		}
 		decision, err := rt.store.LoadDecision(ctx, capsule.TopologyDecisionID)
 		if err != nil {
 			return nil, fmt.Errorf("orca status: load topology decision %s: %w", capsule.TopologyDecisionID, err)
 		}
-		if shouldReviewProjection(schema.Topology(decision.Decision), goal.RiskLevel) {
+		if shouldReviewProjection(schema.Topology(decision.Decision), maxRisk) {
 			decided, err := rt.hasGateDecision(ctx, goal.GoalID, "projection_review", capsule.CapsuleID)
 			if err != nil {
 				return nil, err
@@ -749,6 +763,19 @@ func slicesContains(values []string, want string) bool {
 	return false
 }
 
+func maxObligationRisk(obligations []*schema.Obligation) schema.RiskLevel {
+	max := schema.RiskLow
+	for _, o := range obligations {
+		switch o.RiskLevel {
+		case schema.RiskHigh:
+			return schema.RiskHigh
+		case schema.RiskMedium:
+			max = schema.RiskMedium
+		}
+	}
+	return max
+}
+
 func writeBudgetByObligation(out io.Writer, records []*schema.BudgetRecord) {
 	byObligation := make(map[string]schema.BudgetRecord)
 	for _, record := range records {
@@ -761,6 +788,9 @@ func writeBudgetByObligation(out io.Writer, records []*schema.BudgetRecord) {
 		current.WallTimeSeconds += record.WallTimeSeconds
 		current.ToolCalls += record.ToolCalls
 		current.Retries += record.Retries
+		current.DuplicatedFileReads += record.DuplicatedFileReads
+		current.OverlappingEdits += record.OverlappingEdits
+		current.HumanInterventions += record.HumanInterventions
 		current.ObligationsDischarged += record.ObligationsDischarged
 		current.PatchesAccepted += record.PatchesAccepted
 		current.PatchesRejected += record.PatchesRejected
@@ -777,12 +807,14 @@ func writeBudgetByObligation(out io.Writer, records []*schema.BudgetRecord) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		record := byObligation[id]
-		fmt.Fprintf(out, "- %s tokens=%d wall_time_seconds=%.2f tool_calls=%d retries=%d discharged=%d accepted=%d rejected=%d\n",
+		coordinationCost := record.Retries + record.DuplicatedFileReads + record.OverlappingEdits + record.HumanInterventions
+		fmt.Fprintf(out, "- %s tokens=%d wall_time_seconds=%.2f tool_calls=%d retries=%d coordination_cost=%d discharged=%d accepted=%d rejected=%d\n",
 			id,
 			record.TokensSpent,
 			record.WallTimeSeconds,
 			record.ToolCalls,
 			record.Retries,
+			coordinationCost,
 			record.ObligationsDischarged,
 			record.PatchesAccepted,
 			record.PatchesRejected,

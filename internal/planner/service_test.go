@@ -78,6 +78,9 @@ func TestPlan_setsDeterministicWorktreePathAndEmitsSingleCapsuleEvent(t *testing
 	if result.DecisionID == "" {
 		t.Fatal("DecisionID is empty")
 	}
+	if result.MaxObligationRisk != schema.RiskLow {
+		t.Fatalf("MaxObligationRisk = %s, want %s", result.MaxObligationRisk, schema.RiskLow)
+	}
 
 	capsuleID := result.CapsuleIDs[0]
 	capsule, err := st.LoadCapsule(ctx, capsuleID)
@@ -146,21 +149,42 @@ func TestTopologyClassifier_rules(t *testing.T) {
 			rationaleIn: "FAIL-1",
 		},
 		{
-			name: "multi medium risk uses implementer reviewer",
+			name: "medium risk uses implementer reviewer",
 			input: ClassifyInput{
 				Obligations: []*schema.Obligation{
 					{ObligationID: "OB-3", RiskLevel: schema.RiskMedium},
-					{ObligationID: "OB-4", RiskLevel: schema.RiskLow},
 				},
 			},
 			want:        schema.TopologyImplementerReviewer,
 			rationaleIn: "OB-3",
 		},
 		{
+			name: "medium risk with expected file overlap collapses to single",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-4", RiskLevel: schema.RiskMedium},
+				},
+				ExpectedFileOverlap: true,
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "coordination cost exceeds expected value",
+		},
+		{
+			name: "medium risk with insufficient budget collapses to single",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-5", RiskLevel: schema.RiskMedium},
+				},
+				BudgetRemaining: 100,
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "coordination cost",
+		},
+		{
 			name: "all low and no failures uses single",
 			input: ClassifyInput{
 				Obligations: []*schema.Obligation{
-					{ObligationID: "OB-5", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-6", RiskLevel: schema.RiskLow},
 				},
 			},
 			want:        schema.TopologySingle,
@@ -181,6 +205,11 @@ func TestTopologyClassifier_rules(t *testing.T) {
 			}
 			if strings.TrimSpace(rationale) == "" {
 				t.Fatal("Classify rationale is empty")
+			}
+			for _, required := range []string{"obligations=", "max_risk=", "expected_file_overlap=", "fingerprints=", "budget_remaining="} {
+				if !strings.Contains(rationale, required) {
+					t.Fatalf("Classify rationale = %q, want classifier input %q", rationale, required)
+				}
 			}
 			if !strings.Contains(rationale, tt.rationaleIn) {
 				t.Fatalf("Classify rationale = %q, want substring %q", rationale, tt.rationaleIn)
@@ -221,7 +250,7 @@ func TestPlan_implementerReviewerCreatesTwoCapsules(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveGoal: %v", err)
 	}
-	for _, obligationID := range []string{"OB-plan-ir-1", "OB-plan-ir-2"} {
+	for _, obligationID := range []string{"OB-plan-ir-1"} {
 		if err := st.SaveObligation(ctx, &schema.Obligation{
 			ObligationID:     obligationID,
 			GoalConditionID:  conditionID,
@@ -252,6 +281,9 @@ func TestPlan_implementerReviewerCreatesTwoCapsules(t *testing.T) {
 	}
 	if len(result.CapsuleIDs) != 2 {
 		t.Fatalf("CapsuleIDs len = %d, want 2", len(result.CapsuleIDs))
+	}
+	if result.MaxObligationRisk != schema.RiskMedium {
+		t.Fatalf("MaxObligationRisk = %s, want %s", result.MaxObligationRisk, schema.RiskMedium)
 	}
 	roles := make(map[schema.CapsuleRole]bool)
 	for _, capsuleID := range result.CapsuleIDs {

@@ -60,6 +60,12 @@ type PlanResult struct {
 	// DecisionID is the ID of the persisted DecisionRecord that records the
 	// topology selection rationale.
 	DecisionID string
+
+	// MaxObligationRisk is the highest risk level across the obligations in this
+	// plan cycle. The orchestrator uses this — not goal.RiskLevel — to determine
+	// whether a pre-execution projection gate is required, since goal risk and
+	// obligation risk are set independently by the intent compiler and verifier.
+	MaxObligationRisk schema.RiskLevel
 }
 
 type ObligationPlanner interface {
