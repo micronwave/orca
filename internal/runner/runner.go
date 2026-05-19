@@ -68,9 +68,9 @@ var ErrInvalidSidecar = errors.New("agent sidecar output failed schema validatio
 // a FailureFingerprint is persisted before returning.
 type CapsuleRunner interface {
 	// Run executes capsuleID end-to-end and returns the IDs of all artifacts
-	// produced. The PatchID field is empty only when the capsule fails before
-	// producing any patch. EvidenceIDs, ClaimIDs, and FailureIDs may all be
-	// non-empty on a partial run.
+	// produced. Reviewer and tester capsules may return evidence/claims without a
+	// PatchID when they make no file changes. EvidenceIDs, ClaimIDs, and FailureIDs
+	// may all be non-empty on a partial run.
 	Run(ctx context.Context, capsuleID string) (RunResult, error)
 }
 
@@ -79,7 +79,8 @@ type CapsuleRunner interface {
 type RunResult struct {
 	CapsuleID string
 
-	// PatchID is the ID of the candidate PatchArtifact. Empty on total failure.
+	// PatchID is the ID of the candidate PatchArtifact. Empty on total failure,
+	// or on evidence-only reviewer/tester runs that make no file changes.
 	PatchID string
 
 	EvidenceIDs []string

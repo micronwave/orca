@@ -27,6 +27,18 @@ func New(st store.ArtifactStore, cfg config.VerifierConfig) ContextCompiler {
 }
 
 func (s *service) CompileExecutor(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleExecutor)
+}
+
+func (s *service) CompileReviewer(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleReviewer)
+}
+
+func (s *service) CompileTester(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleTester)
+}
+
+func (s *service) compileAgentProjection(ctx context.Context, capsuleID string, role schema.ProjectionRole) (*schema.ContextProjection, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("projector: store is required")
 	}
@@ -42,19 +54,26 @@ func (s *service) CompileExecutor(ctx context.Context, capsuleID string) (*schem
 	if err != nil {
 		return nil, err
 	}
+	patches, patchIDs, err := s.loadPatchesByObligation(ctx, obligations)
+	if err != nil {
+		return nil, err
+	}
 	failures, failureIDs, err := s.loadFailures(ctx, capsule.AllowedPaths)
 	if err != nil {
 		return nil, err
 	}
 	sourceArtifactIDs = append(sourceArtifactIDs, claimIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, evidenceIDs...)
+	sourceArtifactIDs = append(sourceArtifactIDs, patchIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, failureIDs...)
 
 	sections := []projectionSection{
+		{key: "role_contract", text: roleContract(role)},
 		{key: "goal_conditions", text: "goal conditions: " + summarizeGoalConditions(goal, obligations)},
 		{key: "obligations", text: "obligations: " + summarizeObligations(obligations)},
 		{key: "scope_constraints", text: "scope: " + summarizeScope(capsule)},
 		{key: "required_outputs", text: "required outputs: " + summarizeRequiredOutputs(capsule.RequiredOutputs)},
+		{key: "candidate_patches", text: summarizeCandidatePatches(role, patches)},
 		{key: "prior_evidence", text: "prior evidence: " + summarizeEvidence(evidenceByObligation), removable: true},
 		{key: "verified_claims", text: "verified claims: " + summarizeClaims(claims), removable: true},
 		{key: "failure_fingerprints", text: "failure fingerprints: " + summarizeFailures(failures), removable: true},
@@ -69,7 +88,7 @@ func (s *service) CompileExecutor(ctx context.Context, capsuleID string) (*schem
 
 	projection := &schema.ContextProjection{
 		ContextProjectionID: idgen.New("CTX"),
-		Role:                schema.ProjectionRoleExecutor,
+		Role:                role,
 		SourceArtifactIDs:   sourceArtifactIDs,
 		IncludedSections:    included,
 		OmittedSections:     omitted,
@@ -78,7 +97,7 @@ func (s *service) CompileExecutor(ctx context.Context, capsuleID string) (*schem
 		CreatedAt:           time.Now().UTC(),
 	}
 	if err := s.store.SaveProjection(ctx, projection); err != nil {
-		return nil, fmt.Errorf("projector: save executor projection %s: %w", projection.ContextProjectionID, err)
+		return nil, fmt.Errorf("projector: save %s projection %s: %w", role, projection.ContextProjectionID, err)
 	}
 	return projection, nil
 }
@@ -273,6 +292,17 @@ func sectionTexts(sections []projectionSection) []string {
 	return out
 }
 
+func roleContract(role schema.ProjectionRole) string {
+	switch role {
+	case schema.ProjectionRoleReviewer:
+		return "role contract: review the implementer output against obligations, scope, risks, and evidence quality; produce review evidence and claims, not implementation changes"
+	case schema.ProjectionRoleTester:
+		return "role contract: test or challenge the patch against obligations and verifier gates; produce test evidence, risk notes, and follow-up claims, not implementation changes"
+	default:
+		return "role contract: implement the assigned obligations within allowed scope and produce a proof-carrying patch"
+	}
+}
+
 func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
 	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
 	if err == nil {
@@ -344,6 +374,32 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 		parts = append(parts, fmt.Sprintf("%s=%d artifacts", obligationID, len(evidence)))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func summarizePatches(patches []*schema.PatchArtifact) string {
+	if len(patches) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(patches))
+	for _, patch := range patches {
+		summary := strings.TrimSpace(patch.Summary)
+		if summary == "" {
+			summary = "(no summary)"
+		}
+		diffPath := strings.TrimSpace(patch.DiffPath)
+		if diffPath == "" {
+			diffPath = "(no diff path)"
+		}
+		parts = append(parts, fmt.Sprintf("%s status=%s diff=%s summary=%s", patch.PatchID, patch.Status, diffPath, summary))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func summarizeCandidatePatches(role schema.ProjectionRole, patches []*schema.PatchArtifact) string {
+	if role != schema.ProjectionRoleReviewer && role != schema.ProjectionRoleTester {
+		return ""
+	}
+	return "candidate patches: " + summarizePatches(patches)
 }
 
 func summarizeClaims(claims []*schema.ClaimArtifact) string {
@@ -518,6 +574,30 @@ func (s *service) loadEvidenceByObligation(
 		}
 	}
 	return out, sourceIDs, nil
+}
+
+func (s *service) loadPatchesByObligation(
+	ctx context.Context,
+	obligations []*schema.Obligation,
+) ([]*schema.PatchArtifact, []string, error) {
+	seenIDs := make(map[string]bool)
+	patches := make([]*schema.PatchArtifact, 0)
+	sourceIDs := make([]string, 0)
+	for _, obligation := range obligations {
+		items, err := s.store.LoadPatchesForObligation(ctx, obligation.ObligationID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("projector: load patches for obligation %s: %w", obligation.ObligationID, err)
+		}
+		for _, patch := range items {
+			if seenIDs[patch.PatchID] {
+				continue
+			}
+			seenIDs[patch.PatchID] = true
+			patches = append(patches, patch)
+			sourceIDs = append(sourceIDs, patch.PatchID)
+		}
+	}
+	return patches, sourceIDs, nil
 }
 
 func (s *service) loadVerifiedClaims(ctx context.Context, files []string) ([]*schema.ClaimArtifact, []string, error) {

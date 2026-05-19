@@ -72,7 +72,7 @@ type ArtifactStore interface {
 
 	// --- Context Projections ---
 
-	// SaveProjection stores a base ContextProjection (used for executor_projection).
+	// SaveProjection stores a base agent ContextProjection (executor, reviewer, tester).
 	SaveProjection(ctx context.Context, p *schema.ContextProjection) error
 	// SaveHumanSummaryProjection stores a HumanSummaryProjection.
 	SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error
@@ -88,6 +88,8 @@ type ArtifactStore interface {
 	UpdatePatchStatus(ctx context.Context, patchID string, status schema.PatchStatus) error
 	// LoadPatchesForCapsule returns all PatchArtifacts produced by capsuleID.
 	LoadPatchesForCapsule(ctx context.Context, capsuleID string) ([]*schema.PatchArtifact, error)
+	// LoadPatchesForObligation returns candidate patches claiming obligationID.
+	LoadPatchesForObligation(ctx context.Context, obligationID string) ([]*schema.PatchArtifact, error)
 
 	// --- Evidence Artifacts ---
 

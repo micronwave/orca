@@ -90,7 +90,7 @@ func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
 		return s.writeFile(s.artifactPath(dirCapsules, v.CapsuleID), &v)
 
 	case schema.EventContextProjectionCreated:
-		// Distinguish executor vs human_summary by the Role field.
+		// Distinguish projection storage by the Role field.
 		var base schema.ContextProjection
 		if err := json.Unmarshal(e.Payload, &base); err != nil {
 			return fmt.Errorf("unmarshal ContextProjection base: %w", err)
@@ -105,10 +105,11 @@ func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
 			}
 			return s.writeFile(s.artifactPath(dirProjHuman, v.ContextProjectionID), &v)
 		}
-		if base.Role != schema.ProjectionRoleExecutor {
-			return fmt.Errorf("invalid context_projection_created payload: role %q is not supported", base.Role)
+		dir, err := projectionDir(base.Role)
+		if err != nil {
+			return fmt.Errorf("invalid context_projection_created payload: %w", err)
 		}
-		return s.writeFile(s.artifactPath(dirProjExecutor, base.ContextProjectionID), &base)
+		return s.writeFile(s.artifactPath(dir, base.ContextProjectionID), &base)
 
 	case schema.EventPatchArtifactCreated:
 		var v schema.PatchArtifact
@@ -334,7 +335,7 @@ func (s *FileStore) updatePatchStatusNoLock(patchID string, status schema.PatchS
 func ReplayDir(root string) []string {
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
-		dirProjExecutor, dirProjHuman,
+		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
 		dirPatches, dirEvidence, dirClaims, dirBudgets,
 		dirFailures, dirDecisions, dirVerifierResults,
 	}

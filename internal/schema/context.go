@@ -2,14 +2,14 @@ package schema
 
 import "time"
 
-// ProjectionRole distinguishes the two MVP context projection types.
-// planner, reviewer, tester, verifier, reconciler are deferred to Phase 2.
-// orca.md §5.4.
+// ProjectionRole distinguishes context projection types. orca.md §5.4.
 type ProjectionRole string
 
 const (
 	ProjectionRoleExecutor     ProjectionRole = "executor"
 	ProjectionRoleHumanSummary ProjectionRole = "human_summary"
+	ProjectionRoleReviewer     ProjectionRole = "reviewer"
+	ProjectionRoleTester       ProjectionRole = "tester"
 )
 
 // ContextProjection is the base set of fields shared by all projection types.

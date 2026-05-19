@@ -53,6 +53,8 @@ func TestRunInitCreatesOperationalLayoutAndConfig(t *testing.T) {
 		"artifacts/claims",
 		"artifacts/projections/executor",
 		"artifacts/projections/human_summary",
+		"artifacts/projections/reviewer",
+		"artifacts/projections/tester",
 		"artifacts/failures",
 		"artifacts/decisions",
 		"artifacts/budgets",

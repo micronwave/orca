@@ -135,7 +135,8 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	if len(output.FilesChanged) > 0 {
 		changedFiles = append([]string(nil), output.FilesChanged...)
 	}
-	if len(changedFiles) == 0 {
+	evidenceOnly := capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester
+	if len(changedFiles) == 0 && !evidenceOnly {
 		return result, fmt.Errorf("runner: capsule %s produced no changed files", capsule.CapsuleID)
 	}
 
@@ -145,25 +146,27 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	}
 	scopeViolations := findScopeViolations(changedFiles, capsule.AllowedPaths, capsule.ForbiddenPaths)
 
-	patch := &schema.PatchArtifact{
-		PatchID:              idgen.New("PATCH"),
-		CapsuleID:            capsule.CapsuleID,
-		BaseCommit:           strings.TrimSpace(currentCommit(runCtx, capsule.Sandbox.WorktreePath)),
-		ChangedFiles:         changedFiles,
-		DiffPath:             diffPath,
-		Summary:              strings.TrimSpace(output.Summary),
-		ObligationIDsClaimed: obligationsClaimed,
-		RiskNotes:            append([]string(nil), output.Risks...),
-		Status:               schema.PatchCandidate,
-		ScopeViolations:      scopeViolations,
+	if len(changedFiles) > 0 || !evidenceOnly {
+		patch := &schema.PatchArtifact{
+			PatchID:              idgen.New("PATCH"),
+			CapsuleID:            capsule.CapsuleID,
+			BaseCommit:           strings.TrimSpace(currentCommit(runCtx, capsule.Sandbox.WorktreePath)),
+			ChangedFiles:         changedFiles,
+			DiffPath:             diffPath,
+			Summary:              strings.TrimSpace(output.Summary),
+			ObligationIDsClaimed: obligationsClaimed,
+			RiskNotes:            append([]string(nil), output.Risks...),
+			Status:               schema.PatchCandidate,
+			ScopeViolations:      scopeViolations,
+		}
+		if patch.Summary == "" {
+			patch.Summary = "capsule output recorded by runner"
+		}
+		if err = s.store.SavePatch(ctx, patch); err != nil {
+			return result, fmt.Errorf("runner: save patch %s: %w", patch.PatchID, err)
+		}
+		result.PatchID = patch.PatchID
 	}
-	if patch.Summary == "" {
-		patch.Summary = "capsule output recorded by runner"
-	}
-	if err = s.store.SavePatch(ctx, patch); err != nil {
-		return result, fmt.Errorf("runner: save patch %s: %w", patch.PatchID, err)
-	}
-	result.PatchID = patch.PatchID
 
 	evidenceIDs, err := s.saveEvidence(ctx, capsule, output, obligationsClaimed)
 	if err != nil {

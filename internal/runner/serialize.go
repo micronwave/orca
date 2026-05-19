@@ -7,17 +7,18 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 )
 
-// SerializeExecutorProjection converts the executor projection into a markdown
-// briefing consumable by CLI adapters.
+// SerializeExecutorProjection converts an agent projection into a markdown
+// briefing consumable by CLI adapters. The historical function name is kept for
+// adapter compatibility; Phase 2.2 allows executor, reviewer, and tester roles.
 func SerializeExecutorProjection(p *schema.ContextProjection) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("runner: projection is required")
 	}
-	if p.Role != schema.ProjectionRoleExecutor {
-		return "", fmt.Errorf("runner: expected projection role %q, got %q", schema.ProjectionRoleExecutor, p.Role)
+	if !isAgentProjectionRole(p.Role) {
+		return "", fmt.Errorf("runner: expected agent projection role, got %q", p.Role)
 	}
 	var b strings.Builder
-	b.WriteString("# Orca Executor Briefing\n\n")
+	fmt.Fprintf(&b, "# Orca %s Briefing\n\n", projectionRoleTitle(p.Role))
 
 	b.WriteString("## Projection\n")
 	fmt.Fprintf(&b, "- Context Projection ID: `%s`\n", p.ContextProjectionID)
@@ -42,6 +43,26 @@ func SerializeExecutorProjection(p *schema.ContextProjection) (string, error) {
 	b.WriteString("  - follow_up_needed\n")
 	b.WriteString("  - evidence_paths\n")
 	return b.String(), nil
+}
+
+func isAgentProjectionRole(role schema.ProjectionRole) bool {
+	switch role {
+	case schema.ProjectionRoleExecutor, schema.ProjectionRoleReviewer, schema.ProjectionRoleTester:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectionRoleTitle(role schema.ProjectionRole) string {
+	switch role {
+	case schema.ProjectionRoleReviewer:
+		return "Reviewer"
+	case schema.ProjectionRoleTester:
+		return "Tester"
+	default:
+		return "Executor"
+	}
 }
 
 func writeSectionList(b *strings.Builder, title string, values []string, empty string) {

@@ -42,8 +42,8 @@ import (
 )
 
 // ContextCompiler compiles role-specific context projections from the artifact
-// graph for a given capsule. The two MVP projection types serve opposite audiences
-// and must never be the same document. orca.md §5.4.
+// graph for a given capsule. Human summaries remain separate from agent
+// projections. orca.md §5.4.
 type ContextCompiler interface {
 	// CompileExecutor builds the agent's working briefing for capsuleID.
 	//
@@ -62,6 +62,17 @@ type ContextCompiler interface {
 	// CompileExecutor persists the projection via SaveProjection and returns
 	// the stored record.
 	CompileExecutor(ctx context.Context, capsuleID string) (*schema.ContextProjection, error)
+
+	// CompileReviewer builds a reviewer-specific agent briefing for capsuleID.
+	// It focuses on the same obligation/evidence/scope context as the executor
+	// projection but asks for review evidence and claims rather than implementation
+	// changes. Phase 2.2 authorizes this role-specific projection.
+	CompileReviewer(ctx context.Context, capsuleID string) (*schema.ContextProjection, error)
+
+	// CompileTester builds a tester-specific agent briefing for capsuleID. It is
+	// available for Phase 2.2's tester_projection type and is intended for
+	// evidence-quality/test-gap work, not implementation changes.
+	CompileTester(ctx context.Context, capsuleID string) (*schema.ContextProjection, error)
 
 	// CompileHumanSummary builds the developer-facing implementation briefing
 	// for capsuleID. It is emitted before the capsule runner launches the agent,

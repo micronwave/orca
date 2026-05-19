@@ -52,6 +52,8 @@ const (
 	dirClaims          = "artifacts/claims"
 	dirProjExecutor    = "artifacts/projections/executor"
 	dirProjHuman       = "artifacts/projections/human_summary"
+	dirProjReviewer    = "artifacts/projections/reviewer"
+	dirProjTester      = "artifacts/projections/tester"
 	dirFailures        = "artifacts/failures"
 	dirDecisions       = "artifacts/decisions"
 	dirBudgets         = "artifacts/budgets"
@@ -81,7 +83,7 @@ func New(root string, log eventlog.EventLog) (*FileStore, error) {
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirPatches, dirEvidence, dirClaims,
-		dirProjExecutor, dirProjHuman,
+		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
 		dirFailures, dirDecisions, dirBudgets, dirVerifierResults,
 	}
 	for _, d := range dirs {
@@ -212,7 +214,13 @@ func (s *FileStore) ensureProjectionAbsent(id string) error {
 	if err := ensureArtifactAbsent("context projection", s.artifactPath(dirProjExecutor, id), id); err != nil {
 		return err
 	}
-	return ensureArtifactAbsent("context projection", s.artifactPath(dirProjHuman, id), id)
+	if err := ensureArtifactAbsent("context projection", s.artifactPath(dirProjHuman, id), id); err != nil {
+		return err
+	}
+	if err := ensureArtifactAbsent("context projection", s.artifactPath(dirProjReviewer, id), id); err != nil {
+		return err
+	}
+	return ensureArtifactAbsent("context projection", s.artifactPath(dirProjTester, id), id)
 }
 
 // ── GoalID resolution helpers (no locking) ──────────────────────────────────
@@ -404,6 +412,19 @@ func (s *FileStore) goalIDForRelatedIDs(relatedIDs []string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("store: no related ID resolves to a goal")
+}
+
+func projectionDir(role schema.ProjectionRole) (string, error) {
+	switch role {
+	case schema.ProjectionRoleExecutor:
+		return dirProjExecutor, nil
+	case schema.ProjectionRoleReviewer:
+		return dirProjReviewer, nil
+	case schema.ProjectionRoleTester:
+		return dirProjTester, nil
+	default:
+		return "", fmt.Errorf("store: unsupported context projection role %q", role)
+	}
 }
 
 // ── Goal IR ──────────────────────────────────────────────────────────────────
@@ -640,13 +661,16 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 	if err := validateArtifactID("context projection", p.ContextProjectionID); err != nil {
 		return err
 	}
+	dir, err := projectionDir(p.Role)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureProjectionAbsent(p.ContextProjectionID); err != nil {
 		return err
 	}
 	saved := *p
-	saved.Role = schema.ProjectionRoleExecutor
 	goalID, err := s.goalIDForProjectionSources(saved.SourceArtifactIDs)
 	if err != nil {
 		return fmt.Errorf("store: SaveProjection: %w", err)
@@ -655,7 +679,7 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirProjExecutor, saved.ContextProjectionID), &saved))
+	return materializationError(ev, s.writeFile(s.artifactPath(dir, saved.ContextProjectionID), &saved))
 }
 
 func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error {
@@ -683,7 +707,16 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*schema.ContextProjection, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.ContextProjection](s.artifactPath(dirProjExecutor, projectionID))
+	for _, dir := range []string{dirProjExecutor, dirProjReviewer, dirProjTester} {
+		projection, err := readFile[schema.ContextProjection](s.artifactPath(dir, projectionID))
+		if err == nil {
+			return projection, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (s *FileStore) LoadHumanSummaryProjection(ctx context.Context, projectionID string) (*schema.HumanSummaryProjection, error) {
@@ -764,6 +797,25 @@ func (s *FileStore) LoadPatchesForCapsule(ctx context.Context, capsuleID string)
 	var out []*schema.PatchArtifact
 	for _, p := range all {
 		if p.CapsuleID == capsuleID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (s *FileStore) LoadPatchesForObligation(ctx context.Context, obligationID string) ([]*schema.PatchArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := validateArtifactID("obligation", obligationID); err != nil {
+		return nil, err
+	}
+	all, err := scanDir[schema.PatchArtifact](filepath.Join(s.root, dirPatches))
+	if err != nil {
+		return nil, err
+	}
+	var out []*schema.PatchArtifact
+	for _, p := range all {
+		if containsString(p.ObligationIDsClaimed, obligationID) {
 			out = append(out, p)
 		}
 	}

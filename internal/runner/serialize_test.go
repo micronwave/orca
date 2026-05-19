@@ -42,3 +42,22 @@ func TestSerializeExecutorProjectionRejectsWrongRole(t *testing.T) {
 		t.Fatal("SerializeExecutorProjection returned nil error for human_summary role")
 	}
 }
+
+func TestSerializeExecutorProjectionAcceptsReviewerRole(t *testing.T) {
+	md, err := SerializeExecutorProjection(&schema.ContextProjection{
+		ContextProjectionID: "CTX-reviewer",
+		Role:                schema.ProjectionRoleReviewer,
+		IncludedSections:    []string{"role contract: review the implementer output"},
+	})
+	if err != nil {
+		t.Fatalf("SerializeExecutorProjection reviewer: %v", err)
+	}
+	for _, want := range []string{
+		"# Orca Reviewer Briefing",
+		"review the implementer output",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("serialized reviewer markdown missing %q\n%s", want, md)
+		}
+	}
+}

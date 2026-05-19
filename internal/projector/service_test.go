@@ -163,6 +163,97 @@ func TestCompileHumanSummary_buildsImplementationApproachAndTopologyRationale(t 
 	}
 }
 
+func TestCompileReviewerAndTesterUseRoleSpecificBriefings(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-role"
+		conditionID = "GC-proj-role"
+		obligation  = "OB-proj-role"
+		implID      = "CAP-proj-impl"
+		reviewerID  = "CAP-proj-reviewer"
+		testerID    = "CAP-proj-tester"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, capsule := range []schema.ExecutionCapsule{
+		{
+			CapsuleID:     implID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleExecutor,
+			AllowedPaths:  []string{`internal\projector`},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000, MaxWallTimeSeconds: 300},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     reviewerID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleReviewer,
+			AllowedPaths:  []string{`internal\projector`},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000, MaxWallTimeSeconds: 300},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     testerID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleTester,
+			AllowedPaths:  []string{`internal\projector`},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000, MaxWallTimeSeconds: 300},
+			State:         schema.CapsuleStatePending,
+		},
+	} {
+		capsule := capsule
+		if err := env.st.SaveCapsule(env.ctx, &capsule); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", capsule.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-proj-impl",
+		CapsuleID:            implID,
+		DiffPath:             `E:\orca\.orca\capsules\CAP-proj-impl\patch.diff`,
+		Summary:              "implementer patch under review",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	reviewer, err := compiler.CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if reviewer.Role != schema.ProjectionRoleReviewer {
+		t.Fatalf("reviewer Role = %s, want reviewer", reviewer.Role)
+	}
+	if !projectionIncludes(reviewer, "review the implementer output") {
+		t.Fatalf("reviewer projection missing role contract: %+v", reviewer.IncludedSections)
+	}
+	if !projectionIncludes(reviewer, "PATCH-proj-impl") {
+		t.Fatalf("reviewer projection missing candidate patch: %+v", reviewer.IncludedSections)
+	}
+
+	tester, err := compiler.CompileTester(env.ctx, testerID)
+	if err != nil {
+		t.Fatalf("CompileTester: %v", err)
+	}
+	if tester.Role != schema.ProjectionRoleTester {
+		t.Fatalf("tester Role = %s, want tester", tester.Role)
+	}
+	if !projectionIncludes(tester, "test or challenge the patch") {
+		t.Fatalf("tester projection missing role contract: %+v", tester.IncludedSections)
+	}
+}
+
+func projectionIncludes(p *schema.ContextProjection, want string) bool {
+	for _, section := range p.IncludedSections {
+		if strings.Contains(section, want) {
+			return true
+		}
+	}
+	return false
+}
+
 type projectorEnv struct {
 	ctx context.Context
 	st  *store.FileStore

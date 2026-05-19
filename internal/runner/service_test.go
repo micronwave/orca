@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -145,6 +146,81 @@ func TestRunFallsBackToTranscript(t *testing.T) {
 	}
 	if result.PatchID == "" || len(result.EvidenceIDs) == 0 {
 		t.Fatalf("RunResult = %+v", result)
+	}
+}
+
+func TestRunReviewerCanProduceEvidenceWithoutPatch(t *testing.T) {
+	env := newRunnerEnv(t)
+	// saveRunnerScenario creates GOAL-1, GC-1, OB-1, and an executor capsule CAP-1.
+	// The reviewer capsule is a separate artifact with Role set from creation.
+	_ = saveRunnerScenario(t, env)
+
+	reviewerProjectionID := "CTX-reviewer"
+	reviewerCapsuleID := "CAP-reviewer"
+
+	if err := env.st.SaveProjection(env.ctx, &schema.ContextProjection{
+		ContextProjectionID: reviewerProjectionID,
+		Role:                schema.ProjectionRoleReviewer,
+		SourceArtifactIDs:   []string{"OB-1"},
+		IncludedSections:    []string{"role contract: review the implementer output"},
+		TokenBudget:         1200,
+		CreatedAt:           time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveProjection reviewer: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           reviewerCapsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleReviewer,
+		ContextProjectionID: reviewerProjectionID,
+		AllowedPaths:        []string{"."},
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: 60,
+			MaxRetries:         1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule reviewer: %v", err)
+	}
+
+	capsuleID := reviewerCapsuleID
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if projection.Role != schema.ProjectionRoleReviewer {
+				t.Fatalf("projection role = %s, want reviewer", projection.Role)
+			}
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				CommandsRun:          []string{"review patch evidence"},
+				Claims:               []schema.SidecarClaim{{Claim: "review found no scope issue", Type: schema.SidecarClaimVerified}},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "review evidence only",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	result, err := r.Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.PatchID != "" {
+		t.Fatalf("PatchID = %q, want empty for evidence-only reviewer run", result.PatchID)
+	}
+	if len(result.EvidenceIDs) == 0 || len(result.ClaimIDs) == 0 {
+		t.Fatalf("RunResult = %+v, want evidence and claims", result)
+	}
+	if patches, err := env.st.LoadPatchesForCapsule(env.ctx, capsuleID); err != nil {
+		t.Fatalf("LoadPatchesForCapsule: %v", err)
+	} else if len(patches) != 0 {
+		t.Fatalf("reviewer created %d patch artifacts, want none", len(patches))
 	}
 }
 
@@ -300,6 +376,15 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v (%s)", args, err, string(out))
 	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return data
 }
 
 func TestFindScopeViolations(t *testing.T) {

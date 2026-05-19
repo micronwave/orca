@@ -253,7 +253,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			// require a separate pre-execution gate. Also use plan.MaxObligationRisk
 			// rather than goal.RiskLevel: goal risk and obligation risk are set by
 			// different components and may disagree.
-			if capsule.Role != schema.RoleReviewer && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
+			if capsule.Role != schema.RoleReviewer && capsule.Role != schema.RoleTester && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
 				reviewWindow := reviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
@@ -271,32 +271,42 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if !check.Allowed {
 				return fmt.Errorf("orca: budget rejected capsule %s: %s", capsuleID, check.Reason)
 			}
-			executorProjection, err := rt.projector.CompileExecutor(ctx, capsuleID)
+			agentProjection, err := rt.compileAgentProjection(ctx, capsule)
 			if err != nil {
 				return err
 			}
-			if err := rt.store.UpdateCapsuleProjectionID(ctx, capsuleID, executorProjection.ContextProjectionID); err != nil {
+			if err := rt.store.UpdateCapsuleProjectionID(ctx, capsuleID, agentProjection.ContextProjectionID); err != nil {
 				return err
 			}
 			runResult, err := rt.runner.Run(ctx, capsuleID)
 			if err != nil {
 				return err
 			}
+			if capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester {
+				if len(runResult.EvidenceIDs) == 0 && len(runResult.ClaimIDs) == 0 {
+					return fmt.Errorf("orca: %s capsule %s produced no review evidence or claims", capsule.Role, capsuleID)
+				}
+				continue
+			}
 			if runResult.PatchID == "" {
 				return fmt.Errorf("orca: capsule %s produced no patch", capsuleID)
 			}
-			verifyResult, err := rt.verifierEngine.Verify(ctx, runResult.PatchID)
-			if err != nil {
-				return err
-			}
-			lastPatchID = verifyResult.PatchID
-			lastResult, err = rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
-			if err != nil {
-				return err
-			}
-			if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
-				return err
-			}
+			lastPatchID = runResult.PatchID
+		}
+		if lastPatchID == "" {
+			return fmt.Errorf("orca: plan produced no implementer patch for goal %s", goal.GoalID)
+		}
+		verifyResult, err := rt.verifierEngine.Verify(ctx, lastPatchID)
+		if err != nil {
+			return err
+		}
+		lastPatchID = verifyResult.PatchID
+		lastResult, err = rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
+		if err != nil {
+			return err
+		}
+		if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
+			return err
 		}
 
 		if lastResult.MergeReady {
@@ -545,6 +555,17 @@ func (rt *runtime) appendMergeApplied(ctx context.Context, goalID, patchID strin
 	return nil
 }
 
+func (rt *runtime) compileAgentProjection(ctx context.Context, capsule *schema.ExecutionCapsule) (*schema.ContextProjection, error) {
+	switch capsule.Role {
+	case schema.RoleReviewer:
+		return rt.projector.CompileReviewer(ctx, capsule.CapsuleID)
+	case schema.RoleTester:
+		return rt.projector.CompileTester(ctx, capsule.CapsuleID)
+	default:
+		return rt.projector.CompileExecutor(ctx, capsule.CapsuleID)
+	}
+}
+
 func (rt *runtime) activeCapsulesForGoal(ctx context.Context, goalID string) ([]*schema.ExecutionCapsule, error) {
 	var capsules []*schema.ExecutionCapsule
 	seen := make(map[string]bool)
@@ -619,7 +640,7 @@ func (rt *runtime) blockingHumanDecisions(
 		if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
 			continue
 		}
-		if capsule.Role == schema.RoleReviewer {
+		if capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester {
 			continue
 		}
 		decision, err := rt.store.LoadDecision(ctx, capsule.TopologyDecisionID)

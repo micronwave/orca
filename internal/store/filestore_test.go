@@ -431,6 +431,41 @@ func TestProjection_SaveLoadExecutor(t *testing.T) {
 	}
 }
 
+func TestProjection_SaveLoadReviewerAndTester(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+
+	for _, tt := range []struct {
+		id   string
+		role schema.ProjectionRole
+	}{
+		{id: "CTX-reviewer", role: schema.ProjectionRoleReviewer},
+		{id: "CTX-tester", role: schema.ProjectionRoleTester},
+	} {
+		t.Run(string(tt.role), func(t *testing.T) {
+			p := &schema.ContextProjection{
+				ContextProjectionID: tt.id,
+				Role:                tt.role,
+				SourceArtifactIDs:   []string{"CAP-1"},
+				TokenBudget:         1024,
+				CreatedAt:           time.Now().UTC(),
+			}
+			if err := e.st.SaveProjection(e.ctx, p); err != nil {
+				t.Fatalf("SaveProjection: %v", err)
+			}
+			got, err := e.st.LoadProjection(e.ctx, tt.id)
+			if err != nil {
+				t.Fatalf("LoadProjection: %v", err)
+			}
+			if got.Role != tt.role {
+				t.Fatalf("Role = %s, want %s", got.Role, tt.role)
+			}
+		})
+	}
+}
+
 func TestProjection_SaveLoadHumanSummary(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
@@ -512,14 +547,20 @@ func TestProjection_BothEmitEvent(t *testing.T) {
 	}
 }
 
-func TestProjection_SaveEnforcesReplayRole(t *testing.T) {
+func TestProjection_SaveRejectsHumanRoleAndReplaysAgentRoles(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
-	exec := &schema.ContextProjection{
-		ContextProjectionID: "CTX-exec",
+	invalidAgentProjection := &schema.ContextProjection{
+		ContextProjectionID: "CTX-invalid",
 		Role:                schema.ProjectionRoleHumanSummary,
+		SourceArtifactIDs:   []string{"CAP-1"},
+		CreatedAt:           time.Now().UTC(),
+	}
+	reviewer := &schema.ContextProjection{
+		ContextProjectionID: "CTX-reviewer",
+		Role:                schema.ProjectionRoleReviewer,
 		SourceArtifactIDs:   []string{"CAP-1"},
 		CreatedAt:           time.Now().UTC(),
 	}
@@ -532,28 +573,25 @@ func TestProjection_SaveEnforcesReplayRole(t *testing.T) {
 		},
 		GoalPlain: "review this",
 	}
-	if err := e.st.SaveProjection(e.ctx, exec); err != nil {
-		t.Fatalf("SaveProjection: %v", err)
+	if err := e.st.SaveProjection(e.ctx, invalidAgentProjection); err == nil {
+		t.Fatal("SaveProjection accepted human_summary role")
+	}
+	if err := e.st.SaveProjection(e.ctx, reviewer); err != nil {
+		t.Fatalf("SaveProjection reviewer: %v", err)
 	}
 	if err := e.st.SaveHumanSummaryProjection(e.ctx, human); err != nil {
 		t.Fatalf("SaveHumanSummaryProjection: %v", err)
 	}
 
-	// SaveProjection and SaveHumanSummaryProjection do NOT mutate the caller's
-	// struct — role normalization is a persistence-layer invariant. Verify the
-	// in-memory structs are unchanged and the stored artifacts have correct roles.
-	if exec.Role != schema.ProjectionRoleHumanSummary {
-		t.Fatalf("SaveProjection must not mutate caller's struct: role changed to %s", exec.Role)
-	}
 	if human.Role != schema.ProjectionRoleExecutor {
 		t.Fatalf("SaveHumanSummaryProjection must not mutate caller's struct: role changed to %s", human.Role)
 	}
-	loadedExec, err := e.st.LoadProjection(e.ctx, "CTX-exec")
+	loadedReviewer, err := e.st.LoadProjection(e.ctx, "CTX-reviewer")
 	if err != nil {
 		t.Fatalf("LoadProjection after save: %v", err)
 	}
-	if loadedExec.Role != schema.ProjectionRoleExecutor {
-		t.Fatalf("SaveProjection did not normalize role in stored artifact: got %s", loadedExec.Role)
+	if loadedReviewer.Role != schema.ProjectionRoleReviewer {
+		t.Fatalf("stored reviewer role = %s, want reviewer", loadedReviewer.Role)
 	}
 	loadedHuman, err := e.st.LoadHumanSummaryProjection(e.ctx, "CTX-human")
 	if err != nil {
@@ -567,8 +605,10 @@ func TestProjection_SaveEnforcesReplayRole(t *testing.T) {
 	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if _, err := e.st.LoadProjection(e.ctx, "CTX-exec"); err != nil {
-		t.Fatalf("executor projection replayed to wrong directory: %v", err)
+	if got, err := e.st.LoadProjection(e.ctx, "CTX-reviewer"); err != nil {
+		t.Fatalf("reviewer projection replayed to wrong directory: %v", err)
+	} else if got.Role != schema.ProjectionRoleReviewer {
+		t.Fatalf("replayed reviewer role = %s, want reviewer", got.Role)
 	}
 	if _, err := e.st.LoadHumanSummaryProjection(e.ctx, "CTX-human"); err != nil {
 		t.Fatalf("human projection replayed to wrong directory: %v", err)
@@ -601,6 +641,38 @@ func TestPatch_SaveEmitsEvent(t *testing.T) {
 	e.seedPatch(t, "PATCH-1", "CAP-1")
 	if n := e.countEvents(t, schema.EventPatchArtifactCreated); n != 1 {
 		t.Errorf("expected 1 patch_artifact_created event, got %d", n)
+	}
+}
+
+func TestPatch_LoadPatchesForObligation(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-1",
+		CapsuleID:            "CAP-1",
+		ObligationIDsClaimed: []string{"OB-1"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch PATCH-1: %v", err)
+	}
+	if err := e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-2",
+		CapsuleID:            "CAP-1",
+		ObligationIDsClaimed: []string{"OB-2"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch PATCH-2: %v", err)
+	}
+
+	patches, err := e.st.LoadPatchesForObligation(e.ctx, "OB-1")
+	if err != nil {
+		t.Fatalf("LoadPatchesForObligation: %v", err)
+	}
+	if len(patches) != 1 || patches[0].PatchID != "PATCH-1" {
+		t.Fatalf("patches = %+v, want PATCH-1 only", patches)
 	}
 }
 
@@ -1535,6 +1607,9 @@ func TestReplay_ProjectionsByRole(t *testing.T) {
 	_ = e.st.SaveProjection(e.ctx, &schema.ContextProjection{
 		ContextProjectionID: "CTX-exec", Role: schema.ProjectionRoleExecutor, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
 	})
+	_ = e.st.SaveProjection(e.ctx, &schema.ContextProjection{
+		ContextProjectionID: "CTX-reviewer", Role: schema.ProjectionRoleReviewer, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
+	})
 	_ = e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
 		ContextProjection: schema.ContextProjection{
 			ContextProjectionID: "CTX-human", Role: schema.ProjectionRoleHumanSummary, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
@@ -1552,6 +1627,13 @@ func TestReplay_ProjectionsByRole(t *testing.T) {
 	}
 	if exec.Role != schema.ProjectionRoleExecutor {
 		t.Errorf("executor role = %s", exec.Role)
+	}
+	reviewer, err := e.st.LoadProjection(e.ctx, "CTX-reviewer")
+	if err != nil {
+		t.Fatalf("LoadProjection reviewer after replay: %v", err)
+	}
+	if reviewer.Role != schema.ProjectionRoleReviewer {
+		t.Errorf("reviewer role = %s", reviewer.Role)
 	}
 	human, err := e.st.LoadHumanSummaryProjection(e.ctx, "CTX-human")
 	if err != nil {
