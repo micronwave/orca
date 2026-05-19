@@ -262,7 +262,11 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if !check.Allowed {
 				return fmt.Errorf("orca: budget rejected capsule %s: %s", capsuleID, check.Reason)
 			}
-			if _, err := rt.projector.CompileExecutor(ctx, capsuleID); err != nil {
+			executorProjection, err := rt.projector.CompileExecutor(ctx, capsuleID)
+			if err != nil {
+				return err
+			}
+			if err := rt.store.UpdateCapsuleProjectionID(ctx, capsuleID, executorProjection.ContextProjectionID); err != nil {
 				return err
 			}
 			runResult, err := rt.runner.Run(ctx, capsuleID)

@@ -65,6 +65,10 @@ type ArtifactStore interface {
 	// first. Intermediate transitions (workspace_attached, setup_run, agent_running)
 	// do not require a preceding log event.
 	UpdateCapsuleState(ctx context.Context, capsuleID string, state schema.CapsuleState) error
+	// UpdateCapsuleProjectionID links an executor projection to its capsule.
+	// Called by the orchestrator after CompileExecutor so the runner can load
+	// the projection via capsule.ContextProjectionID.
+	UpdateCapsuleProjectionID(ctx context.Context, capsuleID, projectionID string) error
 
 	// --- Context Projections ---
 

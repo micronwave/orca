@@ -617,6 +617,23 @@ func (s *FileStore) UpdateCapsuleState(ctx context.Context, capsuleID string, st
 	return s.writeFile(s.artifactPath(dirCapsules, capsuleID), c)
 }
 
+func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, projectionID string) error {
+	if err := validateArtifactID("capsule", capsuleID); err != nil {
+		return err
+	}
+	if err := validateArtifactID("projection", projectionID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
+	if err != nil {
+		return err
+	}
+	c.ContextProjectionID = projectionID
+	return s.writeFile(s.artifactPath(dirCapsules, capsuleID), c)
+}
+
 // ── Context Projections ──────────────────────────────────────────────────────
 
 func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProjection) error {
