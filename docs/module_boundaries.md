@@ -34,7 +34,7 @@
 ### Direct dependency map
 
 ```
-intent_compiler    → artifact_store, event_log
+intent_compiler    → artifact_store               [goal_created via store]
 obligation_planner → artifact_store               [events via store]
 context_compiler   → artifact_store               [events via store]
 capsule_runner     → artifact_store, event_log
@@ -108,7 +108,7 @@ shadowing the stdlib `context` package in import declarations.
 |---|---|
 | **Reads (store)** | `GoalIR` via `LoadActiveGoal` (to enforce one active goal per repo) |
 | **Writes (store)** | `GoalIR` (with embedded `GoalConditions`) via `SaveGoal` |
-| **Writes (log)** | `goal_created` directly |
+| **Writes (log)** | none directly for goal creation — store emits `goal_created` on `SaveGoal` |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | Obligations or Capsules (planner's job) |
 
@@ -117,6 +117,11 @@ to clarify ambiguous goal conditions, but it must not create Obligations or
 Capsules — those belong to the ObligationPlanner. The one-active-goal-per-repo
 MVP constraint is enforced by calling `store.LoadActiveGoal` before creating a
 new goal and returning an error if a non-nil goal is returned.
+
+IntentCompiler persists GoalIR via `SaveGoal`. Because the store emits
+`goal_created` on `SaveGoal`, IntentCompiler must not append `goal_created`
+directly. Direct EventLog access is reserved only for future intent events that
+have no corresponding `Save*` call.
 
 ---
 

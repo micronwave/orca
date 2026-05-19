@@ -14,9 +14,12 @@ coverage.out
 .claude/
 CLAUDE.md
 claude.md
+AGENTS.md
 orca.md
+prebuild.md
 plans/
 phase0_artifacts/
+.github/copilot-instructions.md
 
 # OS
 .DS_Store
