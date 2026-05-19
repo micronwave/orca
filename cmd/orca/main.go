@@ -238,8 +238,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			return err
 		}
 
-		var lastPatchID string
-		var lastResult reconciler.ReconcileResult
+		var patchIDs []string
 		for _, capsuleID := range plan.CapsuleIDs {
 			capsule, err := rt.store.LoadCapsule(ctx, capsuleID)
 			if err != nil {
@@ -253,7 +252,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			// require a separate pre-execution gate. Also use plan.MaxObligationRisk
 			// rather than goal.RiskLevel: goal risk and obligation risk are set by
 			// different components and may disagree.
-			if capsule.Role != schema.RoleReviewer && capsule.Role != schema.RoleTester && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
+			if capsule.Role == schema.RoleExecutor && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
 				reviewWindow := reviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
@@ -282,7 +281,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if err != nil {
 				return err
 			}
-			if capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester {
+			if capsule.Role != schema.RoleExecutor {
 				if len(runResult.EvidenceIDs) == 0 && len(runResult.ClaimIDs) == 0 {
 					return fmt.Errorf("orca: %s capsule %s produced no review evidence or claims", capsule.Role, capsuleID)
 				}
@@ -291,43 +290,81 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if runResult.PatchID == "" {
 				return fmt.Errorf("orca: capsule %s produced no patch", capsuleID)
 			}
-			lastPatchID = runResult.PatchID
+			patchIDs = append(patchIDs, runResult.PatchID)
 		}
-		if lastPatchID == "" {
+		if len(patchIDs) == 0 {
 			return fmt.Errorf("orca: plan produced no implementer patch for goal %s", goal.GoalID)
 		}
-		verifyResult, err := rt.verifierEngine.Verify(ctx, lastPatchID)
-		if err != nil {
-			return err
-		}
-		lastPatchID = verifyResult.PatchID
-		lastResult, err = rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
-		if err != nil {
-			return err
+		var readyPatchID string
+		var readyResult reconciler.ReconcileResult
+		// acceptedPatchIDs tracks every patch the reconciler accepted this cycle.
+		// In parallel topology the reconciler can only emit merge_applied for the
+		// last-reconciled patch (when all obligations finally clear). Earlier accepted
+		// patches must receive their merge_applied event from the orchestrator.
+		var acceptedPatchIDs []string
+		var followUpIDs []string
+		var blockingReason string
+		for _, patchID := range patchIDs {
+			verifyResult, err := rt.verifierEngine.Verify(ctx, patchID)
+			if err != nil {
+				return err
+			}
+			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
+			if err != nil {
+				return err
+			}
+			if result.PatchAccepted {
+				acceptedPatchIDs = append(acceptedPatchIDs, verifyResult.PatchID)
+			}
+			if result.MergeReady {
+				readyPatchID = verifyResult.PatchID
+				readyResult = result
+			}
+			if len(result.FollowUpObligationIDs) > 0 {
+				followUpIDs = append(followUpIDs, result.FollowUpObligationIDs...)
+			}
+			if result.BlockingReason != "" {
+				blockingReason = result.BlockingReason
+			}
 		}
 		if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
 			return err
 		}
 
-		if lastResult.MergeReady {
-			if lastResult.HumanGateRequired {
-				decision, err := rt.gatekeeper.ReviewMerge(ctx, lastPatchID)
+		if readyResult.MergeReady {
+			if readyResult.HumanGateRequired {
+				// Gate on the last merge-ready patch; merge all accepted patches on approval.
+				decision, err := rt.gatekeeper.ReviewMerge(ctx, readyPatchID)
 				if err != nil {
 					return err
 				}
 				if !decision.Approved {
-					return fmt.Errorf("orca: merge gate rejected patch %s: %s", lastPatchID, decision.Notes)
+					return fmt.Errorf("orca: merge gate rejected patch %s: %s", readyPatchID, decision.Notes)
 				}
-				if err := rt.appendMergeApplied(ctx, goal.GoalID, lastPatchID); err != nil {
-					return err
+				for _, pid := range acceptedPatchIDs {
+					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
+						return err
+					}
+				}
+			} else {
+				// The reconciler already emitted merge_applied for readyPatchID when it
+				// returned MergeReady=true. Emit for earlier accepted patches that were
+				// reconciled before all obligations cleared.
+				for _, pid := range acceptedPatchIDs {
+					if pid == readyPatchID {
+						continue
+					}
+					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
+						return err
+					}
 				}
 			}
 			return rt.updateGoalStatus(ctx, goal.GoalID, schema.GoalStatusComplete)
 		}
-		if len(lastResult.FollowUpObligationIDs) > 0 {
+		if len(followUpIDs) > 0 {
 			continue
 		}
-		return fmt.Errorf("orca: reconciliation stopped: %s", lastResult.BlockingReason)
+		return fmt.Errorf("orca: reconciliation stopped: %s", blockingReason)
 	}
 }
 
@@ -640,7 +677,7 @@ func (rt *runtime) blockingHumanDecisions(
 		if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
 			continue
 		}
-		if capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester {
+		if capsule.Role != schema.RoleExecutor {
 			continue
 		}
 		decision, err := rt.store.LoadDecision(ctx, capsule.TopologyDecisionID)
@@ -871,7 +908,7 @@ func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) boo
 		return true
 	case schema.TopologyImplementerReviewer:
 		return risk == schema.RiskMedium || risk == schema.RiskHigh
-	case schema.TopologySingle:
+	case schema.TopologySingle, schema.TopologyParallel, schema.TopologyTestFirst, schema.TopologyInvestigateThenImpl:
 		return risk == schema.RiskLow
 	default:
 		return false

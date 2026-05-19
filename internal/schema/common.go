@@ -17,4 +17,7 @@ const (
 	TopologySingle              Topology = "single"
 	TopologyImplementerReviewer Topology = "implementer_reviewer"
 	TopologyHumanGated          Topology = "human_gated"
+	TopologyParallel            Topology = "parallel"
+	TopologyTestFirst           Topology = "test_first"
+	TopologyInvestigateThenImpl Topology = "investigate_then_implement"
 )

@@ -62,14 +62,15 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	}
 
 	classifyInput := ClassifyInput{
-		Obligations:         obligations,
-		Fingerprints:        failures,
-		ApprovalPolicy:      s.config.ApprovalPolicy,
-		BudgetRemaining:     s.config.DefaultMaxTokens,
-		ExpectedFileOverlap: false,
-		TestsExist:          false,
-		RequiredTools:       nil,
+		Obligations:               obligations,
+		Fingerprints:              failures,
+		ApprovalPolicy:            s.config.ApprovalPolicy,
+		BudgetRemaining:           s.config.DefaultMaxTokens,
+		ExpectedFilesByObligation: expectedFilesByObligation(obligations),
+		TestsExist:                false,
+		RequiredTools:             nil,
 	}
+	classifyInput.ExpectedFileOverlap = hasExpectedFileOverlap(classifyInput.ExpectedFilesByObligation)
 	topology, rationale, err := s.classifier.Classify(classifyInput)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner: classify topology: %w", err)
@@ -123,6 +124,39 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
 			s.newCapsule(revID, schema.AgentClaude, schema.RoleReviewer, obligationIDs, goal.ScopeConstraints, decisionID),
 		}
+	case schema.TopologyParallel:
+		capsules := make([]schema.ExecutionCapsule, 0, len(obligations))
+		for _, obligation := range obligations {
+			scope := goal.ScopeConstraints
+			if len(obligation.ExpectedFiles) > 0 {
+				scope.AllowedFiles = append([]string(nil), obligation.ExpectedFiles...)
+			}
+			capsuleID := idgen.New("CAP")
+			capsules = append(capsules, s.newCapsule(capsuleID, schema.AgentCodex, schema.RoleExecutor, []string{obligation.ObligationID}, scope, decisionID))
+		}
+		return capsules
+	case schema.TopologyTestFirst:
+		testID := idgen.New("CAP")
+		implID := idgen.New("CAP")
+		obligationIDs := make([]string, 0, len(obligations))
+		for _, obligation := range obligations {
+			obligationIDs = append(obligationIDs, obligation.ObligationID)
+		}
+		return []schema.ExecutionCapsule{
+			s.newCapsule(testID, schema.AgentCodex, schema.RoleTester, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+		}
+	case schema.TopologyInvestigateThenImpl:
+		investigateID := idgen.New("CAP")
+		implID := idgen.New("CAP")
+		obligationIDs := make([]string, 0, len(obligations))
+		for _, obligation := range obligations {
+			obligationIDs = append(obligationIDs, obligation.ObligationID)
+		}
+		return []schema.ExecutionCapsule{
+			s.newCapsule(investigateID, schema.AgentCodex, schema.RoleInvestigator, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+		}
 	default:
 		capsuleID := idgen.New("CAP")
 		obligationIDs := make([]string, 0, len(obligations))
@@ -175,7 +209,9 @@ func (s *service) defaultSandbox(capsuleID string) schema.CapsuleSandbox {
 }
 
 func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string, error) {
+	input.ExpectedFileOverlap = input.ExpectedFileOverlap || hasExpectedFileOverlap(input.ExpectedFilesByObligation)
 	summary := classifySummary(input)
+	protected, protectedPath := hasProtectedPath(input.ExpectedFilesByObligation, input.ProtectedPaths)
 	for _, obligation := range input.Obligations {
 		if obligation.RiskLevel == schema.RiskHigh {
 			return schema.TopologyHumanGated,
@@ -202,6 +238,11 @@ func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string
 				fmt.Sprintf("%s; obligation %s is medium risk but expected file overlap is high, so coordination cost exceeds expected value -> single", summary, obligation.ObligationID),
 				nil
 		}
+		if protected {
+			return schema.TopologySingle,
+				fmt.Sprintf("%s; obligation %s touches protected path %s, so shared-file work is serialized -> single", summary, obligation.ObligationID, protectedPath),
+				nil
+		}
 		if input.BudgetRemaining > 0 && input.BudgetRemaining < 2*defaultReviewerCoordinationTokens {
 			return schema.TopologySingle,
 				fmt.Sprintf("%s; obligation %s is medium risk but budget_remaining=%d is below implementer_reviewer coordination cost -> single", summary, obligation.ObligationID, input.BudgetRemaining),
@@ -212,21 +253,36 @@ func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string
 			nil
 	}
 
-	allLow := len(input.Obligations) > 0
-	for _, obligation := range input.Obligations {
-		if obligation.RiskLevel != schema.RiskLow {
-			allLow = false
-			break
+	if allLowRisk(input.Obligations) {
+		if protected {
+			return schema.TopologySingle,
+				fmt.Sprintf("%s; protected path %s is in expected files, so shared-file work is serialized -> single", summary, protectedPath),
+				nil
 		}
-	}
-	if allLow && len(input.Fingerprints) == 0 {
-		return schema.TopologySingle,
-			fmt.Sprintf("%s; all obligations are low risk and no failure fingerprints exist -> single", summary),
-			nil
+		if input.ExpectedFileOverlap {
+			return schema.TopologySingle,
+				fmt.Sprintf("%s; expected file overlap is high, so coordination cost exceeds expected value -> single", summary),
+				nil
+		}
+		if requiresInvestigation(input) && !hasAnyExpectedFiles(input.ExpectedFilesByObligation) {
+			return schema.TopologyInvestigateThenImpl,
+				fmt.Sprintf("%s; low-risk obligation set requires investigation before implementation -> investigate_then_implement", summary),
+				nil
+		}
+		if requiresTestFirst(input) {
+			return schema.TopologyTestFirst,
+				fmt.Sprintf("%s; low-risk obligation set requires test evidence before implementation and tests_exist=%t -> test_first", summary, input.TestsExist),
+				nil
+		}
+		if canParallelize(input) {
+			return schema.TopologyParallel,
+				fmt.Sprintf("%s; low-risk obligations have disjoint unprotected expected files -> parallel", summary),
+				nil
+		}
 	}
 
 	return schema.TopologySingle,
-		fmt.Sprintf("%s; no high-risk obligations and no failure fingerprints -> single", summary),
+		fmt.Sprintf("%s; all obligations are low risk, no failure fingerprints -> single", summary),
 		nil
 }
 
@@ -234,10 +290,11 @@ const defaultReviewerCoordinationTokens = 1000
 
 func classifySummary(input ClassifyInput) string {
 	return fmt.Sprintf(
-		"inputs: obligations=%d max_risk=%s expected_file_overlap=%t fingerprints=%d budget_remaining=%d",
+		"inputs: obligations=%d max_risk=%s expected_file_overlap=%t protected_path=%t fingerprints=%d budget_remaining=%d",
 		len(input.Obligations),
 		maxRisk(input.Obligations),
 		input.ExpectedFileOverlap,
+		mustSerializeExpectedFiles(input.ExpectedFilesByObligation, input.ProtectedPaths),
 		len(input.Fingerprints),
 		input.BudgetRemaining,
 	)
@@ -254,6 +311,156 @@ func maxRisk(obligations []*schema.Obligation) schema.RiskLevel {
 		}
 	}
 	return max
+}
+
+func expectedFilesByObligation(obligations []*schema.Obligation) map[string][]string {
+	filesByObligation := make(map[string][]string, len(obligations))
+	for _, obligation := range obligations {
+		if obligation == nil || len(obligation.ExpectedFiles) == 0 {
+			continue
+		}
+		filesByObligation[obligation.ObligationID] = normalizePaths(obligation.ExpectedFiles)
+	}
+	return filesByObligation
+}
+
+func hasExpectedFileOverlap(filesByObligation map[string][]string) bool {
+	seen := make(map[string]string)
+	for obligationID, files := range filesByObligation {
+		for _, file := range normalizePaths(files) {
+			if owner, ok := seen[file]; ok && owner != obligationID {
+				return true
+			}
+			seen[file] = obligationID
+		}
+	}
+	return false
+}
+
+func hasProtectedPath(filesByObligation map[string][]string, configured []string) (bool, string) {
+	for _, files := range filesByObligation {
+		for _, file := range normalizePaths(files) {
+			if isProtectedPath(file, configured) {
+				return true, file
+			}
+		}
+	}
+	return false, ""
+}
+
+func mustSerializeExpectedFiles(filesByObligation map[string][]string, configured []string) bool {
+	protected, _ := hasProtectedPath(filesByObligation, configured)
+	return protected
+}
+
+func isProtectedPath(path string, configured []string) bool {
+	normalized := normalizePath(path)
+	if normalized == "" {
+		return false
+	}
+	for _, item := range normalizePaths(configured) {
+		if normalized == item || strings.HasPrefix(normalized, strings.TrimSuffix(item, "/")+"/") {
+			return true
+		}
+	}
+	base := normalized
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	if strings.HasSuffix(normalized, ".lock") ||
+		strings.Contains(normalized, "/migrations/") ||
+		strings.Contains(normalized, "/generated/") ||
+		strings.Contains(normalized, "/api/") ||
+		strings.Contains(normalized, "/schema/") {
+		return true
+	}
+	switch base {
+	case "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml",
+		"yarn.lock", "cargo.toml", "cargo.lock", "requirements.txt", "pyproject.toml",
+		"poetry.lock", "gemfile", "gemfile.lock", "makefile", "dockerfile":
+		return true
+	}
+	return false
+}
+
+func canParallelize(input ClassifyInput) bool {
+	if len(input.Obligations) < 2 || input.BudgetRemaining > 0 && input.BudgetRemaining < len(input.Obligations)*defaultReviewerCoordinationTokens {
+		return false
+	}
+	if input.ExpectedFileOverlap || mustSerializeExpectedFiles(input.ExpectedFilesByObligation, input.ProtectedPaths) {
+		return false
+	}
+	return allLowRisk(input.Obligations) && allObligationsHaveExpectedFiles(input.Obligations, input.ExpectedFilesByObligation)
+}
+
+func allLowRisk(obligations []*schema.Obligation) bool {
+	if len(obligations) == 0 {
+		return false
+	}
+	for _, obligation := range obligations {
+		if obligation.RiskLevel != schema.RiskLow {
+			return false
+		}
+	}
+	return true
+}
+
+func allObligationsHaveExpectedFiles(obligations []*schema.Obligation, filesByObligation map[string][]string) bool {
+	for _, obligation := range obligations {
+		if len(filesByObligation[obligation.ObligationID]) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func hasAnyExpectedFiles(filesByObligation map[string][]string) bool {
+	for _, files := range filesByObligation {
+		if len(files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresTestFirst(input ClassifyInput) bool {
+	if input.TestsExist {
+		return false
+	}
+	for _, tool := range input.RequiredTools {
+		if strings.EqualFold(strings.TrimSpace(tool), "test_first") {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresInvestigation(input ClassifyInput) bool {
+	for _, tool := range input.RequiredTools {
+		tool = strings.ToLower(strings.TrimSpace(tool))
+		if tool == "investigate" || tool == "search" || tool == "inspect" {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if normalized := normalizePath(path); normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return out
+}
+
+func normalizePath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.ReplaceAll(path, "\\", "/")
+	path = strings.TrimPrefix(path, "./")
+	path = strings.Trim(path, "/")
+	return strings.ToLower(path)
 }
 
 var _ ObligationPlanner = (*service)(nil)

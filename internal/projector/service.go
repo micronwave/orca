@@ -186,9 +186,16 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 		},
 		DesignDecisions: []schema.DesignDecision{
 			{
-				Decision:               "use topology selected by planner",
-				AlternativesConsidered: []string{string(schema.TopologySingle), string(schema.TopologyImplementerReviewer), string(schema.TopologyHumanGated)},
-				Reason:                 decision.Rationale,
+				Decision: "use topology selected by planner",
+				AlternativesConsidered: []string{
+					string(schema.TopologySingle),
+					string(schema.TopologyImplementerReviewer),
+					string(schema.TopologyHumanGated),
+					string(schema.TopologyParallel),
+					string(schema.TopologyTestFirst),
+					string(schema.TopologyInvestigateThenImpl),
+				},
+				Reason: decision.Rationale,
 			},
 		},
 		PreExecutionRisks: summarizePreExecutionRisks(obligations, failures, claims),
@@ -493,7 +500,7 @@ func requiredApprovals(topology schema.Topology, obligations []*schema.Obligatio
 		if highOrMedium {
 			approvals = append(approvals, "review_projection (blocking)")
 		}
-	case schema.TopologySingle:
+	case schema.TopologySingle, schema.TopologyParallel, schema.TopologyTestFirst, schema.TopologyInvestigateThenImpl:
 		approvals = append(approvals, "review_projection (review window)")
 	}
 	if high {

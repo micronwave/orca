@@ -22,6 +22,10 @@ type Obligation struct {
 	Blocking         bool             `json:"blocking"`
 	RiskLevel        RiskLevel        `json:"risk_level"`
 	Status           ObligationStatus `json:"status"`
+	// ExpectedFiles is the planner's file-level scheduling hint for this obligation.
+	// It enables Phase 2 protected-path and overlap checks without making symbol-level
+	// conflict detection an MVP dependency.
+	ExpectedFiles []string `json:"expected_files,omitempty"`
 	// SatisfiedBy holds the evidence artifact IDs that discharge this obligation.
 	SatisfiedBy []string `json:"satisfied_by"`
 }

@@ -190,6 +190,104 @@ func TestTopologyClassifier_rules(t *testing.T) {
 			want:        schema.TopologySingle,
 			rationaleIn: "low risk",
 		},
+		{
+			name: "low risk disjoint expected files can run parallel",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-7", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-8", RiskLevel: schema.RiskLow},
+				},
+				ExpectedFilesByObligation: map[string][]string{
+					"OB-7": {"internal/planner/service.go"},
+					"OB-8": {`internal\budget\service.go`},
+				},
+				BudgetRemaining: 32000,
+			},
+			want:        schema.TopologyParallel,
+			rationaleIn: "disjoint unprotected expected files",
+		},
+		{
+			name: "low risk expected file overlap serializes",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-9", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-10", RiskLevel: schema.RiskLow},
+				},
+				ExpectedFilesByObligation: map[string][]string{
+					"OB-9":  {"./internal/planner/service.go"},
+					"OB-10": {`internal\planner\service.go`},
+				},
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "expected file overlap",
+		},
+		{
+			name: "protected path serializes",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-11", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-12", RiskLevel: schema.RiskLow},
+				},
+				ExpectedFilesByObligation: map[string][]string{
+					"OB-11": {"go.mod"},
+					"OB-12": {"internal/planner/service.go"},
+				},
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "protected path",
+		},
+		{
+			name: "mixed-case protected filenames are still detected as protected",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-11a", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-12a", RiskLevel: schema.RiskLow},
+				},
+				ExpectedFilesByObligation: map[string][]string{
+					"OB-11a": {"Dockerfile"},
+					"OB-12a": {"internal/runner/service.go"},
+				},
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "protected path",
+		},
+		{
+			name: "Makefile and Cargo.toml are detected as protected",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-11b", RiskLevel: schema.RiskLow},
+					{ObligationID: "OB-12b", RiskLevel: schema.RiskLow},
+				},
+				ExpectedFilesByObligation: map[string][]string{
+					"OB-11b": {"Makefile"},
+					"OB-12b": {"Cargo.toml"},
+				},
+			},
+			want:        schema.TopologySingle,
+			rationaleIn: "protected path",
+		},
+		{
+			name: "explicit test first signal selects test first",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-13", RiskLevel: schema.RiskLow, EvidenceRequired: []string{"test_result"}},
+				},
+				RequiredTools: []string{"test_first"},
+			},
+			want:        schema.TopologyTestFirst,
+			rationaleIn: "test_first",
+		},
+		{
+			name: "explicit investigation signal selects investigate then implement",
+			input: ClassifyInput{
+				Obligations: []*schema.Obligation{
+					{ObligationID: "OB-14", RiskLevel: schema.RiskLow},
+				},
+				RequiredTools: []string{"investigate"},
+			},
+			want:        schema.TopologyInvestigateThenImpl,
+			rationaleIn: "investigate_then_implement",
+		},
 	}
 
 	for _, tt := range tests {
@@ -215,6 +313,108 @@ func TestTopologyClassifier_rules(t *testing.T) {
 				t.Fatalf("Classify rationale = %q, want substring %q", rationale, tt.rationaleIn)
 			}
 		})
+	}
+}
+
+func TestPlan_parallelCreatesOneExecutorCapsulePerDisjointObligation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	goalID := "G-plan-parallel"
+	conditionID := "GC-plan-parallel"
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "update independent files",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "update independent files",
+			EffectiveDescription: "update independent files",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	expectedFiles := map[string]string{
+		"OB-plan-parallel-1": "internal/planner/service.go",
+		"OB-plan-parallel-2": `internal\budget\service.go`,
+	}
+	for obligationID, expectedFile := range expectedFiles {
+		if err := st.SaveObligation(ctx, &schema.Obligation{
+			ObligationID:     obligationID,
+			GoalConditionID:  conditionID,
+			Description:      "obligation " + obligationID,
+			EvidenceRequired: []string{"static_check"},
+			Blocking:         true,
+			RiskLevel:        schema.RiskLow,
+			Status:           schema.ObligationOpen,
+			ExpectedFiles:    []string{expectedFile},
+		}); err != nil {
+			t.Fatalf("SaveObligation %s: %v", obligationID, err)
+		}
+	}
+
+	orcaDir := filepath.Join(root, ".orca")
+	planner := New(st, Config{
+		OrcaDir:            orcaDir,
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   32000,
+		DefaultMaxWallTime: 300,
+		DefaultMaxRetries:  3,
+	})
+	result, err := planner.Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if result.Topology != schema.TopologyParallel {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologyParallel)
+	}
+	if len(result.CapsuleIDs) != len(expectedFiles) {
+		t.Fatalf("CapsuleIDs len = %d, want %d", len(result.CapsuleIDs), len(expectedFiles))
+	}
+
+	seenObligations := make(map[string]bool)
+	for _, capsuleID := range result.CapsuleIDs {
+		capsule, err := st.LoadCapsule(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("LoadCapsule %s: %v", capsuleID, err)
+		}
+		if capsule.Role != schema.RoleExecutor {
+			t.Fatalf("capsule %s Role = %s, want %s", capsuleID, capsule.Role, schema.RoleExecutor)
+		}
+		if capsule.TopologyDecisionID != result.DecisionID {
+			t.Fatalf("capsule %s TopologyDecisionID = %q, want %q", capsuleID, capsule.TopologyDecisionID, result.DecisionID)
+		}
+		if len(capsule.ObligationIDs) != 1 {
+			t.Fatalf("capsule %s obligation count = %d, want 1", capsuleID, len(capsule.ObligationIDs))
+		}
+		obligationID := capsule.ObligationIDs[0]
+		seenObligations[obligationID] = true
+		if len(capsule.AllowedPaths) != 1 || normalizePath(capsule.AllowedPaths[0]) != normalizePath(expectedFiles[obligationID]) {
+			t.Fatalf("capsule %s AllowedPaths = %#v, want only %q", capsuleID, capsule.AllowedPaths, expectedFiles[obligationID])
+		}
+		wantWorktree := filepath.Join(orcaDir, "capsules", capsuleID, "worktree")
+		if capsule.Sandbox.WorktreePath != wantWorktree {
+			t.Fatalf("capsule %s Sandbox.WorktreePath = %q, want %q", capsuleID, capsule.Sandbox.WorktreePath, wantWorktree)
+		}
+	}
+	for obligationID := range expectedFiles {
+		if !seenObligations[obligationID] {
+			t.Fatalf("obligation %s was not assigned to a parallel capsule", obligationID)
+		}
 	}
 }
 
