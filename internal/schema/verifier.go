@@ -39,14 +39,14 @@ type ObligationVerdict struct {
 // The verifier's job is to define what evidence is needed AND decide whether
 // available evidence satisfies obligations. orca.md §10.
 type VerifierResult struct {
-	VerifierResultID        string              `json:"verifier_result_id"`
-	PatchID                 string              `json:"patch_id"`
-	CapsuleID               string              `json:"capsule_id"`
-	ObligationResults       []ObligationVerdict `json:"obligation_results"`
+	VerifierResultID  string              `json:"verifier_result_id"`
+	PatchID           string              `json:"patch_id"`
+	CapsuleID         string              `json:"capsule_id"`
+	ObligationResults []ObligationVerdict `json:"obligation_results"`
 	// BlockingFailures lists obligation IDs or descriptions of failures that block merge.
-	BlockingFailures        []string            `json:"blocking_failures"`
-	Warnings                []string            `json:"warnings"`
-	RecommendedAction       RecommendedAction   `json:"recommended_action"`
-	RecommendationRationale string              `json:"recommendation_rationale"`
-	CreatedAt               time.Time           `json:"created_at"`
+	BlockingFailures        []string          `json:"blocking_failures"`
+	Warnings                []string          `json:"warnings"`
+	RecommendedAction       RecommendedAction `json:"recommended_action"`
+	RecommendationRationale string            `json:"recommendation_rationale"`
+	CreatedAt               time.Time         `json:"created_at"`
 }

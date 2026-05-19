@@ -20,6 +20,8 @@ import (
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/reconciler"
 	"github.com/micronwave/orca/internal/runner"
+	"github.com/micronwave/orca/internal/runner/adapters/claude"
+	"github.com/micronwave/orca/internal/runner/adapters/codex"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/verifier"
@@ -116,7 +118,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log eventlo
 		projector:      newProjector(st, cfg.Verifier),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
-		runner:         newCapsuleRunner(st, log, cfg.Adapters),
+		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters),
 		reconciler:     newReconciler(st, log),
 	}, nil
 }
@@ -321,18 +323,14 @@ func (s budgetControllerStub) ComputeROI(context.Context, string) (budget.ROI, e
 	return budget.ROI{}, notYetImplemented("budget ROI Phase 1 implementation")
 }
 
-type capsuleRunnerStub struct {
-	store  store.ArtifactStore
-	log    eventlog.EventLog
-	config config.AdapterConfig
-}
-
-func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, cfg config.AdapterConfig) runner.CapsuleRunner {
-	return capsuleRunnerStub{store: st, log: log, config: cfg}
-}
-
-func (s capsuleRunnerStub) Run(context.Context, string) (runner.RunResult, error) {
-	return runner.RunResult{}, notYetImplemented("capsule runner Phase 1 implementation")
+func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg config.AdapterConfig) runner.CapsuleRunner {
+	return runner.New(
+		st,
+		log,
+		orcaDir,
+		codex.New(orcaDir, cfg.CodexPath),
+		claude.New(orcaDir, cfg.ClaudePath),
+	)
 }
 
 type reconcilerStub struct {

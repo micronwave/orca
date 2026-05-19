@@ -74,11 +74,11 @@ type ROI struct {
 	// accepted patches normalized to token cost. orca.md §12.
 	VerifiedValuePer1KTokens float64
 
-	TotalTokensSpent       int
-	TotalWallTimeSeconds   float64
-	ObligationsDischarged  int
-	PatchesAccepted        int
-	PatchesRejected        int
+	TotalTokensSpent        int
+	TotalWallTimeSeconds    float64
+	ObligationsDischarged   int
+	PatchesAccepted         int
+	PatchesRejected         int
 	EvidenceArtifactsReused int
-	HumanInterventions     int
+	HumanInterventions      int
 }

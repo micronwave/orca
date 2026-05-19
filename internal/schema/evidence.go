@@ -19,11 +19,11 @@ const (
 // orca.md §5.6.
 type EvidenceArtifact struct {
 	EvidenceID string       `json:"evidence_id"`
-	Type        EvidenceType `json:"type"`
-	Source      string       `json:"source"`
-	Command     string       `json:"command"`
-	ExitCode    int          `json:"exit_code"`
-	Summary     string       `json:"summary"`
+	Type       EvidenceType `json:"type"`
+	Source     string       `json:"source"`
+	Command    string       `json:"command"`
+	ExitCode   int          `json:"exit_code"`
+	Summary    string       `json:"summary"`
 	// RawLogPath is a path to the full command output, or empty when inline_output is used.
 	RawLogPath string `json:"raw_log_path"`
 	// InlineOutput holds short output directly when RawLogPath is empty.

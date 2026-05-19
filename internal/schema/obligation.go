@@ -14,9 +14,9 @@ const (
 // can say progress was made. Capsules exist only to satisfy obligations.
 // orca.md §5.2.
 type Obligation struct {
-	ObligationID    string           `json:"obligation_id"`
-	GoalConditionID string           `json:"goal_condition_id"`
-	Description     string           `json:"description"`
+	ObligationID    string `json:"obligation_id"`
+	GoalConditionID string `json:"goal_condition_id"`
+	Description     string `json:"description"`
 	// EvidenceRequired lists the evidence types expected to satisfy this obligation.
 	EvidenceRequired []string         `json:"evidence_required"`
 	Blocking         bool             `json:"blocking"`

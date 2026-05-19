@@ -2,8 +2,9 @@
 // for all durable structured artifacts. Every component that persists or retrieves
 // a structured artifact must go through this interface.
 //
-// Exception: raw debug log files written by the CapsuleRunner/Adapter to
-// .orca/artifacts/logs/CAP-*/ are the one allowed direct filesystem write.
+// Exception: raw debug log files written by the CapsuleRunner/Adapter are the
+// one allowed direct filesystem write. For capsule execution transcripts this
+// follows <orcaDir>/capsules/<capsuleID>/transcript.log.
 // They are unstructured debug artifacts, not consumed by runtime components,
 // and are not mediated by this interface. orca.md §8, §9.
 //
@@ -58,7 +59,11 @@ type ArtifactStore interface {
 
 	SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule) error
 	LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error)
-	// Callers must append capsule_started or capsule_completed before calling this method.
+	// For the initial transition to CapsuleStateWorktreeCreated, callers must append
+	// capsule_started before calling this method. For the final transition to
+	// CapsuleStateCompleted or CapsuleStateFailed, callers must append capsule_completed
+	// first. Intermediate transitions (workspace_attached, setup_run, agent_running)
+	// do not require a preceding log event.
 	UpdateCapsuleState(ctx context.Context, capsuleID string, state schema.CapsuleState) error
 
 	// --- Context Projections ---

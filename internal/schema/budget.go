@@ -8,16 +8,16 @@ import "time"
 // Primary metric: verified value per 1K tokens, where verified value is based
 // on satisfied obligations, accepted patches, avoided retries, and reused evidence.
 type BudgetRecord struct {
-	BudgetID    string `json:"budget_id"`
-	GoalID      string `json:"goal_id"`
-	CapsuleID   string `json:"capsule_id,omitempty"`
+	BudgetID     string `json:"budget_id"`
+	GoalID       string `json:"goal_id"`
+	CapsuleID    string `json:"capsule_id,omitempty"`
 	ObligationID string `json:"obligation_id,omitempty"`
 
 	// Consumption
-	TokensSpent        int     `json:"tokens_spent"`
-	WallTimeSeconds    float64 `json:"wall_time_seconds"`
-	ToolCalls          int     `json:"tool_calls"`
-	Retries            int     `json:"retries"`
+	TokensSpent     int     `json:"tokens_spent"`
+	WallTimeSeconds float64 `json:"wall_time_seconds"`
+	ToolCalls       int     `json:"tool_calls"`
+	Retries         int     `json:"retries"`
 
 	// Waste signals
 	DuplicatedFileReads int `json:"duplicated_file_reads"`

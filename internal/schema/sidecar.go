@@ -12,8 +12,8 @@ const (
 // SidecarClaim is a single claim as reported by the agent in sidecar output.
 // Verified claims reference an evidence artifact; proposed claims do not.
 type SidecarClaim struct {
-	Claim    string             `json:"claim"`
-	Type     SidecarClaimStatus `json:"type"`
+	Claim string             `json:"claim"`
+	Type  SidecarClaimStatus `json:"type"`
 	// Evidence is an artifact reference (e.g. "evidence_artifacts.json#ev-test-run").
 	Evidence string `json:"evidence,omitempty"`
 }

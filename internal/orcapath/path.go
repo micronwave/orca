@@ -8,3 +8,8 @@ import "path/filepath"
 func CapsuleWorktreePath(orcaDir, capsuleID string) string {
 	return filepath.Join(orcaDir, "capsules", capsuleID, "worktree")
 }
+
+// TranscriptPath returns the deterministic transcript log path for a capsule.
+func TranscriptPath(orcaDir, capsuleID string) string {
+	return filepath.Join(orcaDir, "capsules", capsuleID, "transcript.log")
+}

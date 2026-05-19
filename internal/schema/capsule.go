@@ -29,7 +29,7 @@ const (
 	// CapsuleStatePending is the initial state assigned by the ObligationPlanner
 	// when it creates a capsule. No worktree exists yet. The CapsuleRunner
 	// transitions pending → worktree_created as its first action.
-	CapsuleStatePending         CapsuleState = "pending"
+	CapsuleStatePending           CapsuleState = "pending"
 	CapsuleStateWorktreeCreated   CapsuleState = "worktree_created"
 	CapsuleStateWorkspaceAttached CapsuleState = "workspace_attached"
 	CapsuleStateSetupRun          CapsuleState = "setup_run"
