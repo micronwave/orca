@@ -523,6 +523,33 @@ func (s *service) saveBudgetRecords(
 	if err != nil {
 		return err
 	}
+	// The patch carries the authoritative token count set by the adapter at
+	// execution time. budgetMetricsForResult has no source for tokens, so we
+	// override here rather than threading it through evidence-based metrics.
+	metrics.tokensSpent = patch.TokensUsed
+
+	// Tokens are a capsule-level cost. Split them evenly across obligation-level
+	// records, assigning remainder tokens in verdict order so per-obligation
+	// totals match the capsule summary exactly.
+	eligibleVerdicts := make([]string, 0, len(vr.ObligationResults))
+	for _, verdict := range vr.ObligationResults {
+		if _, ok := updatedStatuses[verdict.ObligationID]; ok {
+			eligibleVerdicts = append(eligibleVerdicts, verdict.ObligationID)
+		}
+	}
+	tokenShareByObligation := make(map[string]int, len(eligibleVerdicts))
+	if patch.TokensUsed > 0 && len(eligibleVerdicts) > 0 {
+		baseShare := patch.TokensUsed / len(eligibleVerdicts)
+		remainder := patch.TokensUsed % len(eligibleVerdicts)
+		for i, obligationID := range eligibleVerdicts {
+			share := baseShare
+			if i < remainder {
+				share++
+			}
+			tokenShareByObligation[obligationID] = share
+		}
+	}
+
 	discharged := countDischarged(updatedStatuses)
 
 	summaryID := "BUD-" + patch.CapsuleID
@@ -566,6 +593,7 @@ func (s *service) saveBudgetRecords(
 		if err != nil {
 			return err
 		}
+		obligationMetrics.tokensSpent = tokenShareByObligation[verdict.ObligationID]
 		recordID := "BUD-" + patch.CapsuleID + "-" + verdict.ObligationID
 		record := recordsByID[recordID]
 		found := record != nil

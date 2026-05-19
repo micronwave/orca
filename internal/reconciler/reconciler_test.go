@@ -499,6 +499,133 @@ func TestReconcile_WritesPerObligationBudgetRecord(t *testing.T) {
 	}
 }
 
+func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID   = "G-BUDTOKENS"
+		condID   = "GC-BUDTOKENS"
+		capsID   = "CAP-BUDTOKENS"
+		patchID  = "PATCH-BUDTOKENS"
+		vrID     = "VR-BUDTOKENS"
+		totalTok = 5
+	)
+	obligationIDs := []string{"OB-BUDTOKENS-1", "OB-BUDTOKENS-2", "OB-BUDTOKENS-3"}
+	evidenceIDs := []string{"EV-BUDTOKENS-1", "EV-BUDTOKENS-2", "EV-BUDTOKENS-3"}
+
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test token distribution",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+
+	for i, obligationID := range obligationIDs {
+		if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+			ObligationID:     obligationID,
+			GoalConditionID:  condID,
+			Description:      "run tests",
+			EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+			Blocking:         true,
+			RiskLevel:        schema.RiskLow,
+			Status:           schema.ObligationOpen,
+		}); err != nil {
+			t.Fatalf("SaveObligation[%d]: %v", i, err)
+		}
+		if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+			EvidenceID: evidenceIDs[i],
+			Type:       schema.EvidenceTestResult,
+			Command:    "go test ./...",
+			ExitCode:   0,
+			Supports:   []string{obligationID},
+			CreatedAt:  now,
+		}); err != nil {
+			t.Fatalf("SaveEvidence[%d]: %v", i, err)
+		}
+	}
+
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: append([]string(nil), obligationIDs...),
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: append([]string(nil), obligationIDs...),
+		Status:               schema.PatchCandidate,
+		TokensUsed:           totalTok,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	verdicts := make([]schema.ObligationVerdict, 0, len(obligationIDs))
+	for i, obligationID := range obligationIDs {
+		verdicts = append(verdicts, schema.ObligationVerdict{
+			ObligationID: obligationID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{evidenceIDs[i]},
+		})
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID:        vrID,
+		PatchID:                 patchID,
+		CapsuleID:               capsID,
+		ObligationResults:       verdicts,
+		RecommendedAction:       schema.ActionAccept,
+		RecommendationRationale: "tests passed",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	records, err := env.st.LoadBudgetForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	summaryID := "BUD-" + capsID
+	recordsByID := make(map[string]*schema.BudgetRecord, len(records))
+	for _, record := range records {
+		recordsByID[record.BudgetID] = record
+	}
+	summary := recordsByID[summaryID]
+	if summary == nil {
+		t.Fatalf("missing summary budget record %s", summaryID)
+	}
+	if summary.TokensSpent != totalTok {
+		t.Fatalf("summary TokensSpent = %d, want %d", summary.TokensSpent, totalTok)
+	}
+
+	var perObligationTotal int
+	for _, obligationID := range obligationIDs {
+		recordID := "BUD-" + capsID + "-" + obligationID
+		record := recordsByID[recordID]
+		if record == nil {
+			t.Fatalf("missing per-obligation record %s", recordID)
+		}
+		perObligationTotal += record.TokensSpent
+	}
+	if perObligationTotal != totalTok {
+		t.Fatalf("per-obligation token total = %d, want %d", perObligationTotal, totalTok)
+	}
+}
+
 type scenarioOptions struct {
 	suffix            string
 	evidenceIDs       []string
