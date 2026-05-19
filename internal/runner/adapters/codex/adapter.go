@@ -74,30 +74,61 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		return nil, fmt.Errorf("codex adapter: write briefing file %s: %w", briefingPath, err)
 	}
 
-	transcriptPath := orcapath.TranscriptPath(a.orcaDir, capsule.CapsuleID)
-	args, jsonMode, err := resolveInvocation(ctx, cmdPath, briefingPath)
-	if err != nil {
-		return nil, err
+	schemaPath := filepath.Join(capsuleDir, "sidecar_schema.json")
+	if err := os.WriteFile(schemaPath, []byte(sidecarJSONSchema()), 0o644); err != nil {
+		return nil, fmt.Errorf("codex adapter: write sidecar schema %s: %w", schemaPath, err)
 	}
-	out, stderr, runErr := runCommandWithTranscript(ctx, commandSpec{
+	sidecarPath := filepath.Join(capsuleDir, "sidecar.json")
+
+	// Resolve to absolute paths: codex runs with cmd.Dir = worktree, so any
+	// relative path would be interpreted relative to the worktree, not the
+	// orca process directory.
+	absSchemaPath, err := filepath.Abs(schemaPath)
+	if err != nil {
+		return nil, fmt.Errorf("codex adapter: resolve schema path: %w", err)
+	}
+	absSidecarPath, err := filepath.Abs(sidecarPath)
+	if err != nil {
+		return nil, fmt.Errorf("codex adapter: resolve sidecar path: %w", err)
+	}
+
+	transcriptPath := orcapath.TranscriptPath(a.orcaDir, capsule.CapsuleID)
+
+	briefingFile, err := os.Open(briefingPath)
+	if err != nil {
+		return nil, fmt.Errorf("codex adapter: open briefing for stdin: %w", err)
+	}
+	defer briefingFile.Close()
+
+	// codex exec reads the prompt from stdin when "-" is passed as the prompt argument.
+	// danger-full-access is appropriate here: the capsule runs in an isolated git worktree
+	// (.orca/capsules/<id>/worktree) that is separate from the main working tree.
+	// --output-schema constrains the model's final response to match AgentSidecarOutput.
+	// -o writes that final response to absSidecarPath so we can read it back.
+	args := []string{
+		"exec",
+		"-s", "danger-full-access",
+		"--ephemeral",
+		"--output-schema", absSchemaPath,
+		"-o", absSidecarPath,
+		"-",
+	}
+	if _, _, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
 		args:       args,
 		worktree:   capsule.Sandbox.WorktreePath,
 		transcript: transcriptPath,
-	})
-	if runErr != nil {
+		stdin:      briefingFile,
+	}); runErr != nil {
 		return nil, fmt.Errorf("codex adapter: execute failed: %w", runErr)
 	}
 
-	if !jsonMode {
+	sidecarData, err := os.ReadFile(sidecarPath)
+	if err != nil {
 		return nil, runner.ErrNoSidecar
 	}
 	sidecar := &schema.AgentSidecarOutput{}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), sidecar); err != nil {
-		combined := strings.TrimSpace(out + "\n" + stderr)
-		if strings.TrimSpace(combined) == "" {
-			return nil, runner.ErrNoSidecar
-		}
+	if err := json.Unmarshal(sidecarData, sidecar); err != nil {
 		return nil, runner.ErrInvalidSidecar
 	}
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
@@ -134,6 +165,7 @@ type commandSpec struct {
 	args       []string
 	worktree   string
 	transcript string
+	stdin      io.Reader
 }
 
 func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, string, error) {
@@ -145,6 +177,9 @@ func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, st
 
 	cmd := exec.CommandContext(ctx, spec.executable, spec.args...)
 	cmd.Dir = spec.worktree
+	if spec.stdin != nil {
+		cmd.Stdin = spec.stdin
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, file)
@@ -168,31 +203,70 @@ func ensureCleanWorktree(ctx context.Context, worktreePath string) error {
 	return nil
 }
 
-func resolveInvocation(ctx context.Context, cmdPath, briefingPath string) ([]string, bool, error) {
-	help, _ := exec.CommandContext(ctx, cmdPath, "--help").CombinedOutput()
-	helpText := strings.ToLower(string(help))
-
-	fileFlag := ""
-	for _, candidate := range []string{"--prompt-file", "--input-file", "--file"} {
-		if strings.Contains(helpText, candidate) {
-			fileFlag = candidate
-			break
-		}
-	}
-	if fileFlag == "" {
-		return nil, false, fmt.Errorf("codex adapter: unable to resolve prompt file flag from %q --help output", cmdPath)
-	}
-
-	switch {
-	case strings.Contains(helpText, "--json"):
-		return []string{"--json", fileFlag, briefingPath}, true, nil
-	case strings.Contains(helpText, "--output-format"):
-		return []string{"--output-format", "json", fileFlag, briefingPath}, true, nil
-	case strings.Contains(helpText, "--format"):
-		return []string{"--format", "json", fileFlag, briefingPath}, true, nil
-	default:
-		return []string{fileFlag, briefingPath}, false, nil
-	}
+// sidecarJSONSchema returns the JSON Schema describing AgentSidecarOutput.
+// Codex uses this via --output-schema to constrain its final response shape.
+// OpenAI structured output requires "additionalProperties": false on every
+// object in the schema, and all properties of each object must be in "required".
+func sidecarJSONSchema() string {
+	return `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["obligations_addressed", "files_changed", "commands_run", "assumptions", "claims", "risks", "follow_up_needed", "evidence_paths", "summary"],
+  "properties": {
+    "obligations_addressed": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "IDs of obligations addressed (OB-xxxx format)"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Relative paths of files modified or created"
+    },
+    "commands_run": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Shell commands executed"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Assumptions made during implementation"
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "type", "evidence"],
+        "properties": {
+          "claim": {"type": "string"},
+          "type": {"type": "string", "enum": ["verified", "proposed"]},
+          "evidence": {"type": "string", "description": "Evidence reference or empty string"}
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Risks identified"
+    },
+    "follow_up_needed": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Items requiring a follow-up capsule"
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Paths to evidence artifact files"
+    },
+    "summary": {
+      "type": "string",
+      "description": "Brief summary of what was accomplished"
+    }
+  }
+}`
 }
 
 func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSidecarOutput {
