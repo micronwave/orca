@@ -55,6 +55,12 @@ func (a *Adapter) Preflight(ctx context.Context, capsule *schema.ExecutionCapsul
 	return nil
 }
 
+// claudeJSONResult is the outer envelope from `claude -p --output-format json`.
+type claudeJSONResult struct {
+	Result  string `json:"result"`
+	IsError bool   `json:"is_error"`
+}
+
 func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
 	cmdPath, err := a.lookupCommand()
 	if err != nil {
@@ -75,29 +81,45 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	}
 
 	transcriptPath := orcapath.TranscriptPath(a.orcaDir, capsule.CapsuleID)
-	args, jsonMode, err := resolveInvocation(ctx, cmdPath, briefingPath)
+
+	briefingFile, err := os.Open(briefingPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("claude adapter: open briefing for stdin: %w", err)
 	}
-	out, stderr, runErr := runCommandWithTranscript(ctx, commandSpec{
+	defer briefingFile.Close()
+
+	// -p runs non-interactively; stdin is the prompt.
+	// --output-format json wraps the response in a JSON envelope.
+	// --json-schema constrains the model's response to match AgentSidecarOutput.
+	// --no-session-persistence avoids writing session history to disk.
+	// --permission-mode bypassPermissions avoids interactive approval prompts.
+	args := []string{
+		"-p",
+		"--output-format", "json",
+		"--json-schema", sidecarJSONSchemaInline(),
+		"--no-session-persistence",
+		"--permission-mode", "bypassPermissions",
+	}
+	stdout, _, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
 		args:       args,
 		worktree:   capsule.Sandbox.WorktreePath,
 		transcript: transcriptPath,
+		stdin:      briefingFile,
 	})
 	if runErr != nil {
 		return nil, fmt.Errorf("claude adapter: execute failed: %w", runErr)
 	}
 
-	if !jsonMode {
+	outer := &claudeJSONResult{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), outer); err != nil {
+		return nil, runner.ErrNoSidecar
+	}
+	if outer.IsError || strings.TrimSpace(outer.Result) == "" {
 		return nil, runner.ErrNoSidecar
 	}
 	sidecar := &schema.AgentSidecarOutput{}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), sidecar); err != nil {
-		combined := strings.TrimSpace(out + "\n" + stderr)
-		if strings.TrimSpace(combined) == "" {
-			return nil, runner.ErrNoSidecar
-		}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outer.Result)), sidecar); err != nil {
 		return nil, runner.ErrInvalidSidecar
 	}
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
@@ -134,6 +156,7 @@ type commandSpec struct {
 	args       []string
 	worktree   string
 	transcript string
+	stdin      io.Reader
 }
 
 func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, string, error) {
@@ -145,6 +168,9 @@ func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, st
 
 	cmd := exec.CommandContext(ctx, spec.executable, spec.args...)
 	cmd.Dir = spec.worktree
+	if spec.stdin != nil {
+		cmd.Stdin = spec.stdin
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, file)
@@ -168,31 +194,10 @@ func ensureCleanWorktree(ctx context.Context, worktreePath string) error {
 	return nil
 }
 
-func resolveInvocation(ctx context.Context, cmdPath, briefingPath string) ([]string, bool, error) {
-	help, _ := exec.CommandContext(ctx, cmdPath, "--help").CombinedOutput()
-	helpText := strings.ToLower(string(help))
-
-	fileFlag := ""
-	for _, candidate := range []string{"--prompt-file", "--input-file", "--file"} {
-		if strings.Contains(helpText, candidate) {
-			fileFlag = candidate
-			break
-		}
-	}
-	if fileFlag == "" {
-		return nil, false, fmt.Errorf("claude adapter: unable to resolve prompt file flag from %q --help output", cmdPath)
-	}
-
-	switch {
-	case strings.Contains(helpText, "--json"):
-		return []string{"--json", fileFlag, briefingPath}, true, nil
-	case strings.Contains(helpText, "--output-format"):
-		return []string{"--output-format", "json", fileFlag, briefingPath}, true, nil
-	case strings.Contains(helpText, "--format"):
-		return []string{"--format", "json", fileFlag, briefingPath}, true, nil
-	default:
-		return []string{fileFlag, briefingPath}, false, nil
-	}
+// sidecarJSONSchemaInline returns the AgentSidecarOutput schema as a compact
+// single-line JSON string, suitable for passing to claude via --json-schema.
+func sidecarJSONSchemaInline() string {
+	return `{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","required":["obligations_addressed","files_changed","commands_run","assumptions","claims","risks","follow_up_needed","evidence_paths"],"properties":{"obligations_addressed":{"type":"array","items":{"type":"string"},"description":"IDs of obligations addressed (OB-xxxx format)"},"files_changed":{"type":"array","items":{"type":"string"},"description":"Relative paths of files modified or created"},"commands_run":{"type":"array","items":{"type":"string"},"description":"Shell commands executed"},"assumptions":{"type":"array","items":{"type":"string"}},"claims":{"type":"array","items":{"type":"object","required":["claim","type"],"properties":{"claim":{"type":"string"},"type":{"type":"string","enum":["verified","proposed"]},"evidence":{"type":"string"}}}},"risks":{"type":"array","items":{"type":"string"}},"follow_up_needed":{"type":"array","items":{"type":"string"}},"evidence_paths":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}}}`
 }
 
 func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSidecarOutput {
