@@ -32,8 +32,17 @@ package verifier
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/micronwave/orca/internal/config"
+	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/schema"
+	"github.com/micronwave/orca/internal/store"
 )
 
 // VerifierEngine has two jobs (orca.md §6, §10):
@@ -66,4 +75,429 @@ type VerifierEngine interface {
 	// The RecommendedAction field is the authoritative signal consumed by the
 	// Reconciler: accept, retry, split, reject, or human_review.
 	Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error)
+}
+
+// GateRunner abstracts subprocess execution for verifier gates.
+type GateRunner interface {
+	Run(ctx context.Context, command, workingDir string) (exitCode int, output string, err error)
+}
+
+type service struct {
+	store          store.ArtifactStore
+	config         config.VerifierConfig
+	runner         GateRunner
+	commandChecker func(string) error
+}
+
+// New returns the default VerifierEngine implementation.
+func New(st store.ArtifactStore, cfg config.VerifierConfig, runner GateRunner) VerifierEngine {
+	if runner == nil {
+		runner = execGateRunner{}
+	}
+	return &service{
+		store:          st,
+		config:         cfg,
+		runner:         runner,
+		commandChecker: checkCommandPresent,
+	}
+}
+
+func (s *service) ProposeObligations(ctx context.Context, goalID string) ([]string, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("verifier: store is required")
+	}
+	goal, err := s.store.LoadGoal(ctx, goalID)
+	if err != nil {
+		return nil, fmt.Errorf("verifier: load goal %s: %w", goalID, err)
+	}
+
+	obligationIDs := make([]string, 0, len(goal.GoalConditions)*3)
+	for _, condition := range goal.GoalConditions {
+		if condition.Status != schema.GoalConditionUnmet && condition.Status != schema.GoalConditionPartiallyMet {
+			continue
+		}
+		obligations := []schema.Obligation{
+			{
+				ObligationID:     idgen.New("OB"),
+				GoalConditionID:  condition.ID,
+				Description:      "Run all tests and confirm exit code 0",
+				EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+				Blocking:         true,
+				RiskLevel:        goal.RiskLevel,
+				Status:           schema.ObligationOpen,
+			},
+			{
+				ObligationID:     idgen.New("OB"),
+				GoalConditionID:  condition.ID,
+				Description:      "Run static checks (vet/lint/typecheck) and confirm pass",
+				EvidenceRequired: []string{string(schema.EvidenceLintResult), string(schema.EvidenceTypecheckResult)},
+				Blocking:         true,
+				RiskLevel:        schema.RiskLow,
+				Status:           schema.ObligationOpen,
+			},
+			{
+				ObligationID:     idgen.New("OB"),
+				GoalConditionID:  condition.ID,
+				Description:      "Confirm only intended files changed (scope check)",
+				EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+				Blocking:         false,
+				RiskLevel:        schema.RiskLow,
+				Status:           schema.ObligationOpen,
+			},
+		}
+		for i := range obligations {
+			if err := s.store.SaveObligation(ctx, &obligations[i]); err != nil {
+				return nil, fmt.Errorf("verifier: save obligation %s: %w", obligations[i].ObligationID, err)
+			}
+			obligationIDs = append(obligationIDs, obligations[i].ObligationID)
+		}
+	}
+	return obligationIDs, nil
+}
+
+func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("verifier: store is required")
+	}
+	if s.runner == nil {
+		return nil, fmt.Errorf("verifier: gate runner is required")
+	}
+
+	patch, err := s.store.LoadPatch(ctx, patchID)
+	if err != nil {
+		return nil, fmt.Errorf("verifier: load patch %s: %w", patchID, err)
+	}
+	capsule, err := s.store.LoadCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		return nil, fmt.Errorf("verifier: load capsule %s: %w", patch.CapsuleID, err)
+	}
+	claimed := patch.ObligationIDsClaimed
+	obligationRefs := claimed
+	if len(obligationRefs) == 0 {
+		obligationRefs = capsule.ObligationIDs
+	}
+
+	workingDir := strings.TrimSpace(s.config.WorkingDir)
+	if workingDir == "" {
+		workingDir = strings.TrimSpace(capsule.Sandbox.WorktreePath)
+	}
+
+	var (
+		createdEvidence    []*schema.EvidenceArtifact
+		createdEvidenceIDs []string
+		warnings           []string
+		blockingFailures   []string
+	)
+
+	if strings.TrimSpace(patch.BaseCommit) == "" {
+		warnings = append(warnings, "preflight: patch base commit is empty; clean-base check skipped")
+	}
+	for _, gate := range s.config.Gates {
+		if strings.TrimSpace(gate.Command) == "" {
+			blockingFailures = append(blockingFailures, fmt.Sprintf("preflight: verifier gate %q has empty command", gate.Name))
+			continue
+		}
+		if err := s.commandChecker(gate.Command); err != nil {
+			blockingFailures = append(
+				blockingFailures,
+				fmt.Sprintf("preflight: verifier gate %q command not found: %v", gate.Name, err),
+			)
+		}
+	}
+
+	scopeExitCode := 0
+	scopeSummary := "scope check passed"
+	if violations := findScopeViolations(patch.ChangedFiles, capsule.AllowedPaths, capsule.ForbiddenPaths); len(violations) > 0 {
+		scopeExitCode = 1
+		scopeSummary = "scope check failed: " + strings.Join(violations, ", ")
+	}
+	scopeEvidence, err := s.saveEvidence(ctx, schema.EvidenceDiffRiskReport, "scope check", scopeExitCode, scopeSummary, obligationRefs)
+	if err != nil {
+		return nil, err
+	}
+	createdEvidence = append(createdEvidence, scopeEvidence)
+	createdEvidenceIDs = append(createdEvidenceIDs, scopeEvidence.EvidenceID)
+
+	testGateIndex := -1
+	for i, gate := range s.config.Gates {
+		if isTestGate(gate) {
+			testGateIndex = i
+			break
+		}
+	}
+
+	for i, gate := range s.config.Gates {
+		if i == testGateIndex {
+			continue
+		}
+		exitCode, output, runErr := s.runner.Run(ctx, gate.Command, workingDir)
+		if runErr != nil {
+			return nil, fmt.Errorf("verifier: run static gate %q: %w", gate.Name, runErr)
+		}
+		evidenceType := staticEvidenceType(gate)
+		evidence, err := s.saveEvidence(ctx, evidenceType, gate.Command, exitCode, summarizeOutput(output), obligationRefs)
+		if err != nil {
+			return nil, err
+		}
+		createdEvidence = append(createdEvidence, evidence)
+		createdEvidenceIDs = append(createdEvidenceIDs, evidence.EvidenceID)
+		if gate.Blocking && exitCode != 0 {
+			blockingFailures = append(blockingFailures, fmt.Sprintf("static gate %q failed", gate.Name))
+		}
+	}
+
+	if testGateIndex >= 0 {
+		testGate := s.config.Gates[testGateIndex]
+		exitCode, output, runErr := s.runner.Run(ctx, testGate.Command, workingDir)
+		if runErr != nil {
+			return nil, fmt.Errorf("verifier: run test gate %q: %w", testGate.Name, runErr)
+		}
+		evidence, err := s.saveEvidence(ctx, schema.EvidenceTestResult, testGate.Command, exitCode, summarizeOutput(output), obligationRefs)
+		if err != nil {
+			return nil, err
+		}
+		createdEvidence = append(createdEvidence, evidence)
+		createdEvidenceIDs = append(createdEvidenceIDs, evidence.EvidenceID)
+		if testGate.Blocking && exitCode != 0 {
+			blockingFailures = append(blockingFailures, fmt.Sprintf("test gate %q failed", testGate.Name))
+		}
+	} else {
+		warnings = append(warnings, "targeted tests stage: no test gate configured")
+	}
+
+	obligationResults := make([]schema.ObligationVerdict, 0, len(claimed))
+	for _, obligationID := range claimed {
+		obligation, err := s.store.LoadObligation(ctx, obligationID)
+		if err != nil {
+			return nil, fmt.Errorf("verifier: load obligation %s: %w", obligationID, err)
+		}
+		verdict := schema.VerdictSatisfied
+		note := "all required evidence checks passed"
+		for _, required := range obligation.EvidenceRequired {
+			relevant := evidenceForType(createdEvidence, required)
+			if len(relevant) == 0 {
+				verdict = schema.VerdictFailed
+				note = fmt.Sprintf("missing evidence type %s", required)
+				continue
+			}
+			if hasFailedEvidence(relevant) {
+				verdict = schema.VerdictFailed
+				note = fmt.Sprintf("evidence type %s contains failing result", required)
+			}
+		}
+		if obligation.Blocking && verdict == schema.VerdictFailed {
+			blockingFailures = append(blockingFailures, obligation.ObligationID)
+		}
+		obligationResults = append(obligationResults, schema.ObligationVerdict{
+			ObligationID: obligationID,
+			Verdict:      verdict,
+			EvidenceIDs:  append([]string(nil), createdEvidenceIDs...),
+			Notes:        note,
+		})
+	}
+
+	blockingFailures = uniqueStrings(blockingFailures)
+	recommendedAction := schema.ActionAccept
+	recommendationRationale := "all blocking verifier stages passed"
+	if len(blockingFailures) > 0 {
+		recommendedAction = schema.ActionRetry
+		recommendationRationale = "one or more blocking checks failed"
+	}
+
+	result := &schema.VerifierResult{
+		VerifierResultID:        idgen.New("VR"),
+		PatchID:                 patch.PatchID,
+		CapsuleID:               patch.CapsuleID,
+		ObligationResults:       obligationResults,
+		BlockingFailures:        blockingFailures,
+		Warnings:                warnings,
+		RecommendedAction:       recommendedAction,
+		RecommendationRationale: recommendationRationale,
+		CreatedAt:               time.Now().UTC(),
+	}
+	if err := s.store.SaveVerifierResult(ctx, result); err != nil {
+		return nil, fmt.Errorf("verifier: save verifier result %s: %w", result.VerifierResultID, err)
+	}
+	return result, nil
+}
+
+type execGateRunner struct{}
+
+func (execGateRunner) Run(ctx context.Context, command, workingDir string) (int, string, error) {
+	executable, args, err := parseCommand(command)
+	if err != nil {
+		return -1, "", err
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
+	if strings.TrimSpace(workingDir) != "" {
+		cmd.Dir = workingDir
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), string(out), nil
+	}
+	return -1, string(out), fmt.Errorf("verifier: execute %q: %w", command, err)
+}
+
+func checkCommandPresent(command string) error {
+	executable, _, err := parseCommand(command)
+	if err != nil {
+		return err
+	}
+	_, err = exec.LookPath(executable)
+	return err
+}
+
+func parseCommand(command string) (string, []string, error) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return "", nil, fmt.Errorf("verifier: command is required")
+	}
+	if trimmed[0] == '"' || trimmed[0] == '\'' {
+		quote := trimmed[0]
+		end := strings.IndexByte(trimmed[1:], quote)
+		if end < 0 {
+			return "", nil, fmt.Errorf("verifier: malformed command %q", command)
+		}
+		executable := trimmed[1 : end+1]
+		rest := strings.TrimSpace(trimmed[end+2:])
+		return executable, strings.Fields(rest), nil
+	}
+	parts := strings.Fields(trimmed)
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("verifier: command is required")
+	}
+	return parts[0], parts[1:], nil
+}
+
+func isTestGate(gate config.VerifierGate) bool {
+	lower := strings.ToLower(gate.Name + " " + gate.Command)
+	return strings.Contains(lower, "test")
+}
+
+func staticEvidenceType(gate config.VerifierGate) schema.EvidenceType {
+	lower := strings.ToLower(gate.Name + " " + gate.Command)
+	if strings.Contains(lower, "typecheck") || strings.Contains(lower, "go build") {
+		return schema.EvidenceTypecheckResult
+	}
+	return schema.EvidenceLintResult
+}
+
+func summarizeOutput(output string) string {
+	out := strings.TrimSpace(output)
+	if len(out) <= 300 {
+		return out
+	}
+	return out[:300]
+}
+
+func evidenceForType(all []*schema.EvidenceArtifact, evidenceType string) []*schema.EvidenceArtifact {
+	out := make([]*schema.EvidenceArtifact, 0, len(all))
+	for _, evidence := range all {
+		if string(evidence.Type) == evidenceType {
+			out = append(out, evidence)
+		}
+	}
+	return out
+}
+
+func hasFailedEvidence(evidence []*schema.EvidenceArtifact) bool {
+	for _, item := range evidence {
+		if item.ExitCode != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func (s *service) saveEvidence(
+	ctx context.Context,
+	evidenceType schema.EvidenceType,
+	command string,
+	exitCode int,
+	summary string,
+	obligationRefs []string,
+) (*schema.EvidenceArtifact, error) {
+	supports := append([]string(nil), obligationRefs...)
+	weakens := []string(nil)
+	if exitCode != 0 {
+		supports = nil
+		weakens = append([]string(nil), obligationRefs...)
+	}
+	evidence := &schema.EvidenceArtifact{
+		EvidenceID: idgen.New("EV"),
+		Type:       evidenceType,
+		Source:     "verifier",
+		Command:    command,
+		ExitCode:   exitCode,
+		Summary:    summary,
+		Supports:   supports,
+		Weakens:    weakens,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := s.store.SaveEvidence(ctx, evidence); err != nil {
+		return nil, fmt.Errorf("verifier: save evidence %s: %w", evidence.EvidenceID, err)
+	}
+	return evidence, nil
+}
+
+func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {
+	violations := make([]string, 0)
+	for _, file := range changedFiles {
+		file = filepath.Clean(file)
+		if file == "." {
+			continue
+		}
+		if inForbiddenPath(file, forbiddenPaths) {
+			violations = append(violations, file+" matches forbidden path")
+			continue
+		}
+		if len(allowedPaths) > 0 && !inAllowedPath(file, allowedPaths) {
+			violations = append(violations, file+" is outside allowed paths")
+		}
+	}
+	return violations
+}
+
+func inForbiddenPath(file string, forbiddenPaths []string) bool {
+	for _, forbidden := range forbiddenPaths {
+		forbidden = filepath.Clean(strings.TrimSpace(forbidden))
+		if forbidden == "." || forbidden == "" {
+			continue
+		}
+		if file == forbidden || strings.HasPrefix(file, forbidden+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func inAllowedPath(file string, allowedPaths []string) bool {
+	for _, allowed := range allowedPaths {
+		allowed = filepath.Clean(strings.TrimSpace(allowed))
+		if allowed == "." || allowed == "" {
+			continue
+		}
+		if file == allowed || strings.HasPrefix(file, allowed+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }

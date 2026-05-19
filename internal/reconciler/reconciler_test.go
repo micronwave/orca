@@ -105,6 +105,101 @@ func TestReconcileRejectsClaimedBlockingObligationWithoutVerdict(t *testing.T) {
 	}
 }
 
+func TestReconcileAcceptsWhenNonBlockingObligationHasGhostEvidence(t *testing.T) {
+	// Ghost evidence on a non-blocking obligation must not block acceptance.
+	// The invariant "must not accept without evidence for every blocking obligation"
+	// applies only to blocking obligations (orca.md §11, module_boundaries.md).
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-NBGHOST"
+		condID  = "GC-NBGHOST"
+		oblID   = "OB-NBGHOST"
+		capsID  = "CAP-NBGHOST"
+		patchID = "PATCH-NBGHOST"
+		vrID    = "VR-NBGHOST"
+		ghostID = "EV-NBGHOST-GHOST"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test non-blocking ghost evidence",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "scope check",
+		EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		Blocking:         false,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// ghostID is listed in the verdict but the artifact is never saved to the store.
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{ghostID},
+		}},
+		RecommendedAction:       schema.ActionAccept,
+		RecommendationRationale: "scope check passed per agent report",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log).Reconcile(env.ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted = false, reason=%q; ghost evidence on a non-blocking "+
+			"obligation must not block patch acceptance", result.BlockingReason)
+	}
+
+	// The obligation itself must be marked failed (evidence is absent),
+	// but the patch is accepted because the obligation is non-blocking.
+	obl, err := env.st.LoadObligation(env.ctx, oblID)
+	if err != nil {
+		t.Fatalf("LoadObligation: %v", err)
+	}
+	if obl.Status != schema.ObligationFailed {
+		t.Fatalf("obligation status = %s, want failed (ghost evidence marks obligation failed even when non-blocking)", obl.Status)
+	}
+}
+
 func TestReconcileAcceptsPatchAndSnapshotsLastPreSnapshotEvent(t *testing.T) {
 	env := newTestEnv(t)
 	ids := saveReconcileScenario(t, env, scenarioOptions{

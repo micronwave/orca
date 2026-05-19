@@ -259,33 +259,12 @@ func notYetImplemented(name string) error {
 	return fmt.Errorf("%s: %w", name, errNotYetImplemented)
 }
 
-type intentCompilerStub struct {
-	store store.ArtifactStore
-}
-
 func newIntentCompiler(st store.ArtifactStore) intent.IntentCompiler {
-	return intentCompilerStub{store: st}
-}
-
-func (s intentCompilerStub) Compile(context.Context, string) (*schema.GoalIR, error) {
-	return nil, notYetImplemented("intent compiler deterministic Phase 1 implementation")
-}
-
-type verifierEngineStub struct {
-	store  store.ArtifactStore
-	config config.VerifierConfig
+	return intent.New(st)
 }
 
 func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig) verifier.VerifierEngine {
-	return verifierEngineStub{store: st, config: cfg}
-}
-
-func (s verifierEngineStub) ProposeObligations(context.Context, string) ([]string, error) {
-	return nil, notYetImplemented("verifier fixed-obligation Phase 1 implementation")
-}
-
-func (s verifierEngineStub) Verify(context.Context, string) (*schema.VerifierResult, error) {
-	return nil, notYetImplemented("verifier gate Phase 1 implementation")
+	return verifier.New(st, cfg, nil)
 }
 
 type plannerStub struct {

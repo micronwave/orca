@@ -43,10 +43,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
+	"github.com/micronwave/orca/internal/intent"
 	"github.com/micronwave/orca/internal/reconciler"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
+	"github.com/micronwave/orca/internal/verifier"
 )
 
 // ── Test environment ──────────────────────────────────────────────────────────
@@ -91,17 +94,11 @@ type scenarioIDs struct {
 //	intent_compiler → verifier.ProposeObligations → obligation_planner →
 //	context_compiler → capsule_runner → verifier.Verify
 //
-// It uses direct store and log calls because real component implementations
-// do not yet exist. The state it produces is identical to what a correct
-// implementation would produce — same events, same artifact files, same field
-// values. When components are built, this helper can be replaced with real
-// orchestrator calls and the tests must continue to pass.
+// It uses real intent/verifier calls for steps 1-2, then direct store/log writes
+// for downstream components that are still implemented in later phases.
 func buildCompleteScenario(t *testing.T, env *integEnv) scenarioIDs {
 	t.Helper()
 	ids := scenarioIDs{
-		GoalID:           "G-INT-1",
-		ConditionID:      "GC-INT-1",
-		ObligationID:     "OB-INT-1",
 		CapsuleID:        "CAP-INT-1",
 		PatchID:          "PATCH-INT-1",
 		EvidenceID:       "EV-INT-1",
@@ -110,34 +107,35 @@ func buildCompleteScenario(t *testing.T, env *integEnv) scenarioIDs {
 	ctx := env.ctx
 
 	// Step 1 — intent_compiler: creates GoalIR (store emits goal_created).
-	if err := env.st.SaveGoal(ctx, &schema.GoalIR{
-		GoalID:         ids.GoalID,
-		OriginalIntent: "Write integration test coverage for the proof runtime",
-		GoalConditions: []schema.GoalCondition{{
-			ID:                   ids.ConditionID,
-			Description:          "integration tests pass with zero failures",
-			EffectiveDescription: "integration tests pass with zero failures",
-			Status:               schema.GoalConditionUnmet,
-		}},
-		RiskLevel: schema.RiskLow,
-		CreatedAt: time.Now().UTC(),
-		Status:    schema.GoalStatusActive,
-	}); err != nil {
-		t.Fatalf("buildCompleteScenario: SaveGoal: %v", err)
+	intentCompiler := intent.New(env.st)
+	goal, err := intentCompiler.Compile(ctx, "Write integration test coverage for the proof runtime")
+	if err != nil {
+		t.Fatalf("buildCompleteScenario: intent.Compile: %v", err)
 	}
+	if len(goal.GoalConditions) == 0 {
+		t.Fatal("buildCompleteScenario: intent.Compile produced zero goal conditions")
+	}
+	ids.GoalID = goal.GoalID
+	ids.ConditionID = goal.GoalConditions[0].ID
 
-	// Step 2 — verifier.ProposeObligations: creates initial Obligation
+	// Step 2 — verifier.ProposeObligations: creates initial obligations
 	// (store emits obligation_created).
-	if err := env.st.SaveObligation(ctx, &schema.Obligation{
-		ObligationID:     ids.ObligationID,
-		GoalConditionID:  ids.ConditionID,
-		Description:      "go test ./... exits 0 with coverage ≥ 80%",
-		EvidenceRequired: []string{"test_result"},
-		Blocking:         true,
-		RiskLevel:        schema.RiskLow,
-		Status:           schema.ObligationOpen,
-	}); err != nil {
-		t.Fatalf("buildCompleteScenario: SaveObligation: %v", err)
+	verifierEngine := verifier.New(env.st, config.VerifierConfig{}, nil)
+	if _, err := verifierEngine.ProposeObligations(ctx, ids.GoalID); err != nil {
+		t.Fatalf("buildCompleteScenario: verifier.ProposeObligations: %v", err)
+	}
+	obligations, err := env.st.LoadObligationsForCondition(ctx, ids.ConditionID)
+	if err != nil {
+		t.Fatalf("buildCompleteScenario: LoadObligationsForCondition: %v", err)
+	}
+	for _, obligation := range obligations {
+		if obligation.Description == "Run all tests and confirm exit code 0" {
+			ids.ObligationID = obligation.ObligationID
+			break
+		}
+	}
+	if ids.ObligationID == "" {
+		t.Fatal("buildCompleteScenario: missing tests obligation created by verifier")
 	}
 
 	// Step 3 — obligation_planner: creates ExecutionCapsule (store emits capsule_created).
@@ -534,8 +532,15 @@ func TestCrashResumableRun(t *testing.T) {
 	if goal.Status != schema.GoalStatusActive {
 		t.Errorf("replayed goal status = %s, want active", goal.Status)
 	}
-	if len(goal.GoalConditions) != 1 || goal.GoalConditions[0].ID != ids.ConditionID {
-		t.Errorf("replayed goal conditions = %+v, want [{ID:%s}]", goal.GoalConditions, ids.ConditionID)
+	conditionFound := false
+	for _, condition := range goal.GoalConditions {
+		if condition.ID == ids.ConditionID {
+			conditionFound = true
+			break
+		}
+	}
+	if !conditionFound {
+		t.Errorf("replayed goal conditions = %+v, want condition ID %s present", goal.GoalConditions, ids.ConditionID)
 	}
 
 	obl := mustLoadObligation(t, env, ids.ObligationID)

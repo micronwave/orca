@@ -196,12 +196,10 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 		for _, evidenceID := range verdict.EvidenceIDs {
 			if _, err := s.store.LoadEvidence(ctx, evidenceID); err != nil {
 				if errors.Is(err, store.ErrNotFound) {
-					reason := fmt.Sprintf("blocking obligation %s references absent evidence artifact %s", obl.ObligationID, evidenceID)
-					if !obl.Blocking {
-						reason = fmt.Sprintf("obligation %s references absent evidence artifact %s", obl.ObligationID, evidenceID)
-					}
-					reject(&result, reason)
 					updatedStatuses[obl.ObligationID] = schema.ObligationFailed
+					if obl.Blocking {
+						reject(&result, fmt.Sprintf("blocking obligation %s references absent evidence artifact %s", obl.ObligationID, evidenceID))
+					}
 					continue
 				}
 				return ReconcileResult{}, fmt.Errorf("reconciler: load evidence %s: %w", evidenceID, err)
