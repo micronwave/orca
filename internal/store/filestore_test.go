@@ -212,9 +212,9 @@ func TestGoal_UpdateStatus(t *testing.T) {
 
 func TestGoal_SaveMaterializationFailureReturnsCommittedEvent(t *testing.T) {
 	e := newEnv(t)
-	blockedPath := filepath.Join(e.root, "state", "goals", "G-FAIL.json")
+	blockedPath := filepath.Join(e.root, "state", "goals", "G-FAIL.json.tmp")
 	if err := os.Mkdir(blockedPath, 0o755); err != nil {
-		t.Fatalf("create directory at artifact path: %v", err)
+		t.Fatalf("create directory at temp artifact path: %v", err)
 	}
 
 	err := e.st.SaveGoal(e.ctx, &schema.GoalIR{
@@ -409,9 +409,13 @@ func TestCapsule_UpdateState(t *testing.T) {
 
 func TestProjection_SaveLoadExecutor(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
 	p := &schema.ContextProjection{
 		ContextProjectionID: "CTX-1",
 		Role:                schema.ProjectionRoleExecutor,
+		SourceArtifactIDs:   []string{"CAP-1"},
 		TokenBudget:         4096,
 		CreatedAt:           time.Now().UTC(),
 	}
@@ -429,10 +433,14 @@ func TestProjection_SaveLoadExecutor(t *testing.T) {
 
 func TestProjection_SaveLoadHumanSummary(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
 	p := &schema.HumanSummaryProjection{
 		ContextProjection: schema.ContextProjection{
 			ContextProjectionID: "CTX-2",
 			Role:                schema.ProjectionRoleHumanSummary,
+			SourceArtifactIDs:   []string{"CAP-1"},
 			CreatedAt:           time.Now().UTC(),
 		},
 		GoalPlain:              "Fix the auth bug",
@@ -452,12 +460,15 @@ func TestProjection_SaveLoadHumanSummary(t *testing.T) {
 
 func TestProjection_BothEmitEvent(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
 	_ = e.st.SaveProjection(e.ctx, &schema.ContextProjection{
-		ContextProjectionID: "CTX-1", Role: schema.ProjectionRoleExecutor, CreatedAt: time.Now().UTC(),
+		ContextProjectionID: "CTX-1", Role: schema.ProjectionRoleExecutor, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
 	})
 	_ = e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
 		ContextProjection: schema.ContextProjection{
-			ContextProjectionID: "CTX-2", Role: schema.ProjectionRoleHumanSummary, CreatedAt: time.Now().UTC(),
+			ContextProjectionID: "CTX-2", Role: schema.ProjectionRoleHumanSummary, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
 		},
 	})
 	if n := e.countEvents(t, schema.EventContextProjectionCreated); n != 2 {
@@ -467,15 +478,20 @@ func TestProjection_BothEmitEvent(t *testing.T) {
 
 func TestProjection_SaveEnforcesReplayRole(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
 	exec := &schema.ContextProjection{
 		ContextProjectionID: "CTX-exec",
 		Role:                schema.ProjectionRoleHumanSummary,
+		SourceArtifactIDs:   []string{"CAP-1"},
 		CreatedAt:           time.Now().UTC(),
 	}
 	human := &schema.HumanSummaryProjection{
 		ContextProjection: schema.ContextProjection{
 			ContextProjectionID: "CTX-human",
 			Role:                schema.ProjectionRoleExecutor,
+			SourceArtifactIDs:   []string{"CAP-1"},
 			CreatedAt:           time.Now().UTC(),
 		},
 		GoalPlain: "review this",
@@ -590,6 +606,8 @@ func TestPatch_LoadForCapsule(t *testing.T) {
 
 func TestEvidence_SaveLoad(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	ev := &schema.EvidenceArtifact{
 		EvidenceID: "EV-1", Type: schema.EvidenceTestResult,
 		Command: "go test ./...", ExitCode: 0,
@@ -609,8 +627,10 @@ func TestEvidence_SaveLoad(t *testing.T) {
 
 func TestEvidence_SaveEmitsEvent(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	_ = e.st.SaveEvidence(e.ctx, &schema.EvidenceArtifact{
-		EvidenceID: "EV-1", Type: schema.EvidenceTestResult, CreatedAt: time.Now().UTC(),
+		EvidenceID: "EV-1", Type: schema.EvidenceTestResult, Supports: []string{"OB-1"}, CreatedAt: time.Now().UTC(),
 	})
 	if n := e.countEvents(t, schema.EventEvidenceArtifactCreated); n != 1 {
 		t.Errorf("expected 1 evidence_artifact_created event, got %d", n)
@@ -619,6 +639,9 @@ func TestEvidence_SaveEmitsEvent(t *testing.T) {
 
 func TestEvidence_LoadForObligation(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
 	for _, ev := range []*schema.EvidenceArtifact{
 		{EvidenceID: "EV-1", Type: schema.EvidenceTestResult, Supports: []string{"OB-1"}, CreatedAt: time.Now().UTC()},
 		{EvidenceID: "EV-2", Type: schema.EvidenceLintResult, Weakens: []string{"OB-1"}, CreatedAt: time.Now().UTC()},
@@ -927,15 +950,21 @@ func TestFailure_LoadAllFailures_OrphanedCapsuleSkipped(t *testing.T) {
 		t.Fatalf("SaveFailure: %v", err)
 	}
 	// Write a failure whose capsule file does not exist (ErrNotFound should
-	// cause it to be silently skipped, not returned as an error).
+	// cause it to be silently skipped, not returned as an error). This bypasses
+	// SaveFailure because saves now reject unresolvable GoalID chains.
 	capsuleJSON := filepath.Join(e.root, "state", "capsules", "CAP-orphan.json")
 	if err := os.WriteFile(capsuleJSON, []byte(`{"capsule_id":"CAP-orphan","obligation_ids":[]}`), 0o644); err != nil {
 		t.Fatalf("write orphan capsule file: %v", err)
 	}
-	if err := e.st.SaveFailure(e.ctx, &schema.FailureFingerprint{
+	orphanFailure := &schema.FailureFingerprint{
 		FailureID: "FAIL-orphan", SourceCapsuleID: "CAP-orphan", FailureType: schema.FailureLint,
-	}); err != nil {
-		t.Fatalf("SaveFailure orphan: %v", err)
+	}
+	orphanBytes, err := json.Marshal(orphanFailure)
+	if err != nil {
+		t.Fatalf("marshal orphan failure: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(e.root, "artifacts", "failures", "FAIL-orphan.json"), orphanBytes, 0o644); err != nil {
+		t.Fatalf("write orphan failure: %v", err)
 	}
 	// Now remove the orphan capsule file to simulate a missing-capsule scenario.
 	if err := os.Remove(capsuleJSON); err != nil {
@@ -1030,10 +1059,11 @@ func TestVerifierResult_LoadForPatch_NotFound(t *testing.T) {
 
 func TestDecision_SaveLoad(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	d := &schema.DecisionRecord{
 		DecisionID: "DEC-1", Context: "topology selection",
 		Decision: "single", Rationale: "low risk, sequential",
-		MadeBy: "system", CreatedAt: time.Now().UTC(),
+		MadeBy: "system", RelatedIDs: []string{"G-1"}, CreatedAt: time.Now().UTC(),
 	}
 	if err := e.st.SaveDecision(e.ctx, d); err != nil {
 		t.Fatalf("SaveDecision: %v", err)
@@ -1049,7 +1079,8 @@ func TestDecision_SaveLoad(t *testing.T) {
 
 func TestDecision_SaveEmitsEvent(t *testing.T) {
 	e := newEnv(t)
-	_ = e.st.SaveDecision(e.ctx, &schema.DecisionRecord{DecisionID: "DEC-1", CreatedAt: time.Now().UTC()})
+	e.seedGoal(t, "G-1", "GC-1")
+	_ = e.st.SaveDecision(e.ctx, &schema.DecisionRecord{DecisionID: "DEC-1", RelatedIDs: []string{"G-1"}, CreatedAt: time.Now().UTC()})
 	if n := e.countEvents(t, schema.EventDecisionRecordCreated); n != 1 {
 		t.Errorf("expected 1 decision_record_created event, got %d", n)
 	}
@@ -1059,6 +1090,7 @@ func TestDecision_SaveEmitsEvent(t *testing.T) {
 
 func TestBudget_SaveLoad(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	b := &schema.BudgetRecord{
 		BudgetID: "BUD-1", GoalID: "G-1", TokensSpent: 1024,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1077,6 +1109,7 @@ func TestBudget_SaveLoad(t *testing.T) {
 
 func TestBudget_SaveEmitsEvent(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	_ = e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
 		BudgetID: "BUD-1", GoalID: "G-1",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1088,6 +1121,8 @@ func TestBudget_SaveEmitsEvent(t *testing.T) {
 
 func TestBudget_LoadForGoal(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedGoal(t, "G-2", "GC-2")
 	for _, b := range []*schema.BudgetRecord{
 		{BudgetID: "BUD-1", GoalID: "G-1", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
 		{BudgetID: "BUD-2", GoalID: "G-1", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
@@ -1108,6 +1143,7 @@ func TestBudget_LoadForGoal(t *testing.T) {
 
 func TestBudget_Update(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	b := &schema.BudgetRecord{
 		BudgetID: "BUD-1", GoalID: "G-1", TokensSpent: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1143,6 +1179,8 @@ func TestBudget_UpdateMissingReturnsNotFound(t *testing.T) {
 
 func TestSnapshot_LoadLatest(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedGoal(t, "G-2", "GC-2")
 	for _, s := range []*schema.StateSnapshot{
 		{SnapshotID: "SNAP-1", GoalID: "G-1", SequenceNum: 5, CreatedAt: time.Now().UTC()},
 		{SnapshotID: "SNAP-2", GoalID: "G-1", SequenceNum: 10, CreatedAt: time.Now().UTC()},
@@ -1171,6 +1209,7 @@ func TestSnapshot_LoadLatest_NotFound(t *testing.T) {
 
 func TestSnapshot_SaveEmitsEvent(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	_ = e.st.SaveSnapshot(e.ctx, &schema.StateSnapshot{
 		SnapshotID: "SNAP-1", GoalID: "G-1", CreatedAt: time.Now().UTC(),
 	})
@@ -1454,12 +1493,15 @@ func TestReplay_RejectsMalformedCreatePayload(t *testing.T) {
 
 func TestReplay_ProjectionsByRole(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
 	_ = e.st.SaveProjection(e.ctx, &schema.ContextProjection{
-		ContextProjectionID: "CTX-exec", Role: schema.ProjectionRoleExecutor, CreatedAt: time.Now().UTC(),
+		ContextProjectionID: "CTX-exec", Role: schema.ProjectionRoleExecutor, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
 	})
 	_ = e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
 		ContextProjection: schema.ContextProjection{
-			ContextProjectionID: "CTX-human", Role: schema.ProjectionRoleHumanSummary, CreatedAt: time.Now().UTC(),
+			ContextProjectionID: "CTX-human", Role: schema.ProjectionRoleHumanSummary, SourceArtifactIDs: []string{"CAP-1"}, CreatedAt: time.Now().UTC(),
 		},
 		GoalPlain: "do the thing",
 	})
@@ -1486,6 +1528,7 @@ func TestReplay_ProjectionsByRole(t *testing.T) {
 
 func TestReplay_ReconstructsBudgetAndSnapshot(t *testing.T) {
 	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
 	if err := e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
 		BudgetID: "BUD-1", GoalID: "G-1", TokensSpent: 100,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1572,6 +1615,551 @@ func TestSaveRejectsOrphanedCapsuleScopedArtifacts(t *testing.T) {
 		Status:    schema.PatchCandidate,
 	}); err == nil {
 		t.Fatal("SavePatch succeeded with missing capsule")
+	}
+}
+
+func TestSaveRejectsUnresolvableGoalReferences(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType schema.EventType
+		save      func(*testEnv) error
+	}{
+		{
+			name:      "capsule without obligations",
+			eventType: schema.EventCapsuleCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				return e.st.SaveCapsule(e.ctx, &schema.ExecutionCapsule{
+					CapsuleID: "CAP-no-obligations",
+					State:     schema.CapsuleStatePending,
+				})
+			},
+		},
+		{
+			name:      "patch missing capsule",
+			eventType: schema.EventPatchArtifactCreated,
+			save: func(e *testEnv) error {
+				return e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+					PatchID:   "PATCH-orphan",
+					CapsuleID: "CAP-missing",
+					Status:    schema.PatchCandidate,
+				})
+			},
+		},
+		{
+			name:      "evidence without resolvable obligation",
+			eventType: schema.EventEvidenceArtifactCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveEvidence(e.ctx, &schema.EvidenceArtifact{
+					EvidenceID: "EV-orphan",
+					Type:       schema.EvidenceTestResult,
+					Supports:   []string{"OB-missing"},
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "claim missing capsule",
+			eventType: schema.EventClaimCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+					ClaimID:         "CL-orphan",
+					SourceCapsuleID: "CAP-missing",
+					Status:          schema.ClaimProposed,
+				})
+			},
+		},
+		{
+			name:      "failure missing capsule",
+			eventType: schema.EventFailureFingerprintCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveFailure(e.ctx, &schema.FailureFingerprint{
+					FailureID:       "FAIL-orphan",
+					SourceCapsuleID: "CAP-missing",
+					FailureType:     schema.FailureTest,
+				})
+			},
+		},
+		{
+			name:      "verifier result missing capsule",
+			eventType: schema.EventVerifierResultCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveVerifierResult(e.ctx, &schema.VerifierResult{
+					VerifierResultID:  "VR-orphan",
+					CapsuleID:         "CAP-missing",
+					RecommendedAction: schema.ActionRetry,
+					CreatedAt:         time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "executor projection without source",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveProjection(e.ctx, &schema.ContextProjection{
+					ContextProjectionID: "CTX-orphan",
+					Role:                schema.ProjectionRoleExecutor,
+					CreatedAt:           time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "human projection without source",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+					ContextProjection: schema.ContextProjection{
+						ContextProjectionID: "CTX-human-orphan",
+						Role:                schema.ProjectionRoleHumanSummary,
+						CreatedAt:           time.Now().UTC(),
+					},
+				})
+			},
+		},
+		{
+			name:      "decision without related goal",
+			eventType: schema.EventDecisionRecordCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveDecision(e.ctx, &schema.DecisionRecord{
+					DecisionID: "DEC-orphan",
+					MadeBy:     "system",
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "budget missing goal",
+			eventType: schema.EventBudgetRecordSaved,
+			save: func(e *testEnv) error {
+				return e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+					BudgetID:  "BUD-orphan",
+					GoalID:    "G-missing",
+					CreatedAt: time.Now().UTC(),
+					UpdatedAt: time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "snapshot missing goal",
+			eventType: schema.EventStateSnapshotSaved,
+			save: func(e *testEnv) error {
+				return e.st.SaveSnapshot(e.ctx, &schema.StateSnapshot{
+					SnapshotID:  "SNAP-orphan",
+					GoalID:      "G-missing",
+					SequenceNum: 1,
+					CreatedAt:   time.Now().UTC(),
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			before := e.countEvents(t, tc.eventType)
+			if err := tc.save(e); err == nil {
+				t.Fatal("save succeeded with unresolvable goal reference")
+			}
+			if after := e.countEvents(t, tc.eventType); after != before {
+				t.Fatalf("event count after failed save = %d, want %d", after, before)
+			}
+		})
+	}
+}
+
+func TestChildArtifactEventsCarryResolvedGoalID(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType schema.EventType
+		save      func(*testEnv) error
+	}{
+		{
+			name:      "capsule",
+			eventType: schema.EventCapsuleCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				return e.st.SaveCapsule(e.ctx, &schema.ExecutionCapsule{
+					CapsuleID:     "CAP-1",
+					ObligationIDs: []string{"OB-1"},
+					State:         schema.CapsuleStatePending,
+				})
+			},
+		},
+		{
+			name:      "patch",
+			eventType: schema.EventPatchArtifactCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+					PatchID:   "PATCH-1",
+					CapsuleID: "CAP-1",
+					Status:    schema.PatchCandidate,
+				})
+			},
+		},
+		{
+			name:      "evidence",
+			eventType: schema.EventEvidenceArtifactCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				return e.st.SaveEvidence(e.ctx, &schema.EvidenceArtifact{
+					EvidenceID: "EV-1",
+					Type:       schema.EvidenceTestResult,
+					Supports:   []string{"OB-1"},
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "claim",
+			eventType: schema.EventClaimCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+					ClaimID:         "CL-1",
+					SourceCapsuleID: "CAP-1",
+					Status:          schema.ClaimProposed,
+				})
+			},
+		},
+		{
+			name:      "failure",
+			eventType: schema.EventFailureFingerprintCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SaveFailure(e.ctx, &schema.FailureFingerprint{
+					FailureID:       "FAIL-1",
+					SourceCapsuleID: "CAP-1",
+					FailureType:     schema.FailureTest,
+				})
+			},
+		},
+		{
+			name:      "verifier result",
+			eventType: schema.EventVerifierResultCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SaveVerifierResult(e.ctx, &schema.VerifierResult{
+					VerifierResultID:  "VR-1",
+					CapsuleID:         "CAP-1",
+					RecommendedAction: schema.ActionAccept,
+					CreatedAt:         time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "executor projection",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SaveProjection(e.ctx, &schema.ContextProjection{
+					ContextProjectionID: "CTX-1",
+					Role:                schema.ProjectionRoleExecutor,
+					SourceArtifactIDs:   []string{"CAP-1"},
+					CreatedAt:           time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "human projection",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				e.seedCapsule(t, "CAP-1", "OB-1")
+				return e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+					ContextProjection: schema.ContextProjection{
+						ContextProjectionID: "CTX-2",
+						Role:                schema.ProjectionRoleHumanSummary,
+						SourceArtifactIDs:   []string{"CAP-1"},
+						CreatedAt:           time.Now().UTC(),
+					},
+					GoalPlain: "review this",
+				})
+			},
+		},
+		{
+			name:      "decision",
+			eventType: schema.EventDecisionRecordCreated,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				return e.st.SaveDecision(e.ctx, &schema.DecisionRecord{
+					DecisionID: "DEC-1",
+					RelatedIDs: []string{"G-1"},
+					MadeBy:     "system",
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			if err := tc.save(e); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			events, err := e.log.ReadByType(e.ctx, tc.eventType, 0, 0)
+			if err != nil {
+				t.Fatalf("ReadByType(%s): %v", tc.eventType, err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if events[0].GoalID != "G-1" {
+				t.Fatalf("event GoalID = %q, want G-1", events[0].GoalID)
+			}
+		})
+	}
+}
+
+func TestSaveRejectsDuplicateIDsWithoutAppendingSecondCreateEvent(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType schema.EventType
+		save      func(*testEnv) error
+	}{
+		{
+			name:      "goal",
+			eventType: schema.EventGoalCreated,
+			save: func(e *testEnv) error {
+				return e.st.SaveGoal(e.ctx, &schema.GoalIR{
+					GoalID: "G-dup",
+					GoalConditions: []schema.GoalCondition{{
+						ID:                   "GC-dup",
+						Description:          "condition",
+						EffectiveDescription: "condition",
+						Status:               schema.GoalConditionUnmet,
+					}},
+					RiskLevel: schema.RiskLow,
+					CreatedAt: time.Now().UTC(),
+					Status:    schema.GoalStatusActive,
+				})
+			},
+		},
+		{
+			name:      "obligation",
+			eventType: schema.EventObligationCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+				}
+				return e.st.SaveObligation(e.ctx, &schema.Obligation{
+					ObligationID:    "OB-dup",
+					GoalConditionID: "GC-1",
+					Description:     "duplicate obligation",
+					Blocking:        true,
+					RiskLevel:       schema.RiskLow,
+					Status:          schema.ObligationOpen,
+				})
+			},
+		},
+		{
+			name:      "capsule",
+			eventType: schema.EventCapsuleCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				}
+				return e.st.SaveCapsule(e.ctx, &schema.ExecutionCapsule{
+					CapsuleID:     "CAP-dup",
+					ObligationIDs: []string{"OB-1"},
+					State:         schema.CapsuleStatePending,
+				})
+			},
+		},
+		{
+			name:      "executor projection",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SaveProjection(e.ctx, &schema.ContextProjection{
+					ContextProjectionID: "CTX-dup",
+					Role:                schema.ProjectionRoleExecutor,
+					SourceArtifactIDs:   []string{"CAP-1"},
+					CreatedAt:           time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "human projection",
+			eventType: schema.EventContextProjectionCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+					ContextProjection: schema.ContextProjection{
+						ContextProjectionID: "HCTX-dup",
+						Role:                schema.ProjectionRoleHumanSummary,
+						SourceArtifactIDs:   []string{"CAP-1"},
+						CreatedAt:           time.Now().UTC(),
+					},
+					GoalPlain: "review this",
+				})
+			},
+		},
+		{
+			name:      "patch",
+			eventType: schema.EventPatchArtifactCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+					PatchID:   "PATCH-dup",
+					CapsuleID: "CAP-1",
+					Status:    schema.PatchCandidate,
+				})
+			},
+		},
+		{
+			name:      "evidence",
+			eventType: schema.EventEvidenceArtifactCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+				}
+				return e.st.SaveEvidence(e.ctx, &schema.EvidenceArtifact{
+					EvidenceID: "EV-dup",
+					Type:       schema.EvidenceTestResult,
+					Supports:   []string{"OB-1"},
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "claim",
+			eventType: schema.EventClaimCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+					ClaimID:         "CL-dup",
+					SourceCapsuleID: "CAP-1",
+					Status:          schema.ClaimProposed,
+				})
+			},
+		},
+		{
+			name:      "failure",
+			eventType: schema.EventFailureFingerprintCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SaveFailure(e.ctx, &schema.FailureFingerprint{
+					FailureID:       "FAIL-dup",
+					SourceCapsuleID: "CAP-1",
+					FailureType:     schema.FailureTest,
+				})
+			},
+		},
+		{
+			name:      "verifier result",
+			eventType: schema.EventVerifierResultCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+					e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+					e.seedCapsule(t, "CAP-1", "OB-1")
+				}
+				return e.st.SaveVerifierResult(e.ctx, &schema.VerifierResult{
+					VerifierResultID:  "VR-dup",
+					CapsuleID:         "CAP-1",
+					RecommendedAction: schema.ActionAccept,
+					CreatedAt:         time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "decision",
+			eventType: schema.EventDecisionRecordCreated,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+				}
+				return e.st.SaveDecision(e.ctx, &schema.DecisionRecord{
+					DecisionID: "DEC-dup",
+					RelatedIDs: []string{"G-1"},
+					MadeBy:     "system",
+					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "budget",
+			eventType: schema.EventBudgetRecordSaved,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+				}
+				return e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+					BudgetID:  "BUD-dup",
+					GoalID:    "G-1",
+					CreatedAt: time.Now().UTC(),
+					UpdatedAt: time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "snapshot",
+			eventType: schema.EventStateSnapshotSaved,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+				}
+				return e.st.SaveSnapshot(e.ctx, &schema.StateSnapshot{
+					SnapshotID:  "SNAP-dup",
+					GoalID:      "G-1",
+					SequenceNum: 1,
+					CreatedAt:   time.Now().UTC(),
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			if err := tc.save(e); err != nil {
+				t.Fatalf("first save: %v", err)
+			}
+			before := e.countEvents(t, tc.eventType)
+			if err := tc.save(e); err == nil {
+				t.Fatal("duplicate save succeeded")
+			}
+			if after := e.countEvents(t, tc.eventType); after != before {
+				t.Fatalf("event count after duplicate = %d, want %d", after, before)
+			}
+		})
 	}
 }
 

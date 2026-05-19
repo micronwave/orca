@@ -139,6 +139,9 @@ type ArtifactStore interface {
 	// --- State Snapshots ---
 
 	SaveSnapshot(ctx context.Context, s *schema.StateSnapshot) error
-	// LoadLatestSnapshot returns the most recent StateSnapshot for goalID.
+	// LoadLatestSnapshot returns the most recent StateSnapshot for goalID,
+	// or (nil, ErrNotFound) when no snapshot has been taken yet (e.g. before the
+	// first reconciliation completes). Callers must check errors.Is(err, ErrNotFound)
+	// before accessing the returned snapshot; this is a normal condition, not a failure.
 	LoadLatestSnapshot(ctx context.Context, goalID string) (*schema.StateSnapshot, error)
 }

@@ -199,6 +199,22 @@ func materializationError(e schema.Event, err error) error {
 	return &MaterializationError{Event: e, Err: err}
 }
 
+func ensureArtifactAbsent(kind, path, id string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("store: %s id %q already exists", kind, id)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("store: stat %s: %w", path, err)
+	}
+	return nil
+}
+
+func (s *FileStore) ensureProjectionAbsent(id string) error {
+	if err := ensureArtifactAbsent("context projection", s.artifactPath(dirProjExecutor, id), id); err != nil {
+		return err
+	}
+	return ensureArtifactAbsent("context projection", s.artifactPath(dirProjHuman, id), id)
+}
+
 // ── GoalID resolution helpers (no locking) ──────────────────────────────────
 
 // findGoalIDForCondition scans all goal files and returns the GoalID of the
@@ -229,6 +245,28 @@ func (s *FileStore) goalExists(goalID string) (bool, error) {
 	return false, err
 }
 
+func (s *FileStore) requireExistingGoal(goalID string) error {
+	if err := validateArtifactID("goal", goalID); err != nil {
+		return err
+	}
+	exists, err := s.goalExists(goalID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("store: goal %s: %w", goalID, ErrNotFound)
+	}
+	return nil
+}
+
+func (s *FileStore) goalIDForObligation(obligationID string) (string, error) {
+	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
+	if err != nil {
+		return "", fmt.Errorf("store: load obligation %s: %w", obligationID, err)
+	}
+	return s.findGoalIDForCondition(obl.GoalConditionID)
+}
+
 // goalIDForCapsule follows capsule → obligation → condition → goal.
 func (s *FileStore) goalIDForCapsule(capsuleID string) (string, error) {
 	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
@@ -236,13 +274,136 @@ func (s *FileStore) goalIDForCapsule(capsuleID string) (string, error) {
 		return "", fmt.Errorf("store: load capsule %s: %w", capsuleID, err)
 	}
 	if len(c.ObligationIDs) == 0 {
-		return "", nil // no obligations; cannot determine goal
+		return "", fmt.Errorf("store: capsule %s has no obligation IDs", capsuleID)
 	}
-	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, c.ObligationIDs[0]))
-	if err != nil {
-		return "", fmt.Errorf("store: load obligation %s: %w", c.ObligationIDs[0], err)
+	return s.goalIDForObligation(c.ObligationIDs[0])
+}
+
+func (s *FileStore) goalIDForEvidence(ev *schema.EvidenceArtifact) (string, error) {
+	for _, obligationID := range append(append([]string{}, ev.Supports...), ev.Weakens...) {
+		if obligationID == "" {
+			continue
+		}
+		goalID, err := s.goalIDForObligation(obligationID)
+		if err == nil {
+			return goalID, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
 	}
-	return s.findGoalIDForCondition(obl.GoalConditionID)
+	return "", fmt.Errorf("store: evidence %s has no resolvable obligation reference", ev.EvidenceID)
+}
+
+func (s *FileStore) goalIDForProjectionSources(sourceIDs []string) (string, error) {
+	if len(sourceIDs) == 0 {
+		return "", fmt.Errorf("store: projection source_artifact_ids are required to resolve goal")
+	}
+	for _, id := range sourceIDs {
+		if err := validateArtifactID("source artifact", id); err != nil {
+			return "", err
+		}
+	}
+	for _, id := range sourceIDs {
+		goalID, err := s.goalIDForCapsule(id)
+		if err == nil {
+			return goalID, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
+	}
+	for _, id := range sourceIDs {
+		goalID, err := s.goalIDForObligation(id)
+		if err == nil {
+			return goalID, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
+	}
+	for _, id := range sourceIDs {
+		exists, err := s.goalExists(id)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("store: no projection source resolves to a goal")
+}
+
+func (s *FileStore) goalIDForRelatedIDs(relatedIDs []string) (string, error) {
+	if len(relatedIDs) == 0 {
+		return "", fmt.Errorf("store: related_ids are required to resolve goal")
+	}
+	for _, id := range relatedIDs {
+		if err := validateArtifactID("related artifact", id); err != nil {
+			return "", err
+		}
+	}
+	resolvers := []func(string) (string, error){
+		func(id string) (string, error) {
+			exists, err := s.goalExists(id)
+			if err != nil {
+				return "", err
+			}
+			if !exists {
+				return "", ErrNotFound
+			}
+			return id, nil
+		},
+		s.goalIDForObligation,
+		s.goalIDForCapsule,
+		func(id string) (string, error) {
+			p, err := readFile[schema.PatchArtifact](s.artifactPath(dirPatches, id))
+			if err != nil {
+				return "", err
+			}
+			return s.goalIDForCapsule(p.CapsuleID)
+		},
+		func(id string) (string, error) {
+			c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, id))
+			if err != nil {
+				return "", err
+			}
+			return s.goalIDForCapsule(c.SourceCapsuleID)
+		},
+		func(id string) (string, error) {
+			f, err := readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, id))
+			if err != nil {
+				return "", err
+			}
+			return s.goalIDForCapsule(f.SourceCapsuleID)
+		},
+		func(id string) (string, error) {
+			r, err := readFile[schema.VerifierResult](s.artifactPath(dirVerifierResults, id))
+			if err != nil {
+				return "", err
+			}
+			return s.goalIDForCapsule(r.CapsuleID)
+		},
+		func(id string) (string, error) {
+			ev, err := readFile[schema.EvidenceArtifact](s.artifactPath(dirEvidence, id))
+			if err != nil {
+				return "", err
+			}
+			return s.goalIDForEvidence(ev)
+		},
+	}
+	for _, resolve := range resolvers {
+		for _, id := range relatedIDs {
+			goalID, err := resolve(id)
+			if err == nil {
+				return goalID, nil
+			}
+			if !errors.Is(err, ErrNotFound) {
+				return "", err
+			}
+		}
+	}
+	return "", fmt.Errorf("store: no related ID resolves to a goal")
 }
 
 // ── Goal IR ──────────────────────────────────────────────────────────────────
@@ -253,6 +414,9 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("goal", s.artifactPath(dirGoals, g.GoalID), g.GoalID); err != nil {
+		return err
+	}
 	ev, err := s.appendEvent(ctx, schema.EventGoalCreated, g.GoalID, g.GoalID, g)
 	if err != nil {
 		return err
@@ -324,6 +488,9 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("obligation", s.artifactPath(dirObligations, o.ObligationID), o.ObligationID); err != nil {
+		return err
+	}
 	goalID, err := s.findGoalIDForCondition(o.GoalConditionID)
 	if err != nil {
 		return fmt.Errorf("store: SaveObligation: %w", err)
@@ -407,6 +574,9 @@ func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("capsule", s.artifactPath(dirCapsules, c.CapsuleID), c.CapsuleID); err != nil {
+		return err
+	}
 	goalID, err := s.goalIDForCapsuleFromObligation(c)
 	if err != nil {
 		return fmt.Errorf("store: SaveCapsule: %w", err)
@@ -422,13 +592,9 @@ func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule)
 // first ObligationID without loading the capsule from disk (it's not saved yet).
 func (s *FileStore) goalIDForCapsuleFromObligation(c *schema.ExecutionCapsule) (string, error) {
 	if len(c.ObligationIDs) == 0 {
-		return "", nil
+		return "", fmt.Errorf("store: capsule %s has no obligation IDs", c.CapsuleID)
 	}
-	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, c.ObligationIDs[0]))
-	if err != nil {
-		return "", err
-	}
-	return s.findGoalIDForCondition(obl.GoalConditionID)
+	return s.goalIDForObligation(c.ObligationIDs[0])
 }
 
 func (s *FileStore) LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error) {
@@ -459,10 +625,16 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureProjectionAbsent(p.ContextProjectionID); err != nil {
+		return err
+	}
 	saved := *p
 	saved.Role = schema.ProjectionRoleExecutor
-	// GoalID not directly available; emit event with empty goalID.
-	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", saved.ContextProjectionID, &saved)
+	goalID, err := s.goalIDForProjectionSources(saved.SourceArtifactIDs)
+	if err != nil {
+		return fmt.Errorf("store: SaveProjection: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, goalID, saved.ContextProjectionID, &saved)
 	if err != nil {
 		return err
 	}
@@ -475,9 +647,16 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureProjectionAbsent(p.ContextProjectionID); err != nil {
+		return err
+	}
 	saved := *p
 	saved.Role = schema.ProjectionRoleHumanSummary
-	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, "", saved.ContextProjectionID, &saved)
+	goalID, err := s.goalIDForProjectionSources(saved.SourceArtifactIDs)
+	if err != nil {
+		return fmt.Errorf("store: SaveHumanSummaryProjection: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventContextProjectionCreated, goalID, saved.ContextProjectionID, &saved)
 	if err != nil {
 		return err
 	}
@@ -504,6 +683,9 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("patch", s.artifactPath(dirPatches, p.PatchID), p.PatchID); err != nil {
+		return err
+	}
 	goalID, err := s.goalIDForCapsule(p.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SavePatch: %w", err)
@@ -559,8 +741,14 @@ func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// EvidenceArtifact has no CapsuleID; GoalID left empty.
-	ev, err := s.appendEvent(ctx, schema.EventEvidenceArtifactCreated, "", e.EvidenceID, e)
+	if err := ensureArtifactAbsent("evidence", s.artifactPath(dirEvidence, e.EvidenceID), e.EvidenceID); err != nil {
+		return err
+	}
+	goalID, err := s.goalIDForEvidence(e)
+	if err != nil {
+		return fmt.Errorf("store: SaveEvidence: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventEvidenceArtifactCreated, goalID, e.EvidenceID, e)
 	if err != nil {
 		return err
 	}
@@ -597,6 +785,9 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("claim", s.artifactPath(dirClaims, c.ClaimID), c.ClaimID); err != nil {
+		return err
+	}
 	goalID, err := s.goalIDForCapsule(c.SourceCapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveClaim: %w", err)
@@ -681,6 +872,9 @@ func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("failure", s.artifactPath(dirFailures, f.FailureID), f.FailureID); err != nil {
+		return err
+	}
 	goalID, err := s.goalIDForCapsule(f.SourceCapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveFailure: %w", err)
@@ -788,6 +982,9 @@ func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierRe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("verifier result", s.artifactPath(dirVerifierResults, r.VerifierResultID), r.VerifierResultID); err != nil {
+		return err
+	}
 	goalID, err := s.goalIDForCapsule(r.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveVerifierResult: %w", err)
@@ -828,8 +1025,14 @@ func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// DecisionRecord has no direct goal anchor; emit with empty goalID.
-	ev, err := s.appendEvent(ctx, schema.EventDecisionRecordCreated, "", d.DecisionID, d)
+	if err := ensureArtifactAbsent("decision", s.artifactPath(dirDecisions, d.DecisionID), d.DecisionID); err != nil {
+		return err
+	}
+	goalID, err := s.goalIDForRelatedIDs(d.RelatedIDs)
+	if err != nil {
+		return fmt.Errorf("store: SaveDecision: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventDecisionRecordCreated, goalID, d.DecisionID, d)
 	if err != nil {
 		return err
 	}
@@ -850,6 +1053,12 @@ func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("budget", s.artifactPath(dirBudgets, b.BudgetID), b.BudgetID); err != nil {
+		return err
+	}
+	if err := s.requireExistingGoal(b.GoalID); err != nil {
+		return fmt.Errorf("store: SaveBudgetRecord: %w", err)
+	}
 	ev, err := s.appendEvent(ctx, schema.EventBudgetRecordSaved, b.GoalID, b.BudgetID, b)
 	if err != nil {
 		return err
@@ -891,6 +1100,9 @@ func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetReco
 	if _, err := readFile[schema.BudgetRecord](path); err != nil {
 		return err
 	}
+	if err := s.requireExistingGoal(b.GoalID); err != nil {
+		return fmt.Errorf("store: UpdateBudgetRecord: %w", err)
+	}
 	ev, err := s.appendEvent(ctx, schema.EventBudgetRecordUpdated, b.GoalID, b.BudgetID, b)
 	if err != nil {
 		return err
@@ -909,6 +1121,12 @@ func (s *FileStore) SaveSnapshot(ctx context.Context, snap *schema.StateSnapshot
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("snapshot", s.artifactPath(dirSnapshots, snap.SnapshotID), snap.SnapshotID); err != nil {
+		return err
+	}
+	if err := s.requireExistingGoal(snap.GoalID); err != nil {
+		return fmt.Errorf("store: SaveSnapshot: %w", err)
+	}
 	ev, err := s.appendEvent(ctx, schema.EventStateSnapshotSaved, snap.GoalID, snap.SnapshotID, snap)
 	if err != nil {
 		return err

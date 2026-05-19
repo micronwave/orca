@@ -27,18 +27,6 @@ type ContextProjection struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-// ExecutorProjection is the agent's working briefing: minimal and constraint-focused.
-//
-// MVP note: all interfaces (ArtifactStore, ContextCompiler, CapsuleRunner) use
-// *ContextProjection directly for executor projections — ExecutorProjection is not
-// embedded in any interface signature. The named type is reserved for Phase 2 when
-// executor-specific typed fields will be added. Implementors of CompileExecutor must
-// return *schema.ContextProjection (with Role = ProjectionRoleExecutor), not
-// *schema.ExecutorProjection. orca.md §5.4.1.
-type ExecutorProjection struct {
-	ContextProjection
-}
-
 // ConditionRef is a lightweight reference to a goal condition used inside
 // HumanSummaryProjection. Internal IDs are secondary; descriptions are primary.
 type ConditionRef struct {

@@ -53,7 +53,12 @@ type ContextCompiler interface {
 	// affected files, prior evidence artifacts, required outputs and schema.
 	//
 	// The returned ContextProjection has Role = ProjectionRoleExecutor and
-	// FreshnessBase set to the latest StateSnapshot ID for the goal.
+	// FreshnessBase set to the latest StateSnapshot ID for the goal. When
+	// LoadLatestSnapshot returns store.ErrNotFound because no reconciliation
+	// snapshot exists yet, CompileExecutor must set FreshnessBase to "" and
+	// return normally. FreshnessBase = "" signals that the projection was
+	// compiled before any reconciliation snapshot exists; claim freshness checks
+	// must treat this as no baseline and keep verified claims current.
 	// CompileExecutor persists the projection via SaveProjection and returns
 	// the stored record.
 	CompileExecutor(ctx context.Context, capsuleID string) (*schema.ContextProjection, error)

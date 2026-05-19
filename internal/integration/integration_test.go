@@ -28,18 +28,10 @@
 //
 // Current pass/fail (run with -tags=integration):
 //
-//	TestCrashResumableRun                             Phase A (data layer) PASSES.
-//	                                                  Phase B (reconcile gate) FAILS —
-//	                                                  notYetImplementedReconciler blocks
-//	                                                  until internal/reconciler is implemented.
-//	TestDeterministicStateReconstruction              PASSES — data layer is complete.
-//	TestAcceptedPatchRequiresEvidenceBundle           FAILS — stubAcceptAllReconciler
-//	                                                  accepts evidence-less patches;
-//	                                                  real Reconciler must reject.
-//	TestAcceptedPatchRequiresPresentEvidenceArtifacts FAILS — stubAcceptAllReconciler
-//	                                                  accepts ghost-evidence patches;
-//	                                                  real Reconciler must verify
-//	                                                  artifact existence in the store.
+//	TestCrashResumableRun
+//	TestDeterministicStateReconstruction
+//	TestAcceptedPatchRequiresEvidenceBundle
+//	TestAcceptedPatchRequiresPresentEvidenceArtifacts
 package integration_test
 
 import (
@@ -451,47 +443,6 @@ func finishCapsuleRun(t *testing.T, env *integEnv, ids scenarioIDs, label string
 	}
 }
 
-// ── Reconciler stubs ──────────────────────────────────────────────────────────
-
-// notYetImplementedReconciler returns an error on every Reconcile call.
-// It is the placeholder for the real Reconciler that Phase 1 must implement.
-// Any test that calls Reconcile through this stub will fail with a message
-// that names exactly what needs to be implemented.
-type notYetImplementedReconciler struct{}
-
-func (r *notYetImplementedReconciler) Reconcile(_ context.Context, patchID string) (reconciler.ReconcileResult, error) {
-	return reconciler.ReconcileResult{}, errors.New(
-		"Reconciler not implemented — Phase 1 required: " +
-			"implement internal/reconciler.Reconciler and wire it to make " +
-			"TestCrashResumableRun (Phase B) pass",
-	)
-}
-
-// stubAcceptAllReconciler unconditionally accepts every patch regardless of
-// whether evidence is mapped to blocking obligations, or whether the referenced
-// EvidenceArtifacts actually exist in the store. It is intentionally wrong in
-// two ways:
-//
-//  1. It does not enforce the empty evidence bundle check
-//     (TestAcceptedPatchRequiresEvidenceBundle, criterion 3):
-//     a blocking obligation with zero EvidenceIDs must cause rejection.
-//
-//  2. It does not verify that referenced EvidenceIDs resolve to stored artifacts
-//     (TestAcceptedPatchRequiresPresentEvidenceArtifacts, criterion 4):
-//     a blocking obligation whose EvidenceIDs reference absent artifacts must
-//     also cause rejection.
-//
-// THIS STUB IS INTENTIONALLY WRONG. Replace with a real Reconciler that:
-//   - loads VerifierResult for patchID,
-//   - for every blocking ObligationVerdict, verifies len(EvidenceIDs) > 0 and
-//     calls store.LoadEvidence(id) for each EvidenceID,
-//   - returns ReconcileResult{PatchAccepted: false, BlockingReason: "..."} on failure.
-type stubAcceptAllReconciler struct{}
-
-func (r *stubAcceptAllReconciler) Reconcile(_ context.Context, _ string) (reconciler.ReconcileResult, error) {
-	return reconciler.ReconcileResult{PatchAccepted: true, MergeReady: true}, nil
-}
-
 // ── Captured run state ────────────────────────────────────────────────────────
 
 // capturedRun holds all artifacts from a complete scenario for comparison.
@@ -540,8 +491,7 @@ func captureCompleteRun(t *testing.T, env *integEnv, ids scenarioIDs) capturedRu
 // Phase B — reconciliation gate: calls Reconcile on the replayed state and
 // asserts that reconciliation completes successfully. A correct Reconciler must
 // be able to read the VerifierResult and evidence from the replayed store and
-// accept the patch. This phase FAILS until internal/reconciler is implemented.
-// Replace notYetImplementedReconciler with the real implementation to pass.
+// accept the patch.
 func TestCrashResumableRun(t *testing.T) {
 	env := newIntegEnv(t)
 	ids := buildCompleteScenario(t, env)
@@ -655,8 +605,7 @@ func TestCrashResumableRun(t *testing.T) {
 	//   6. Call UpdatePatchStatus(PATCH-INT-1, accepted).
 	//   7. Return ReconcileResult{PatchAccepted: true}.
 	//
-	// Replace notYetImplementedReconciler with the real Reconciler to pass Phase B.
-	rec := &notYetImplementedReconciler{}
+	rec := reconciler.New(env.st, env.log)
 	result, reconcileErr := rec.Reconcile(env.ctx, ids.PatchID)
 	if reconcileErr != nil {
 		t.Fatalf("crash-resume Reconcile: %v\n\n"+
@@ -749,9 +698,8 @@ func TestDeterministicStateReconstruction(t *testing.T) {
 // examine ObligationResults[].EvidenceIDs and reject the patch because the
 // evidence bundle is absent, regardless of the RecommendedAction field.
 //
-// This test FAILS because stubAcceptAllReconciler accepts every patch without
-// checking evidence. Replace stubAcceptAllReconciler with a real Reconciler
-// that enforces the evidence-bundle invariant to make this test pass.
+// This test verifies that the real Reconciler enforces the evidence-bundle
+// invariant.
 func TestAcceptedPatchRequiresEvidenceBundle(t *testing.T) {
 	env := newIntegEnv(t)
 	ids := buildNoEvidenceBundleScenario(t, env)
@@ -785,12 +733,11 @@ func TestAcceptedPatchRequiresEvidenceBundle(t *testing.T) {
 			"(scenario setup error)", vr.ObligationResults[0].EvidenceIDs)
 	}
 
-	// Attempt reconciliation via the stub.
+	// Attempt reconciliation via the real Reconciler.
 	//
-	// FAILING: replace stubAcceptAllReconciler with the real Reconciler.
 	// The real Reconciler must return PatchAccepted:false when ObligationResults
 	// contains no EvidenceIDs for a blocking obligation.
-	rec := &stubAcceptAllReconciler{}
+	rec := reconciler.New(env.st, env.log)
 
 	result, reconcileErr := rec.Reconcile(env.ctx, ids.PatchID)
 	if reconcileErr != nil {
@@ -803,8 +750,7 @@ func TestAcceptedPatchRequiresEvidenceBundle(t *testing.T) {
 			"ReconcileResult{PatchAccepted:false} instead: %v", reconcileErr)
 	}
 
-	// FAILING ASSERTION: stubAcceptAllReconciler returns PatchAccepted:true,
-	// but a correct Reconciler MUST return PatchAccepted:false when a blocking
+	// A correct Reconciler MUST return PatchAccepted:false when a blocking
 	// obligation has no evidence IDs in the VerifierResult.
 	if result.PatchAccepted {
 		t.Errorf(
@@ -812,7 +758,7 @@ func TestAcceptedPatchRequiresEvidenceBundle(t *testing.T) {
 				"blocking obligation %q has zero EvidenceIDs in the VerifierResult.\n"+
 				"Invariant (orca.md §11): 'Must NOT accept a patch without mapping "+
 				"evidence to every blocking obligation.'\n"+
-				"Replace stubAcceptAllReconciler with a real Reconciler that enforces this.",
+				"Reconciler must reject patches whose blocking obligations lack evidence.",
 			ids.PatchID, ids.ObligationID,
 		)
 	}
@@ -836,10 +782,8 @@ func TestAcceptedPatchRequiresEvidenceBundle(t *testing.T) {
 // the Reconciler must confirm that each EvidenceID in ObligationResults resolves
 // to an artifact that exists in the store, not merely that the list is non-empty.
 //
-// This test FAILS because stubAcceptAllReconciler accepts every patch without
-// verifying artifact existence. Replace stubAcceptAllReconciler with a real
-// Reconciler that calls store.LoadEvidence for each EvidenceID and rejects
-// when any referenced artifact is absent.
+// This test verifies that the real Reconciler calls store.LoadEvidence for each
+// EvidenceID and rejects when any referenced artifact is absent.
 func TestAcceptedPatchRequiresPresentEvidenceArtifacts(t *testing.T) {
 	env := newIntegEnv(t)
 	ids := buildGhostEvidenceScenario(t, env)
@@ -863,12 +807,11 @@ func TestAcceptedPatchRequiresPresentEvidenceArtifacts(t *testing.T) {
 			"ghost-evidence scenario requires the artifact to be absent", ids.EvidenceID)
 	}
 
-	// Attempt reconciliation via the stub.
+	// Attempt reconciliation via the real Reconciler.
 	//
-	// FAILING: replace stubAcceptAllReconciler with the real Reconciler.
 	// The real Reconciler must call store.LoadEvidence(id) for each EvidenceID
 	// and return PatchAccepted:false when any artifact is missing.
-	rec := &stubAcceptAllReconciler{}
+	rec := reconciler.New(env.st, env.log)
 
 	result, reconcileErr := rec.Reconcile(env.ctx, ids.PatchID)
 	if reconcileErr != nil {
@@ -879,8 +822,7 @@ func TestAcceptedPatchRequiresPresentEvidenceArtifacts(t *testing.T) {
 			"ReconcileResult{PatchAccepted:false} instead: %v", reconcileErr)
 	}
 
-	// FAILING ASSERTION: stubAcceptAllReconciler returns PatchAccepted:true,
-	// but a correct Reconciler MUST return PatchAccepted:false when a referenced
+	// A correct Reconciler MUST return PatchAccepted:false when a referenced
 	// EvidenceArtifact does not exist in the store.
 	if result.PatchAccepted {
 		t.Errorf(
@@ -888,7 +830,7 @@ func TestAcceptedPatchRequiresPresentEvidenceArtifacts(t *testing.T) {
 				"obligation %q references EvidenceID %q which is absent from the store.\n"+
 				"Invariant (orca.md §11 step 3): Reconciler must verify each "+
 				"EvidenceArtifact exists in the store before accepting a patch.\n"+
-				"Replace stubAcceptAllReconciler with a real Reconciler that enforces this.",
+				"Reconciler must reject patches whose blocking obligations reference absent evidence.",
 			ids.PatchID, ids.ObligationID, ids.EvidenceID,
 		)
 	}
@@ -997,13 +939,6 @@ func assertJSONEqual(t *testing.T, label string, want, got any) {
 			label, wantBytes, gotBytes)
 	}
 }
-
-// Compile-time checks: ensure stubs satisfy the Reconciler interface.
-// If the interface changes, these will produce a compilation error.
-var (
-	_ reconciler.Reconciler = (*notYetImplementedReconciler)(nil)
-	_ reconciler.Reconciler = (*stubAcceptAllReconciler)(nil)
-)
 
 // Verify that the EvidenceArtifact schema used in the no-evidence scenario
 // has an empty path from the store (sanity-check the test isolation).

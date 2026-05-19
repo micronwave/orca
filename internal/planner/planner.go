@@ -78,13 +78,26 @@ type ObligationPlanner interface {
 //
 //	(ObligationPlanner) is responsible for persisting the DecisionRecord
 //
-// The three MVP topologies are defined in orca.md §7. Inputs that drive
-// classification: obligation count and risk, expected file overlap, failure
-// fingerprints in affected areas, whether reproduction is needed, whether
-// tests already exist, user approval policy, cost budget.
+// The three MVP topologies are defined in orca.md §7. The planner passes a
+// ClassifyInput containing all currently known classifier inputs. Unknown fields
+// remain zero-valued and must be treated by classifiers as "unknown / use default
+// behavior" rather than as negative evidence.
+type ClassifyInput struct {
+	Obligations  []*schema.Obligation
+	Fingerprints []*schema.FailureFingerprint
+
+	// The following fields may be empty/zero in Phase 1 implementations.
+	// Populate them in Phase 2+ as the data becomes available.
+	ExpectedFileOverlap bool
+	TestsExist          bool
+	ApprovalPolicy      string
+	BudgetRemaining     int
+	RequiredTools       []string
+}
+
 type TopologyClassifier interface {
 	// Classify returns the selected Topology and a human-readable rationale.
 	// The rationale must name the specific classifier inputs that drove the
 	// decision (e.g. "high-risk obligations, 3 prior failures in affected files").
-	Classify(obligations []*schema.Obligation, fingerprints []*schema.FailureFingerprint) (topology schema.Topology, rationale string, err error)
+	Classify(input ClassifyInput) (topology schema.Topology, rationale string, err error)
 }
