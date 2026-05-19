@@ -16,7 +16,6 @@ import (
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/intent"
-	"github.com/micronwave/orca/internal/orcapath"
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/reconciler"
@@ -237,7 +236,9 @@ func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) boo
 	case schema.TopologyHumanGated:
 		return true
 	case schema.TopologyImplementerReviewer:
-		return risk == schema.RiskMedium || risk == schema.RiskHigh
+		// IR topology is only selected when obligations contain medium risk (count > 1),
+		// so the gate always applies regardless of the goal-level risk field.
+		return true
 	case schema.TopologySingle:
 		return risk == schema.RiskLow
 	default:
@@ -249,7 +250,8 @@ func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWin
 	if topology == schema.TopologyHumanGated {
 		return 0
 	}
-	if topology == schema.TopologyImplementerReviewer && (risk == schema.RiskMedium || risk == schema.RiskHigh) {
+	// IR topology implies medium risk by classifier invariant; block indefinitely.
+	if topology == schema.TopologyImplementerReviewer {
 		return 0
 	}
 	return defaultWindow
@@ -267,41 +269,18 @@ func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig) verifi
 	return verifier.New(st, cfg, nil)
 }
 
-type plannerStub struct {
-	store        store.ArtifactStore
-	config       config.BudgetConfig
-	orcaDir      string
-	worktreePath func(string, string) string
-}
-
 func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string) planner.ObligationPlanner {
-	return plannerStub{
-		store:        st,
-		config:       cfg,
-		orcaDir:      orcaDir,
-		worktreePath: orcapath.CapsuleWorktreePath,
-	}
-}
-
-func (s plannerStub) Plan(context.Context, string) (planner.PlanResult, error) {
-	return planner.PlanResult{}, notYetImplemented("obligation planner Phase 1 implementation")
-}
-
-type projectorStub struct {
-	store  store.ArtifactStore
-	config config.VerifierConfig
+	return planner.New(st, planner.Config{
+		OrcaDir:            orcaDir,
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   cfg.DefaultMaxTokens,
+		DefaultMaxWallTime: cfg.DefaultMaxWallTimeSeconds,
+		DefaultMaxRetries:  cfg.DefaultMaxRetries,
+	})
 }
 
 func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.ContextCompiler {
-	return projectorStub{store: st, config: cfg}
-}
-
-func (s projectorStub) CompileExecutor(context.Context, string) (*schema.ContextProjection, error) {
-	return nil, notYetImplemented("executor projection Phase 1 implementation")
-}
-
-func (s projectorStub) CompileHumanSummary(context.Context, string) (*schema.HumanSummaryProjection, error) {
-	return nil, notYetImplemented("human summary projection Phase 1 implementation")
+	return projector.New(st, cfg)
 }
 
 type gatekeeperStub struct {
