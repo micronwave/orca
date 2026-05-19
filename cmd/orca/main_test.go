@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,13 +9,13 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 )
 
-func TestRunLoadsConfigAndFailsAtFirstStub(t *testing.T) {
+func TestRunLoadsConfigAndInitializesEventLog(t *testing.T) {
 	orcaDir := t.TempDir()
 	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
 
 	err := run([]string{"--goal", "test goal", "--orca-dir", orcaDir})
-	if !errors.Is(err, errNotYetImplemented) {
-		t.Fatalf("run error = %v, want errNotYetImplemented", err)
+	if err == nil {
+		t.Fatalf("run error = nil, want scaffold runtime error")
 	}
 	if _, statErr := os.Stat(filepath.Join(orcaDir, "events.log")); statErr != nil {
 		t.Fatalf("events.log was not created: %v", statErr)

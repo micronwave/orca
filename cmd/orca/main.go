@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,8 +25,6 @@ import (
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/verifier"
 )
-
-var errNotYetImplemented = errors.New("not yet implemented")
 
 // Phase 1 decision: the orchestrator wires deterministic, rule-based component
 // implementations only. No model SDK, provider hook, or model config is part of
@@ -259,10 +256,6 @@ func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWin
 	return defaultWindow
 }
 
-func notYetImplemented(name string) error {
-	return fmt.Errorf("%s: %w", name, errNotYetImplemented)
-}
-
 func newIntentCompiler(st store.ArtifactStore) intent.IntentCompiler {
 	return intent.New(st)
 }
@@ -285,42 +278,12 @@ func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.C
 	return projector.New(st, cfg)
 }
 
-type gatekeeperStub struct {
-	store  store.ArtifactStore
-	config config.GateConfig
-}
-
 func newGatekeeper(st store.ArtifactStore, cfg config.GateConfig) gate.HumanGatekeeper {
-	return gatekeeperStub{store: st, config: cfg}
-}
-
-func (s gatekeeperStub) ReviewProjection(context.Context, string, time.Duration) (gate.GateDecision, error) {
-	return gate.GateDecision{}, notYetImplemented("human projection gate Phase 1 implementation")
-}
-
-func (s gatekeeperStub) ReviewMerge(context.Context, string) (gate.GateDecision, error) {
-	return gate.GateDecision{}, notYetImplemented("human merge gate Phase 1 implementation")
-}
-
-func (s gatekeeperStub) ReviewWaiver(context.Context, string, string) (gate.GateDecision, error) {
-	return gate.GateDecision{}, notYetImplemented("human waiver gate Phase 1 implementation")
-}
-
-type budgetControllerStub struct {
-	log    eventlog.EventLog
-	config config.BudgetConfig
+	return gate.New(st)
 }
 
 func newBudgetController(log eventlog.EventLog, cfg config.BudgetConfig) budget.BudgetController {
-	return budgetControllerStub{log: log, config: cfg}
-}
-
-func (s budgetControllerStub) CheckCapsuleBudget(context.Context, string) (budget.BudgetCheck, error) {
-	return budget.BudgetCheck{}, notYetImplemented("budget controller Phase 1 implementation")
-}
-
-func (s budgetControllerStub) ComputeROI(context.Context, string) (budget.ROI, error) {
-	return budget.ROI{}, notYetImplemented("budget ROI Phase 1 implementation")
+	return budget.New(log)
 }
 
 func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg config.AdapterConfig) runner.CapsuleRunner {
@@ -333,15 +296,6 @@ func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir str
 	)
 }
 
-type reconcilerStub struct {
-	store store.ArtifactStore
-	log   eventlog.EventLog
-}
-
 func newReconciler(st store.ArtifactStore, log eventlog.EventLog) reconciler.Reconciler {
-	return reconcilerStub{store: st, log: log}
-}
-
-func (s reconcilerStub) Reconcile(context.Context, string) (reconciler.ReconcileResult, error) {
-	return reconciler.ReconcileResult{}, notYetImplemented("reconciler Phase 1 implementation")
+	return reconciler.New(st, log)
 }

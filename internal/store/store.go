@@ -74,6 +74,7 @@ type ArtifactStore interface {
 	SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error
 	LoadProjection(ctx context.Context, projectionID string) (*schema.ContextProjection, error)
 	LoadHumanSummaryProjection(ctx context.Context, projectionID string) (*schema.HumanSummaryProjection, error)
+	LoadHumanSummaryProjectionForCapsule(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error)
 
 	// --- Patch Artifacts ---
 

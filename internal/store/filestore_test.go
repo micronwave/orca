@@ -458,6 +458,42 @@ func TestProjection_SaveLoadHumanSummary(t *testing.T) {
 	}
 }
 
+func TestProjection_LoadHumanSummaryForCapsule(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedCapsule(t, "CAP-2", "OB-1")
+	if err := e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+		ContextProjection: schema.ContextProjection{
+			ContextProjectionID: "CTX-1",
+			SourceArtifactIDs:   []string{"CAP-2"},
+			CreatedAt:           time.Now().UTC(),
+		},
+		GoalPlain: "other capsule",
+	}); err != nil {
+		t.Fatalf("SaveHumanSummaryProjection CTX-1: %v", err)
+	}
+	if err := e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+		ContextProjection: schema.ContextProjection{
+			ContextProjectionID: "CTX-2",
+			SourceArtifactIDs:   []string{"CAP-1"},
+			CreatedAt:           time.Now().UTC(),
+		},
+		GoalPlain: "target capsule",
+	}); err != nil {
+		t.Fatalf("SaveHumanSummaryProjection CTX-2: %v", err)
+	}
+
+	got, err := e.st.LoadHumanSummaryProjectionForCapsule(e.ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadHumanSummaryProjectionForCapsule: %v", err)
+	}
+	if got.ContextProjectionID != "CTX-2" || got.GoalPlain != "target capsule" {
+		t.Fatalf("projection = %+v, want CTX-2", got)
+	}
+}
+
 func TestProjection_BothEmitEvent(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")

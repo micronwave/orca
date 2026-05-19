@@ -675,6 +675,26 @@ func (s *FileStore) LoadHumanSummaryProjection(ctx context.Context, projectionID
 	return readFile[schema.HumanSummaryProjection](s.artifactPath(dirProjHuman, projectionID))
 }
 
+func (s *FileStore) LoadHumanSummaryProjectionForCapsule(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error) {
+	if err := validateArtifactID("capsule", capsuleID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.HumanSummaryProjection](filepath.Join(s.root, dirProjHuman))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range all {
+		for _, sourceID := range p.SourceArtifactIDs {
+			if sourceID == capsuleID {
+				return p, nil
+			}
+		}
+	}
+	return nil, ErrNotFound
+}
+
 // ── Patch Artifacts ──────────────────────────────────────────────────────────
 
 func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) error {

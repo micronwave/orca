@@ -13,7 +13,7 @@
 //	                  FailureFingerprints via LoadFailuresForFiles,
 //	                  DecisionRecords via LoadDecision
 //	Writes (store):   DecisionRecord (human approval/rejection) via SaveDecision
-//	Writes (log):     EventDecisionRecordCreated
+//	Writes (log):     none directly — store emits decision_record_created
 //
 //	Must NOT import:  internal/planner, internal/runner, internal/verifier,
 //	                  internal/reconciler, internal/projector, internal/budget
