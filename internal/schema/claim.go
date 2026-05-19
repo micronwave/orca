@@ -13,7 +13,9 @@ const (
 )
 
 // ClaimStatus tracks the trust level of a claim.
-// "contested" and "invalidated" are deferred to Phase 3. orca.md §5.8, §14.
+// "contested" and "invalidated" are deferred to Phase 3; see
+// docs/phase2_claim_status_decision.md for the explicit Phase 2 scope decision.
+// orca.md §5.8, §14.
 type ClaimStatus string
 
 const (
