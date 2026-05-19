@@ -25,6 +25,10 @@ type PatchArtifact struct {
 	Status               PatchStatus `json:"status"`
 	// ScopeViolations lists any files changed outside AllowedPaths.
 	ScopeViolations []string `json:"scope_violations"`
+	// TokensUsed is the total input+output token count for the capsule run that
+	// produced this patch, copied from AgentSidecarOutput.TokensUsed. Zero when
+	// the adapter could not determine a count.
+	TokensUsed int `json:"tokens_used,omitempty"`
 }
 
 // RetryContract describes why a patch cannot merge and what the next capsule

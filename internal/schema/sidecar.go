@@ -48,4 +48,8 @@ type AgentSidecarOutput struct {
 	// complementing EvidencePaths which holds file-system paths.
 	EvidenceReferences []string `json:"evidence_references,omitempty"`
 	Summary            string   `json:"summary,omitempty"`
+	// TokensUsed is set by the adapter after execution from the CLI's usage report —
+	// it is infrastructure metadata, not something the agent itself reports.
+	// Zero means the adapter could not determine a count.
+	TokensUsed int `json:"tokens_used,omitempty"`
 }
