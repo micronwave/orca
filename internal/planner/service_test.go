@@ -564,6 +564,158 @@ func TestPlan_NoLearningDisablesHistoricalFailureRoutingHint(t *testing.T) {
 	}
 }
 
+func TestPlan_selectsTestFirstFromGoalIntent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	const (
+		goalID      = "G-plan-testfirst"
+		conditionID = "GC-plan-testfirst"
+		obligation  = "OB-plan-testfirst"
+	)
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "Use test first TDD flow for this low-risk change",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "deliver low-risk change",
+			EffectiveDescription: "deliver low-risk change",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     obligation,
+		GoalConditionID:  conditionID,
+		Description:      "add coverage",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	plannerSvc := New(st, Config{
+		OrcaDir:            filepath.Join(root, ".orca"),
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   32000,
+		DefaultMaxWallTime: 300,
+		DefaultMaxRetries:  3,
+	})
+	result, err := plannerSvc.Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if result.Topology != schema.TopologyTestFirst {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologyTestFirst)
+	}
+	if len(result.CapsuleIDs) != 2 {
+		t.Fatalf("CapsuleIDs len = %d, want 2", len(result.CapsuleIDs))
+	}
+	roles := map[schema.CapsuleRole]bool{}
+	for _, capsuleID := range result.CapsuleIDs {
+		capsule, err := st.LoadCapsule(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("LoadCapsule: %v", err)
+		}
+		roles[capsule.Role] = true
+	}
+	if !roles[schema.RoleTester] || !roles[schema.RoleExecutor] {
+		t.Fatalf("roles = %+v, want tester and executor", roles)
+	}
+}
+
+func TestPlan_selectsInvestigateThenImplementFromGoalIntent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	const (
+		goalID      = "G-plan-investigate"
+		conditionID = "GC-plan-investigate"
+		obligation  = "OB-plan-investigate"
+	)
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "Investigate the root cause before implementing a fix",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "resolve issue",
+			EffectiveDescription: "resolve issue",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     obligation,
+		GoalConditionID:  conditionID,
+		Description:      "fix issue",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	plannerSvc := New(st, Config{
+		OrcaDir:            filepath.Join(root, ".orca"),
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   32000,
+		DefaultMaxWallTime: 300,
+		DefaultMaxRetries:  3,
+	})
+	result, err := plannerSvc.Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if result.Topology != schema.TopologyInvestigateThenImpl {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologyInvestigateThenImpl)
+	}
+	if len(result.CapsuleIDs) != 2 {
+		t.Fatalf("CapsuleIDs len = %d, want 2", len(result.CapsuleIDs))
+	}
+	roles := map[schema.CapsuleRole]bool{}
+	for _, capsuleID := range result.CapsuleIDs {
+		capsule, err := st.LoadCapsule(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("LoadCapsule: %v", err)
+		}
+		roles[capsule.Role] = true
+	}
+	if !roles[schema.RoleInvestigator] || !roles[schema.RoleExecutor] {
+		t.Fatalf("roles = %+v, want investigator and executor", roles)
+	}
+}
+
 func seedPlanWithRecurringFailureHistory(t *testing.T, noLearning bool) (context.Context, *store.FileStore, PlanResult) {
 	t.Helper()
 	ctx := context.Background()

@@ -75,8 +75,8 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		ApprovalPolicy:            s.config.ApprovalPolicy,
 		BudgetRemaining:           s.config.DefaultMaxTokens,
 		ExpectedFilesByObligation: expectedFilesByObligation(obligations),
-		TestsExist:                false,
-		RequiredTools:             nil,
+		TestsExist:                testsExist(goal, obligations),
+		RequiredTools:             requiredTools(goal, obligations),
 	}
 	classifyInput.ExpectedFileOverlap = hasExpectedFileOverlap(classifyInput.ExpectedFilesByObligation)
 	topology, rationale, err := s.classifier.Classify(classifyInput)
@@ -478,6 +478,85 @@ func normalizePath(path string) string {
 	path = strings.TrimPrefix(path, "./")
 	path = strings.Trim(path, "/")
 	return strings.ToLower(path)
+}
+
+func requiredTools(goal *schema.GoalIR, obligations []*schema.Obligation) []string {
+	text := strings.ToLower(strings.Join(classifierText(goal, obligations), " "))
+	tools := make([]string, 0, 2)
+	if strings.Contains(text, "test first") ||
+		strings.Contains(text, "tests first") ||
+		strings.Contains(text, "write tests first") ||
+		strings.Contains(text, "tdd") ||
+		strings.Contains(text, "red green") {
+		tools = append(tools, "test_first")
+	}
+	if strings.Contains(text, "investigate") ||
+		strings.Contains(text, "investigation") ||
+		strings.Contains(text, "inspect") ||
+		strings.Contains(text, "triage") ||
+		strings.Contains(text, "debug") ||
+		strings.Contains(text, "root cause") ||
+		strings.Contains(text, "analyze") {
+		tools = append(tools, "investigate")
+	}
+	return uniqueNormalized(tools)
+}
+
+func testsExist(goal *schema.GoalIR, obligations []*schema.Obligation) bool {
+	for _, obligation := range obligations {
+		for _, file := range obligation.ExpectedFiles {
+			if looksLikeTestFile(file) {
+				return true
+			}
+		}
+	}
+	text := strings.ToLower(strings.Join(classifierText(goal, obligations), " "))
+	if strings.Contains(text, "without tests") || strings.Contains(text, "no tests") {
+		return false
+	}
+	return strings.Contains(text, "existing test") ||
+		strings.Contains(text, "failing test") ||
+		strings.Contains(text, "broken test") ||
+		strings.Contains(text, "regression test")
+}
+
+func classifierText(goal *schema.GoalIR, obligations []*schema.Obligation) []string {
+	text := make([]string, 0, len(obligations)+2)
+	if goal != nil {
+		text = append(text, goal.OriginalIntent)
+		for _, condition := range goal.GoalConditions {
+			text = append(text, condition.Description, condition.EffectiveDescription)
+		}
+	}
+	for _, obligation := range obligations {
+		text = append(text, obligation.Description)
+		for _, required := range obligation.EvidenceRequired {
+			text = append(text, required)
+		}
+	}
+	return text
+}
+
+func looksLikeTestFile(path string) bool {
+	normalized := normalizePath(path)
+	return strings.Contains(normalized, "_test.") ||
+		strings.Contains(normalized, ".test.") ||
+		strings.Contains(normalized, "/test/") ||
+		strings.Contains(normalized, "/tests/")
+}
+
+func uniqueNormalized(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	return out
 }
 
 type routingHints struct {
