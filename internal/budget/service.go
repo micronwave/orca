@@ -70,6 +70,9 @@ func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 		TotalCoordinationCost: spend.CoordinationCostUnits,
 	}
 	for _, record := range records {
+		if record.ObligationID != "" {
+			continue
+		}
 		roi.ObligationsDischarged += record.ObligationsDischarged
 		roi.PatchesAccepted += record.PatchesAccepted
 		roi.PatchesRejected += record.PatchesRejected
@@ -141,6 +144,9 @@ func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[s
 	}
 	var spend Spend
 	for _, record := range records {
+		if record.ObligationID != "" {
+			continue
+		}
 		spend.TokensUsed += record.TokensSpent
 		spend.WallTimeSeconds += record.WallTimeSeconds
 		spend.ToolCalls += record.ToolCalls

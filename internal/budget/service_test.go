@@ -179,6 +179,49 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	}
 }
 
+func TestComputeROI_IgnoresObligationScopedRecordsForTotals(t *testing.T) {
+	e := newBudgetEnv(t)
+	e.seedCapsule(t, 1000, 60, 1)
+	now := time.Now().UTC()
+	if err := e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+		BudgetID:              "BUD-summary",
+		GoalID:                "G-1",
+		CapsuleID:             "CAP-1",
+		TokensSpent:           100,
+		ToolCalls:             2,
+		ObligationsDischarged: 1,
+		PatchesAccepted:       1,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("SaveBudgetRecord summary: %v", err)
+	}
+	if err := e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+		BudgetID:              "BUD-ob-1",
+		GoalID:                "G-1",
+		CapsuleID:             "CAP-1",
+		ObligationID:          "OB-1",
+		TokensSpent:           900,
+		ToolCalls:             9,
+		ObligationsDischarged: 1,
+		PatchesAccepted:       1,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("SaveBudgetRecord obligation: %v", err)
+	}
+	roi, err := e.ctl.ComputeROI(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("ComputeROI: %v", err)
+	}
+	if roi.TotalTokensSpent != 100 {
+		t.Fatalf("TotalTokensSpent = %d, want 100 (summary record only)", roi.TotalTokensSpent)
+	}
+	if roi.ObligationsDischarged != 1 {
+		t.Fatalf("ObligationsDischarged = %d, want 1 (summary record only)", roi.ObligationsDischarged)
+	}
+}
+
 func TestCheckCapsuleBudget_RejectsExhaustedTokens(t *testing.T) {
 	e := newBudgetEnv(t)
 	e.seedCapsule(t, 100, 0, 0)

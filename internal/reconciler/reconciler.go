@@ -155,6 +155,13 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 
 	now := time.Now().UTC()
 	result := ReconcileResult{PatchAccepted: true}
+	recommendationRequiresHumanReview := false
+	switch vr.RecommendedAction {
+	case schema.ActionReject, schema.ActionRetry, schema.ActionSplit:
+		reject(&result, recommendationBlockingReason(vr))
+	case schema.ActionHumanReview:
+		recommendationRequiresHumanReview = true
+	}
 	loadedObligations := make([]*schema.Obligation, 0, len(vr.ObligationResults))
 	updatedStatuses := make(map[string]schema.ObligationStatus, len(vr.ObligationResults))
 	satisfiedBy := make(map[string][]string, len(vr.ObligationResults))
@@ -274,7 +281,7 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 		result.FollowUpObligationIDs = followUps
 	}
 
-	if err := s.saveBudgetRecord(ctx, goal.GoalID, patch.CapsuleID, result.PatchAccepted, countDischarged(updatedStatuses), now); err != nil {
+	if err := s.saveBudgetRecords(ctx, goal.GoalID, patch, vr, updatedStatuses, result.PatchAccepted, now); err != nil {
 		return ReconcileResult{}, err
 	}
 
@@ -323,7 +330,7 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 			result.MergeReady = true
 		}
 	}
-	result.HumanGateRequired = result.MergeReady && highRisk
+	result.HumanGateRequired = result.MergeReady && (highRisk || recommendationRequiresHumanReview)
 
 	if result.MergeReady && !result.HumanGateRequired {
 		if _, err := s.appendEvent(ctx, schema.EventMergeApplied, goal.GoalID, patch.PatchID, schema.PatchStatusPayload{
@@ -492,47 +499,111 @@ func (s *service) createFollowUpObligations(ctx context.Context, capsuleID strin
 	return ids, nil
 }
 
-func (s *service) saveBudgetRecord(ctx context.Context, goalID, capsuleID string, accepted bool, discharged int, now time.Time) error {
+func (s *service) saveBudgetRecords(
+	ctx context.Context,
+	goalID string,
+	patch *schema.PatchArtifact,
+	vr *schema.VerifierResult,
+	updatedStatuses map[string]schema.ObligationStatus,
+	accepted bool,
+	now time.Time,
+) error {
+	if patch == nil || vr == nil {
+		return fmt.Errorf("reconciler: patch and verifier result are required for budget recording")
+	}
 	records, err := s.store.LoadBudgetForGoal(ctx, goalID)
 	if err != nil {
 		return fmt.Errorf("reconciler: load budget for goal %s: %w", goalID, err)
 	}
-	var record *schema.BudgetRecord
-	found := false
+	recordsByID := make(map[string]*schema.BudgetRecord, len(records))
 	for _, candidate := range records {
-		if candidate.CapsuleID == capsuleID {
-			record = candidate
-			found = true
-			break
-		}
+		recordsByID[candidate.BudgetID] = candidate
 	}
-	if record == nil {
-		record = &schema.BudgetRecord{
-			BudgetID:  "BUD-" + capsuleID,
+	metrics, err := s.budgetMetricsForResult(ctx, vr)
+	if err != nil {
+		return err
+	}
+	discharged := countDischarged(updatedStatuses)
+
+	summaryID := "BUD-" + patch.CapsuleID
+	summary := recordsByID[summaryID]
+	if summary == nil {
+		summary = &schema.BudgetRecord{
+			BudgetID:  summaryID,
 			GoalID:    goalID,
-			CapsuleID: capsuleID,
+			CapsuleID: patch.CapsuleID,
 			CreatedAt: now,
 		}
 	}
-	record.UpdatedAt = now
-	// Assignment (not +=) is intentional: if the reconciler re-runs for the same
-	// capsule on crash recovery, the latest result wins rather than double-counting.
-	record.ObligationsDischarged = discharged
+	summary.UpdatedAt = now
+	summary.ObligationID = ""
+	summary.TokensSpent = metrics.tokensSpent
+	summary.WallTimeSeconds = metrics.wallTimeSeconds
+	summary.ToolCalls = metrics.toolCalls
+	summary.Retries = metrics.retries
+	summary.DuplicatedFileReads = metrics.duplicatedFileReads
+	summary.OverlappingEdits = metrics.overlappingEdits
+	summary.EvidenceArtifactsReused = metrics.evidenceArtifactsReused
+	summary.HumanInterventions = metrics.humanInterventions
+	summary.ObligationsDischarged = discharged
 	if accepted {
-		record.PatchesAccepted = 1
-		record.PatchesRejected = 0
+		summary.PatchesAccepted = 1
+		summary.PatchesRejected = 0
 	} else {
-		record.PatchesAccepted = 0
-		record.PatchesRejected = 1
+		summary.PatchesAccepted = 0
+		summary.PatchesRejected = 1
 	}
-	if record.CreatedAt.IsZero() {
-		record.CreatedAt = now
+	if err := saveOrUpdateBudgetRecord(ctx, s.store, summary, recordsByID[summaryID] != nil); err != nil {
+		return err
 	}
 
-	if found {
-		return s.store.UpdateBudgetRecord(ctx, record)
+	for _, verdict := range vr.ObligationResults {
+		status, ok := updatedStatuses[verdict.ObligationID]
+		if !ok {
+			continue
+		}
+		obligationMetrics, err := s.budgetMetricsForEvidenceIDs(ctx, verdict.EvidenceIDs, vr.RecommendedAction)
+		if err != nil {
+			return err
+		}
+		recordID := "BUD-" + patch.CapsuleID + "-" + verdict.ObligationID
+		record := recordsByID[recordID]
+		found := record != nil
+		if record == nil {
+			record = &schema.BudgetRecord{
+				BudgetID:     recordID,
+				GoalID:       goalID,
+				CapsuleID:    patch.CapsuleID,
+				ObligationID: verdict.ObligationID,
+				CreatedAt:    now,
+			}
+		}
+		record.UpdatedAt = now
+		record.TokensSpent = obligationMetrics.tokensSpent
+		record.WallTimeSeconds = obligationMetrics.wallTimeSeconds
+		record.ToolCalls = obligationMetrics.toolCalls
+		record.Retries = obligationMetrics.retries
+		record.DuplicatedFileReads = obligationMetrics.duplicatedFileReads
+		record.OverlappingEdits = obligationMetrics.overlappingEdits
+		record.EvidenceArtifactsReused = obligationMetrics.evidenceArtifactsReused
+		record.HumanInterventions = obligationMetrics.humanInterventions
+		if status == schema.ObligationSatisfied || status == schema.ObligationWaived {
+			record.ObligationsDischarged = 1
+		} else {
+			record.ObligationsDischarged = 0
+		}
+		if accepted {
+			record.PatchesAccepted = 1
+			record.PatchesRejected = 0
+		} else {
+			record.PatchesAccepted = 0
+			record.PatchesRejected = 1
+		}
+		if err := saveOrUpdateBudgetRecord(ctx, s.store, record, found); err != nil {
+			return err
+		}
 	}
-	return s.store.SaveBudgetRecord(ctx, record)
+	return nil
 }
 
 func countDischarged(statuses map[string]schema.ObligationStatus) int {
@@ -577,6 +648,81 @@ func relatedIDs(patchID, verifierResultID string, followUps []string) []string {
 	ids := []string{patchID, verifierResultID}
 	ids = append(ids, followUps...)
 	return ids
+}
+
+type budgetMetrics struct {
+	tokensSpent             int
+	wallTimeSeconds         float64
+	toolCalls               int
+	retries                 int
+	duplicatedFileReads     int
+	overlappingEdits        int
+	evidenceArtifactsReused int
+	humanInterventions      int
+}
+
+func (s *service) budgetMetricsForResult(ctx context.Context, vr *schema.VerifierResult) (budgetMetrics, error) {
+	evidenceSet := make(map[string]bool)
+	for _, verdict := range vr.ObligationResults {
+		for _, evidenceID := range verdict.EvidenceIDs {
+			evidenceSet[evidenceID] = true
+		}
+	}
+	evidenceIDs := make([]string, 0, len(evidenceSet))
+	for evidenceID := range evidenceSet {
+		evidenceIDs = append(evidenceIDs, evidenceID)
+	}
+	return s.budgetMetricsForEvidenceIDs(ctx, evidenceIDs, vr.RecommendedAction)
+}
+
+func (s *service) budgetMetricsForEvidenceIDs(
+	ctx context.Context,
+	evidenceIDs []string,
+	action schema.RecommendedAction,
+) (budgetMetrics, error) {
+	var metrics budgetMetrics
+	seen := make(map[string]bool)
+	for _, evidenceID := range evidenceIDs {
+		if evidenceID == "" || seen[evidenceID] {
+			continue
+		}
+		seen[evidenceID] = true
+		evidence, err := s.store.LoadEvidence(ctx, evidenceID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return budgetMetrics{}, fmt.Errorf("reconciler: load evidence %s for budget metrics: %w", evidenceID, err)
+		}
+		metrics.toolCalls++
+		if evidence.Source != "verifier" {
+			metrics.evidenceArtifactsReused++
+		}
+	}
+	if action == schema.ActionRetry || action == schema.ActionSplit {
+		metrics.retries = 1
+	}
+	if action == schema.ActionHumanReview {
+		metrics.humanInterventions = 1
+	}
+	return metrics, nil
+}
+
+func saveOrUpdateBudgetRecord(ctx context.Context, st store.ArtifactStore, record *schema.BudgetRecord, exists bool) error {
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = record.UpdatedAt
+	}
+	if exists {
+		return st.UpdateBudgetRecord(ctx, record)
+	}
+	return st.SaveBudgetRecord(ctx, record)
+}
+
+func recommendationBlockingReason(vr *schema.VerifierResult) string {
+	if vr.RecommendationRationale != "" {
+		return vr.RecommendationRationale
+	}
+	return fmt.Sprintf("verifier recommended %s", vr.RecommendedAction)
 }
 
 func newArtifactID(prefix, patchID string, now time.Time) string {

@@ -434,12 +434,79 @@ func TestReconcileInvalidatesClaimsOnSymbolOverlap(t *testing.T) {
 	}
 }
 
+func TestReconcile_RecommendedHumanReviewRequiresGate(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:            "HUMANREVIEW",
+		evidenceIDs:       []string{"EV-HUMANREVIEW"},
+		saveEvidence:      true,
+		recommendedAction: schema.ActionHumanReview,
+		recommendation:    "reviewer identified unresolved risk claim",
+	})
+
+	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted=false, reason=%q", result.BlockingReason)
+	}
+	if !result.MergeReady {
+		t.Fatalf("MergeReady=false, reason=%q", result.BlockingReason)
+	}
+	if !result.HumanGateRequired {
+		t.Fatal("HumanGateRequired=false, want true when verifier recommends human_review")
+	}
+}
+
+func TestReconcile_WritesPerObligationBudgetRecord(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "BUDOBL",
+		evidenceIDs:  []string{"EV-BUDOBL"},
+		saveEvidence: true,
+	})
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	records, err := env.st.LoadBudgetForGoal(env.ctx, ids.goalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	var hasSummary bool
+	var obligationRecord *schema.BudgetRecord
+	for _, record := range records {
+		if record.BudgetID == "BUD-"+ids.capsuleID && record.ObligationID == "" {
+			hasSummary = true
+			continue
+		}
+		if record.ObligationID == ids.obligationID {
+			obligationRecord = record
+		}
+	}
+	if !hasSummary {
+		t.Fatal("missing capsule summary budget record")
+	}
+	if obligationRecord == nil {
+		t.Fatalf("missing per-obligation budget record for %s", ids.obligationID)
+	}
+	if obligationRecord.ToolCalls == 0 {
+		t.Fatalf("obligation ToolCalls = %d, want > 0", obligationRecord.ToolCalls)
+	}
+	if obligationRecord.ObligationsDischarged != 1 {
+		t.Fatalf("obligation ObligationsDischarged = %d, want 1", obligationRecord.ObligationsDischarged)
+	}
+}
+
 type scenarioOptions struct {
-	suffix       string
-	evidenceIDs  []string
-	saveEvidence bool
-	omitVerdict  bool
-	changedFiles []string
+	suffix            string
+	evidenceIDs       []string
+	saveEvidence      bool
+	omitVerdict       bool
+	changedFiles      []string
+	recommendedAction schema.RecommendedAction
+	recommendation    string
 }
 
 type scenarioIDs struct {
@@ -534,8 +601,8 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		PatchID:                 ids.patchID,
 		CapsuleID:               ids.capsuleID,
 		ObligationResults:       verdicts,
-		RecommendedAction:       schema.ActionAccept,
-		RecommendationRationale: "tests passed",
+		RecommendedAction:       pickRecommendedAction(opts.recommendedAction),
+		RecommendationRationale: pickRecommendationRationale(opts.recommendation),
 		CreatedAt:               now,
 	}); err != nil {
 		t.Fatalf("SaveVerifierResult: %v", err)
@@ -544,4 +611,18 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		t.Fatal("scenario must create an active goal")
 	}
 	return ids
+}
+
+func pickRecommendedAction(action schema.RecommendedAction) schema.RecommendedAction {
+	if action == "" {
+		return schema.ActionAccept
+	}
+	return action
+}
+
+func pickRecommendationRationale(rationale string) string {
+	if strings.TrimSpace(rationale) == "" {
+		return "tests passed"
+	}
+	return rationale
 }
