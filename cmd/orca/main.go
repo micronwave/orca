@@ -239,6 +239,8 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		}
 
 		var patchIDs []string
+		var supplementalEvidenceIDs []string
+		var supplementalClaimIDs []string
 		for _, capsuleID := range plan.CapsuleIDs {
 			capsule, err := rt.store.LoadCapsule(ctx, capsuleID)
 			if err != nil {
@@ -285,6 +287,8 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 				if len(runResult.EvidenceIDs) == 0 && len(runResult.ClaimIDs) == 0 {
 					return fmt.Errorf("orca: %s capsule %s produced no review evidence or claims", capsule.Role, capsuleID)
 				}
+				supplementalEvidenceIDs = append(supplementalEvidenceIDs, runResult.EvidenceIDs...)
+				supplementalClaimIDs = append(supplementalClaimIDs, runResult.ClaimIDs...)
 				continue
 			}
 			if runResult.PatchID == "" {
@@ -305,7 +309,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		var followUpIDs []string
 		var blockingReason string
 		for _, patchID := range patchIDs {
-			verifyResult, err := rt.verifierEngine.Verify(ctx, patchID)
+			verifyResult, err := rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
 			if err != nil {
 				return err
 			}
@@ -366,6 +370,16 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		}
 		return fmt.Errorf("orca: reconciliation stopped: %s", blockingReason)
 	}
+}
+
+func (rt *runtime) verifyPatch(ctx context.Context, patchID string, supplementalEvidenceIDs, supplementalClaimIDs []string) (*schema.VerifierResult, error) {
+	if engine, ok := rt.verifierEngine.(verifier.SupplementalVerifierEngine); ok {
+		return engine.VerifyWithSupplements(ctx, patchID, verifier.VerifyInput{
+			SupplementalEvidenceIDs: supplementalEvidenceIDs,
+			SupplementalClaimIDs:    supplementalClaimIDs,
+		})
+	}
+	return rt.verifierEngine.Verify(ctx, patchID)
 }
 
 func ensureInitTarget(orcaDir string) error {

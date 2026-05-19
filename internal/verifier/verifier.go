@@ -13,7 +13,8 @@
 //	                  PatchArtifact via LoadPatch,
 //	                  ExecutionCapsule via LoadCapsule (for scope contract),
 //	                  Obligations via LoadObligation (for each claimed obligation),
-//	                  EvidenceArtifacts via LoadEvidenceForObligation
+//	                  EvidenceArtifacts via LoadEvidenceForObligation and LoadEvidence,
+//	                  ClaimArtifacts via LoadClaim (for supplemental review signals)
 //	Writes (store):   Obligations via SaveObligation (ProposeObligations only),
 //	                  VerifierResult via SaveVerifierResult (Verify only)
 //	Writes (log):     none directly — the ArtifactStore implementation emits
@@ -36,6 +37,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,6 +77,21 @@ type VerifierEngine interface {
 	// The RecommendedAction field is the authoritative signal consumed by the
 	// Reconciler: accept, retry, split, reject, or human_review.
 	Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error)
+}
+
+// VerifyInput carries supplemental artifacts produced by reviewer/tester/
+// investigator capsules in the same plan cycle so verification can incorporate
+// peer review signal into recommendation confidence.
+type VerifyInput struct {
+	SupplementalEvidenceIDs []string
+	SupplementalClaimIDs    []string
+}
+
+// SupplementalVerifierEngine extends VerifierEngine with supplemental inputs.
+// The orchestrator type-asserts this interface when available.
+type SupplementalVerifierEngine interface {
+	VerifierEngine
+	VerifyWithSupplements(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error)
 }
 
 // GateRunner abstracts subprocess execution for verifier gates.
@@ -156,6 +173,10 @@ func (s *service) ProposeObligations(ctx context.Context, goalID string) ([]stri
 }
 
 func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error) {
+	return s.VerifyWithSupplements(ctx, patchID, VerifyInput{})
+}
+
+func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("verifier: store is required")
 	}
@@ -183,10 +204,9 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 	}
 
 	var (
-		createdEvidence    []*schema.EvidenceArtifact
-		createdEvidenceIDs []string
-		warnings           []string
-		blockingFailures   []string
+		createdEvidence  []*schema.EvidenceArtifact
+		warnings         []string
+		blockingFailures []string
 	)
 
 	if strings.TrimSpace(patch.BaseCommit) == "" {
@@ -216,7 +236,6 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 		return nil, err
 	}
 	createdEvidence = append(createdEvidence, scopeEvidence)
-	createdEvidenceIDs = append(createdEvidenceIDs, scopeEvidence.EvidenceID)
 
 	testGateIndex := -1
 	for i, gate := range s.config.Gates {
@@ -240,7 +259,6 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 			return nil, err
 		}
 		createdEvidence = append(createdEvidence, evidence)
-		createdEvidenceIDs = append(createdEvidenceIDs, evidence.EvidenceID)
 		if gate.Blocking && exitCode != 0 {
 			blockingFailures = append(blockingFailures, fmt.Sprintf("static gate %q failed", gate.Name))
 		}
@@ -257,7 +275,6 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 			return nil, err
 		}
 		createdEvidence = append(createdEvidence, evidence)
-		createdEvidenceIDs = append(createdEvidenceIDs, evidence.EvidenceID)
 		if testGate.Blocking && exitCode != 0 {
 			blockingFailures = append(blockingFailures, fmt.Sprintf("test gate %q failed", testGate.Name))
 		}
@@ -265,33 +282,51 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 		warnings = append(warnings, "targeted tests stage: no test gate configured")
 	}
 
-	obligationResults := make([]schema.ObligationVerdict, 0, len(claimed))
-	for _, obligationID := range claimed {
+	supplementalEvidenceByID, err := s.loadEvidenceByID(ctx, in.SupplementalEvidenceIDs)
+	if err != nil {
+		return nil, err
+	}
+	reviewFindings, err := s.reviewFindingsFromClaims(ctx, in.SupplementalClaimIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	obligationResults := make([]schema.ObligationVerdict, 0, len(obligationRefs))
+	for _, obligationID := range obligationRefs {
 		obligation, err := s.store.LoadObligation(ctx, obligationID)
 		if err != nil {
 			return nil, fmt.Errorf("verifier: load obligation %s: %w", obligationID, err)
 		}
 		verdict := schema.VerdictSatisfied
 		note := "all required evidence checks passed"
+		obligationEvidence, err := s.collectObligationEvidence(ctx, obligationID, createdEvidence, supplementalEvidenceByID)
+		if err != nil {
+			return nil, err
+		}
+		usedEvidenceIDs := make(map[string]bool, len(obligationEvidence))
 		for _, required := range obligation.EvidenceRequired {
-			relevant := evidenceForType(createdEvidence, required)
+			relevant := evidenceForType(obligationEvidence, required)
 			if len(relevant) == 0 {
 				verdict = schema.VerdictFailed
 				note = fmt.Sprintf("missing evidence type %s", required)
 				continue
+			}
+			for _, evidence := range relevant {
+				usedEvidenceIDs[evidence.EvidenceID] = true
 			}
 			if hasFailedEvidence(relevant) {
 				verdict = schema.VerdictFailed
 				note = fmt.Sprintf("evidence type %s contains failing result", required)
 			}
 		}
+		evidenceIDs := mapKeys(usedEvidenceIDs)
 		if obligation.Blocking && verdict == schema.VerdictFailed {
 			blockingFailures = append(blockingFailures, obligation.ObligationID)
 		}
 		obligationResults = append(obligationResults, schema.ObligationVerdict{
 			ObligationID: obligationID,
 			Verdict:      verdict,
-			EvidenceIDs:  append([]string(nil), createdEvidenceIDs...),
+			EvidenceIDs:  evidenceIDs,
 			Notes:        note,
 		})
 	}
@@ -302,7 +337,11 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 	if len(blockingFailures) > 0 {
 		recommendedAction = schema.ActionRetry
 		recommendationRationale = "one or more blocking checks failed"
+	} else if reviewFindings.requiresHumanReview {
+		recommendedAction = schema.ActionHumanReview
+		recommendationRationale = reviewFindings.rationale()
 	}
+	warnings = append(warnings, reviewFindings.warnings...)
 
 	result := &schema.VerifierResult{
 		VerifierResultID:        idgen.New("VR"),
@@ -319,6 +358,117 @@ func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierR
 		return nil, fmt.Errorf("verifier: save verifier result %s: %w", result.VerifierResultID, err)
 	}
 	return result, nil
+}
+
+type reviewFindings struct {
+	warnings            []string
+	requiresHumanReview bool
+	claimIDs            []string
+}
+
+func (r reviewFindings) rationale() string {
+	if len(r.claimIDs) == 0 {
+		return "supplemental reviewer claims require human review"
+	}
+	return fmt.Sprintf("supplemental reviewer claims require human review: %s", strings.Join(r.claimIDs, ", "))
+}
+
+func (s *service) reviewFindingsFromClaims(ctx context.Context, claimIDs []string) (reviewFindings, error) {
+	claimIDs = uniqueStrings(claimIDs)
+	findings := reviewFindings{}
+	for _, claimID := range claimIDs {
+		claim, err := s.store.LoadClaim(ctx, claimID)
+		if err != nil {
+			return reviewFindings{}, fmt.Errorf("verifier: load supplemental claim %s: %w", claimID, err)
+		}
+		switch claim.ClaimType {
+		case schema.ClaimRisk, schema.ClaimOpenQuestion, schema.ClaimTestGap:
+			if claim.Status != schema.ClaimVerified {
+				findings.requiresHumanReview = true
+				findings.claimIDs = append(findings.claimIDs, claim.ClaimID)
+			}
+			findings.warnings = append(findings.warnings, fmt.Sprintf("review claim %s (%s) status=%s", claim.ClaimID, claim.ClaimType, claim.Status))
+		case schema.ClaimAssumption:
+			if claim.Status != schema.ClaimVerified {
+				findings.requiresHumanReview = true
+				findings.claimIDs = append(findings.claimIDs, claim.ClaimID)
+			}
+		}
+	}
+	findings.claimIDs = uniqueStrings(findings.claimIDs)
+	findings.warnings = uniqueStrings(findings.warnings)
+	return findings, nil
+}
+
+func (s *service) loadEvidenceByID(ctx context.Context, evidenceIDs []string) (map[string]*schema.EvidenceArtifact, error) {
+	evidenceIDs = uniqueStrings(evidenceIDs)
+	loaded := make(map[string]*schema.EvidenceArtifact, len(evidenceIDs))
+	for _, evidenceID := range evidenceIDs {
+		evidence, err := s.store.LoadEvidence(ctx, evidenceID)
+		if err != nil {
+			return nil, fmt.Errorf("verifier: load supplemental evidence %s: %w", evidenceID, err)
+		}
+		loaded[evidence.EvidenceID] = evidence
+	}
+	return loaded, nil
+}
+
+func (s *service) collectObligationEvidence(
+	ctx context.Context,
+	obligationID string,
+	createdEvidence []*schema.EvidenceArtifact,
+	supplementalEvidenceByID map[string]*schema.EvidenceArtifact,
+) ([]*schema.EvidenceArtifact, error) {
+	relevant := make(map[string]*schema.EvidenceArtifact)
+	for _, evidence := range createdEvidence {
+		if evidenceMatchesObligation(evidence, obligationID) {
+			relevant[evidence.EvidenceID] = evidence
+		}
+	}
+	storedEvidence, err := s.store.LoadEvidenceForObligation(ctx, obligationID)
+	if err != nil {
+		return nil, fmt.Errorf("verifier: load evidence for obligation %s: %w", obligationID, err)
+	}
+	for _, evidence := range storedEvidence {
+		if evidenceMatchesObligation(evidence, obligationID) {
+			relevant[evidence.EvidenceID] = evidence
+		}
+	}
+	for _, evidence := range supplementalEvidenceByID {
+		if evidenceMatchesObligation(evidence, obligationID) {
+			relevant[evidence.EvidenceID] = evidence
+		}
+	}
+	out := make([]*schema.EvidenceArtifact, 0, len(relevant))
+	for _, evidence := range relevant {
+		out = append(out, evidence)
+	}
+	return out, nil
+}
+
+func evidenceMatchesObligation(evidence *schema.EvidenceArtifact, obligationID string) bool {
+	if evidence == nil {
+		return false
+	}
+	return containsString(evidence.Supports, obligationID) || containsString(evidence.Weakens, obligationID)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func mapKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type execGateRunner struct{}

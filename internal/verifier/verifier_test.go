@@ -291,3 +291,162 @@ func TestParseCommand_supportsQuotedExecutablePath(t *testing.T) {
 		t.Fatalf("args = %v", args)
 	}
 }
+
+func TestVerifyWithSupplements_UsesSupplementalEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	goal := &schema.GoalIR{
+		GoalID: "G-supp-ev",
+		GoalConditions: []schema.GoalCondition{{
+			ID:     "GC-supp-ev",
+			Status: schema.GoalConditionUnmet,
+		}},
+		Status: schema.GoalStatusActive,
+	}
+	if err := st.SaveGoal(ctx, goal); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-supp-ev",
+		GoalConditionID:  "GC-supp-ev",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-supp-ev",
+		ObligationIDs: []string{"OB-supp-ev"},
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-supp-ev",
+		CapsuleID:            "CAP-supp-ev",
+		ChangedFiles:         []string{"internal/verifier/verifier.go"},
+		ObligationIDsClaimed: []string{"OB-supp-ev"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := st.SaveEvidence(ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-supp-ev",
+		Type:       schema.EvidenceTestResult,
+		Source:     "claude",
+		ExitCode:   0,
+		Supports:   []string{"OB-supp-ev"},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	engine := New(st, config.VerifierConfig{}, fakeGateRunner{}).(*service)
+	engine.commandChecker = func(string) error { return nil }
+	result, err := engine.VerifyWithSupplements(ctx, "PATCH-supp-ev", VerifyInput{
+		SupplementalEvidenceIDs: []string{"EV-supp-ev"},
+	})
+	if err != nil {
+		t.Fatalf("VerifyWithSupplements: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionAccept {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionAccept)
+	}
+	if len(result.ObligationResults) != 1 || result.ObligationResults[0].Verdict != schema.VerdictSatisfied {
+		t.Fatalf("ObligationResults = %+v, want one satisfied result", result.ObligationResults)
+	}
+}
+
+func TestVerifyWithSupplements_ProposedRiskClaimForcesHumanReview(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID: "G-supp-claim",
+		GoalConditions: []schema.GoalCondition{{
+			ID:     "GC-supp-claim",
+			Status: schema.GoalConditionUnmet,
+		}},
+		Status: schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-supp-claim",
+		GoalConditionID:  "GC-supp-claim",
+		EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		Blocking:         true,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-supp-claim",
+		ObligationIDs: []string{"OB-supp-claim"},
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-supp-claim",
+		CapsuleID:            "CAP-supp-claim",
+		ChangedFiles:         []string{"internal/verifier/verifier.go"},
+		ObligationIDsClaimed: []string{"OB-supp-claim"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-reviewer",
+		ObligationIDs: []string{"OB-supp-claim"},
+		Role:          schema.RoleReviewer,
+	}); err != nil {
+		t.Fatalf("SaveCapsule reviewer: %v", err)
+	}
+	if err := st.SaveClaim(ctx, &schema.ClaimArtifact{
+		ClaimID:         "CLM-supp-risk",
+		Text:            "reviewer found unresolved risk",
+		ClaimType:       schema.ClaimRisk,
+		SourceCapsuleID: "CAP-reviewer",
+		Status:          schema.ClaimProposed,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	engine := New(st, config.VerifierConfig{}, fakeGateRunner{}).(*service)
+	engine.commandChecker = func(string) error { return nil }
+	result, err := engine.VerifyWithSupplements(ctx, "PATCH-supp-claim", VerifyInput{
+		SupplementalClaimIDs: []string{"CLM-supp-risk"},
+	})
+	if err != nil {
+		t.Fatalf("VerifyWithSupplements: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
+	}
+	if !strings.Contains(result.RecommendationRationale, "CLM-supp-risk") {
+		t.Fatalf("RecommendationRationale = %q, want claim id", result.RecommendationRationale)
+	}
+}
