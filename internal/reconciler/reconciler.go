@@ -53,6 +53,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/micronwave/orca/internal/eventlog"
@@ -259,6 +260,11 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 	if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
 		return ReconcileResult{}, err
 	}
+	if result.PatchAccepted {
+		if err := s.invalidateStaleClaims(ctx, goal.GoalID, patch); err != nil {
+			return ReconcileResult{}, err
+		}
+	}
 
 	if !result.PatchAccepted {
 		followUps, err := s.createFollowUpObligations(ctx, patch.CapsuleID, loadedObligations)
@@ -400,6 +406,57 @@ func (s *service) verifyClaims(ctx context.Context, goalID, capsuleID string) er
 	return nil
 }
 
+func (s *service) invalidateStaleClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
+	if patch == nil {
+		return nil
+	}
+	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
+	if err != nil {
+		return fmt.Errorf("reconciler: load claims for goal %s: %w", goalID, err)
+	}
+	if len(claims) == 0 {
+		return nil
+	}
+	currentCapsuleClaims, err := s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		return fmt.Errorf("reconciler: load claims for capsule %s: %w", patch.CapsuleID, err)
+	}
+	changedFiles := normalizedSet(patch.ChangedFiles)
+	// changedSymbols is populated from the new capsule's claims, not from a static
+	// analysis of the diff. File overlap is the primary signal; symbol overlap is
+	// supplementary and only fires when producers populate AffectedSymbols. When
+	// AffectedSymbols is empty for all current capsule claims, changedSymbols is
+	// empty and hasOverlap returns false — file overlap alone drives stale detection.
+	changedSymbols := make(map[string]bool)
+	for _, claim := range currentCapsuleClaims {
+		for _, symbol := range claim.AffectedSymbols {
+			if normalized := normalizeSymbol(symbol); normalized != "" {
+				changedSymbols[normalized] = true
+			}
+		}
+	}
+	for _, claim := range claims {
+		if claim.Status != schema.ClaimVerified || claim.SourceCapsuleID == patch.CapsuleID {
+			continue
+		}
+		fileOverlap := hasOverlap(normalizedSet(claim.AffectedFiles), changedFiles)
+		symbolOverlap := hasOverlap(normalizedSymbols(claim.AffectedSymbols), changedSymbols)
+		if !fileOverlap && !symbolOverlap {
+			continue
+		}
+		if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+			ClaimID: claim.ClaimID,
+			Status:  schema.ClaimStale,
+		}); err != nil {
+			return err
+		}
+		if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, schema.ClaimStale); err != nil {
+			return fmt.Errorf("reconciler: stale claim %s: %w", claim.ClaimID, err)
+		}
+	}
+	return nil
+}
+
 func (s *service) createFollowUpObligations(ctx context.Context, capsuleID string, source []*schema.Obligation) ([]string, error) {
 	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
 	if err != nil {
@@ -458,6 +515,8 @@ func (s *service) saveBudgetRecord(ctx context.Context, goalID, capsuleID string
 		}
 	}
 	record.UpdatedAt = now
+	// Assignment (not +=) is intentional: if the reconciler re-runs for the same
+	// capsule on crash recovery, the latest result wins rather than double-counting.
 	record.ObligationsDischarged = discharged
 	if accepted {
 		record.PatchesAccepted = 1
@@ -522,4 +581,46 @@ func relatedIDs(patchID, verifierResultID string, followUps []string) []string {
 
 func newArtifactID(prefix, patchID string, now time.Time) string {
 	return prefix + "-" + patchID + "-" + strconv.FormatInt(now.UnixNano(), 10)
+}
+
+func normalizedSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		normalized := strings.TrimSpace(value)
+		normalized = strings.ReplaceAll(normalized, "\\", "/")
+		normalized = strings.TrimPrefix(normalized, "./")
+		normalized = strings.Trim(normalized, "/")
+		normalized = strings.ToLower(normalized)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = true
+	}
+	return out
+}
+
+func normalizedSymbols(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		if normalized := normalizeSymbol(value); normalized != "" {
+			out[normalized] = true
+		}
+	}
+	return out
+}
+
+func normalizeSymbol(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func hasOverlap(left, right map[string]bool) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	for value := range left {
+		if right[value] {
+			return true
+		}
+	}
+	return false
 }

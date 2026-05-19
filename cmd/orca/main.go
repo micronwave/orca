@@ -208,7 +208,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log eventlo
 
 		intentCompiler: newIntentCompiler(st),
 		verifierEngine: newVerifierEngine(st, cfg.Verifier),
-		planner:        newPlanner(st, cfg.Budget, orcaDir),
+		planner:        newPlanner(st, cfg.Budget, orcaDir, noLearning),
 		projector:      newProjector(st, cfg.Verifier),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
@@ -934,13 +934,14 @@ func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig) verifi
 	return verifier.New(st, cfg, nil)
 }
 
-func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string) planner.ObligationPlanner {
+func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string, noLearning bool) planner.ObligationPlanner {
 	return planner.New(st, planner.Config{
 		OrcaDir:            orcaDir,
 		ApprovalPolicy:     "auto",
 		DefaultMaxTokens:   cfg.DefaultMaxTokens,
 		DefaultMaxWallTime: cfg.DefaultMaxWallTimeSeconds,
 		DefaultMaxRetries:  cfg.DefaultMaxRetries,
+		NoLearning:         noLearning,
 	})
 }
 

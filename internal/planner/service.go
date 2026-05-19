@@ -19,6 +19,7 @@ type Config struct {
 	DefaultMaxTokens   int
 	DefaultMaxWallTime int
 	DefaultMaxRetries  int
+	NoLearning         bool
 }
 
 type service struct {
@@ -61,9 +62,16 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		return PlanResult{}, fmt.Errorf("planner: load failures for goal %s: %w", goalID, err)
 	}
 
+	// Suppress historical failure fingerprints when --no-learning is set.
+	// §13: no-learning disables all adaptive reuse including prior failure fingerprints,
+	// which would otherwise force TopologyHumanGated in the classifier.
+	classifyFingerprints := failures
+	if s.config.NoLearning {
+		classifyFingerprints = nil
+	}
 	classifyInput := ClassifyInput{
 		Obligations:               obligations,
-		Fingerprints:              failures,
+		Fingerprints:              classifyFingerprints,
 		ApprovalPolicy:            s.config.ApprovalPolicy,
 		BudgetRemaining:           s.config.DefaultMaxTokens,
 		ExpectedFilesByObligation: expectedFilesByObligation(obligations),
@@ -94,7 +102,11 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		return PlanResult{}, fmt.Errorf("planner: save topology decision %s: %w", decision.DecisionID, err)
 	}
 
-	capsules := s.buildCapsules(topology, obligations, goal, decision.DecisionID)
+	hints := routingHints{}
+	if !s.config.NoLearning {
+		hints = deriveRoutingHints(obligations, failures)
+	}
+	capsules := s.buildCapsules(topology, obligations, goal, decision.DecisionID, hints)
 	capsuleIDs := make([]string, 0, len(capsules))
 	for i := range capsules {
 		if err := s.store.SaveCapsule(ctx, &capsules[i]); err != nil {
@@ -111,18 +123,23 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	}, nil
 }
 
-func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.Obligation, goal *schema.GoalIR, decisionID string) []schema.ExecutionCapsule {
+func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.Obligation, goal *schema.GoalIR, decisionID string, hints routingHints) []schema.ExecutionCapsule {
+	executorAgent := selectExecutorAgent(hints)
 	switch topology {
 	case schema.TopologyImplementerReviewer:
 		implID := idgen.New("CAP")
 		revID := idgen.New("CAP")
+		reviewerAgent := schema.AgentClaude
+		if executorAgent == schema.AgentClaude {
+			reviewerAgent = schema.AgentCodex
+		}
 		obligationIDs := make([]string, 0, len(obligations))
 		for _, obligation := range obligations {
 			obligationIDs = append(obligationIDs, obligation.ObligationID)
 		}
 		return []schema.ExecutionCapsule{
-			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
-			s.newCapsule(revID, schema.AgentClaude, schema.RoleReviewer, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(implID, executorAgent, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(revID, reviewerAgent, schema.RoleReviewer, obligationIDs, goal.ScopeConstraints, decisionID),
 		}
 	case schema.TopologyParallel:
 		capsules := make([]schema.ExecutionCapsule, 0, len(obligations))
@@ -132,7 +149,7 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 				scope.AllowedFiles = append([]string(nil), obligation.ExpectedFiles...)
 			}
 			capsuleID := idgen.New("CAP")
-			capsules = append(capsules, s.newCapsule(capsuleID, schema.AgentCodex, schema.RoleExecutor, []string{obligation.ObligationID}, scope, decisionID))
+			capsules = append(capsules, s.newCapsule(capsuleID, executorAgent, schema.RoleExecutor, []string{obligation.ObligationID}, scope, decisionID))
 		}
 		return capsules
 	case schema.TopologyTestFirst:
@@ -144,7 +161,7 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 		}
 		return []schema.ExecutionCapsule{
 			s.newCapsule(testID, schema.AgentCodex, schema.RoleTester, obligationIDs, goal.ScopeConstraints, decisionID),
-			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(implID, executorAgent, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
 		}
 	case schema.TopologyInvestigateThenImpl:
 		investigateID := idgen.New("CAP")
@@ -155,7 +172,7 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 		}
 		return []schema.ExecutionCapsule{
 			s.newCapsule(investigateID, schema.AgentCodex, schema.RoleInvestigator, obligationIDs, goal.ScopeConstraints, decisionID),
-			s.newCapsule(implID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(implID, executorAgent, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
 		}
 	default:
 		capsuleID := idgen.New("CAP")
@@ -164,7 +181,7 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 			obligationIDs = append(obligationIDs, obligation.ObligationID)
 		}
 		return []schema.ExecutionCapsule{
-			s.newCapsule(capsuleID, schema.AgentCodex, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
+			s.newCapsule(capsuleID, executorAgent, schema.RoleExecutor, obligationIDs, goal.ScopeConstraints, decisionID),
 		}
 	}
 }
@@ -461,6 +478,54 @@ func normalizePath(path string) string {
 	path = strings.TrimPrefix(path, "./")
 	path = strings.Trim(path, "/")
 	return strings.ToLower(path)
+}
+
+type routingHints struct {
+	recurringFailureCount int
+}
+
+func deriveRoutingHints(obligations []*schema.Obligation, failures []*schema.FailureFingerprint) routingHints {
+	if len(failures) == 0 {
+		return routingHints{}
+	}
+	expectedFiles := make(map[string]bool)
+	for _, obligation := range obligations {
+		for _, file := range obligation.ExpectedFiles {
+			if normalized := normalizePath(file); normalized != "" {
+				expectedFiles[normalized] = true
+			}
+		}
+	}
+	count := 0
+	for _, failure := range failures {
+		if len(expectedFiles) == 0 {
+			count++
+			continue
+		}
+		if failureTouchesExpectedFiles(failure, expectedFiles) {
+			count++
+		}
+	}
+	return routingHints{recurringFailureCount: count}
+}
+
+func failureTouchesExpectedFiles(failure *schema.FailureFingerprint, expectedFiles map[string]bool) bool {
+	if failure == nil {
+		return false
+	}
+	for _, file := range failure.AffectedFiles {
+		if expectedFiles[normalizePath(file)] {
+			return true
+		}
+	}
+	return false
+}
+
+func selectExecutorAgent(hints routingHints) schema.AgentType {
+	if hints.recurringFailureCount >= 2 {
+		return schema.AgentClaude
+	}
+	return schema.AgentCodex
 }
 
 var _ ObligationPlanner = (*service)(nil)

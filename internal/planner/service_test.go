@@ -523,3 +523,129 @@ func TestPlan_implementerReviewerCreatesTwoCapsules(t *testing.T) {
 		}
 	}
 }
+
+func TestPlan_UsesHistoricalFailureRoutingHint(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := seedPlanWithRecurringFailureHistory(t, false)
+	if result.Topology != schema.TopologyHumanGated {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologyHumanGated)
+	}
+	if len(result.CapsuleIDs) != 1 {
+		t.Fatalf("CapsuleIDs len = %d, want 1", len(result.CapsuleIDs))
+	}
+	capsule, err := st.LoadCapsule(ctx, result.CapsuleIDs[0])
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	if capsule.Agent != schema.AgentClaude {
+		t.Fatalf("capsule agent = %s, want %s when recurring failures exist", capsule.Agent, schema.AgentClaude)
+	}
+}
+
+func TestPlan_NoLearningDisablesHistoricalFailureRoutingHint(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := seedPlanWithRecurringFailureHistory(t, true)
+	// With --no-learning, fingerprints are suppressed from topology classification (§13).
+	// The obligation is low-risk with no other forcing signals, so topology must be single.
+	if result.Topology != schema.TopologySingle {
+		t.Fatalf("Topology = %s, want %s when no-learning is enabled (fingerprints must not force human_gated)", result.Topology, schema.TopologySingle)
+	}
+	if len(result.CapsuleIDs) != 1 {
+		t.Fatalf("CapsuleIDs len = %d, want 1", len(result.CapsuleIDs))
+	}
+	capsule, err := st.LoadCapsule(ctx, result.CapsuleIDs[0])
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	if capsule.Agent != schema.AgentCodex {
+		t.Fatalf("capsule agent = %s, want %s when no-learning is enabled", capsule.Agent, schema.AgentCodex)
+	}
+}
+
+func seedPlanWithRecurringFailureHistory(t *testing.T, noLearning bool) (context.Context, *store.FileStore, PlanResult) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	const (
+		goalID      = "G-history"
+		conditionID = "GC-history"
+		obligation  = "OB-history"
+	)
+	now := time.Now().UTC()
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "route retries using failure history",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "stabilize historical retry path",
+			EffectiveDescription: "stabilize historical retry path",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     obligation,
+		GoalConditionID:  conditionID,
+		Description:      "fix recurring failure",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+		ExpectedFiles:    []string{`internal\planner\service.go`},
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	for _, suffix := range []string{"1", "2"} {
+		capsuleID := "CAP-history-" + suffix
+		failureID := "FAIL-history-" + suffix
+		if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+			CapsuleID:     capsuleID,
+			ObligationIDs: []string{obligation},
+			Agent:         schema.AgentCodex,
+			Role:          schema.RoleExecutor,
+			State:         schema.CapsuleStateFailed,
+		}); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", capsuleID, err)
+		}
+		if err := st.SaveFailure(ctx, &schema.FailureFingerprint{
+			FailureID:       failureID,
+			SourceCapsuleID: capsuleID,
+			FailureType:     schema.FailureTest,
+			Summary:         "historical failure",
+			AffectedFiles:   []string{"internal/planner/service.go"},
+		}); err != nil {
+			t.Fatalf("SaveFailure %s: %v", failureID, err)
+		}
+	}
+
+	plannerSvc := New(st, Config{
+		OrcaDir:            filepath.Join(root, ".orca"),
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   32000,
+		DefaultMaxWallTime: 300,
+		DefaultMaxRetries:  3,
+		NoLearning:         noLearning,
+	})
+	result, err := plannerSvc.Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	return ctx, st, result
+}

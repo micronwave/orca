@@ -902,7 +902,9 @@ func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []stri
 	}
 	fileSet := make(map[string]bool, len(files))
 	for _, f := range files {
-		fileSet[f] = true
+		if normalized := normalizeArtifactPath(f); normalized != "" {
+			fileSet[normalized] = true
+		}
 	}
 	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
 	if err != nil {
@@ -914,7 +916,7 @@ func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []stri
 			continue
 		}
 		for _, af := range c.AffectedFiles {
-			if fileSet[af] {
+			if fileSet[normalizeArtifactPath(af)] {
 				out = append(out, c)
 				break
 			}
@@ -934,6 +936,39 @@ func (s *FileStore) LoadClaimsForCapsule(ctx context.Context, capsuleID string) 
 	for _, c := range all {
 		if c.SourceCapsuleID == capsuleID {
 			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*schema.ClaimArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if goalID == "" {
+		return nil, ErrNotFound
+	}
+	exists, err := s.goalExists(goalID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*schema.ClaimArtifact, 0, len(all))
+	for _, claim := range all {
+		claimGoalID, err := s.goalIDForCapsule(claim.SourceCapsuleID)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if claimGoalID == goalID {
+			out = append(out, claim)
 		}
 	}
 	return out, nil
@@ -989,7 +1024,9 @@ func (s *FileStore) LoadFailuresForFiles(ctx context.Context, files []string) ([
 	}
 	fileSet := make(map[string]bool, len(files))
 	for _, f := range files {
-		fileSet[f] = true
+		if normalized := normalizeArtifactPath(f); normalized != "" {
+			fileSet[normalized] = true
+		}
 	}
 	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
 	if err != nil {
@@ -998,7 +1035,7 @@ func (s *FileStore) LoadFailuresForFiles(ctx context.Context, files []string) ([
 	var out []*schema.FailureFingerprint
 	for _, f := range all {
 		for _, af := range f.AffectedFiles {
-			if fileSet[af] {
+			if fileSet[normalizeArtifactPath(af)] {
 				out = append(out, f)
 				break
 			}
@@ -1256,6 +1293,14 @@ func containsString(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeArtifactPath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.ReplaceAll(path, "\\", "/")
+	path = strings.TrimPrefix(path, "./")
+	path = strings.Trim(path, "/")
+	return strings.ToLower(path)
 }
 
 // compile-time interface satisfaction check

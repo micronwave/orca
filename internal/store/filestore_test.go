@@ -894,6 +894,56 @@ func TestClaim_LoadForCapsule_Empty(t *testing.T) {
 	}
 }
 
+func TestClaim_LoadVerifiedForFiles_NormalizesWindowsPaths(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-1",
+		SourceCapsuleID: "CAP-1",
+		Status:          schema.ClaimVerified,
+		AffectedFiles:   []string{`.\internal\foo\service.go`},
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	out, err := e.st.LoadVerifiedClaimsForFiles(e.ctx, []string{"internal/foo/service.go"})
+	if err != nil {
+		t.Fatalf("LoadVerifiedClaimsForFiles: %v", err)
+	}
+	if len(out) != 1 || out[0].ClaimID != "CL-1" {
+		t.Fatalf("LoadVerifiedClaimsForFiles normalized = %v, want [CL-1]", claimIDs(out))
+	}
+}
+
+func TestClaim_LoadClaimsForGoal(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedGoal(t, "G-2", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedCapsule(t, "CAP-2", "OB-2")
+	for _, claim := range []*schema.ClaimArtifact{
+		{ClaimID: "CL-1", SourceCapsuleID: "CAP-1", Status: schema.ClaimVerified},
+		{ClaimID: "CL-2", SourceCapsuleID: "CAP-2", Status: schema.ClaimVerified},
+	} {
+		if err := e.st.SaveClaim(e.ctx, claim); err != nil {
+			t.Fatalf("SaveClaim %s: %v", claim.ClaimID, err)
+		}
+	}
+	out, err := e.st.LoadClaimsForGoal(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("LoadClaimsForGoal: %v", err)
+	}
+	if len(out) != 1 || out[0].ClaimID != "CL-1" {
+		t.Fatalf("LoadClaimsForGoal(G-1) = %v, want [CL-1]", claimIDs(out))
+	}
+	if _, err := e.st.LoadClaimsForGoal(e.ctx, "G-404"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("LoadClaimsForGoal missing goal error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestGoal_LoadActiveGoal(t *testing.T) {
 	e := newEnv(t)
 
@@ -991,6 +1041,28 @@ func TestFailure_LoadForFiles(t *testing.T) {
 	}
 	if len(out) != 2 {
 		t.Errorf("expected 2 failures, got %d", len(out))
+	}
+}
+
+func TestFailure_LoadForFiles_NormalizesWindowsPaths(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SaveFailure(e.ctx, &schema.FailureFingerprint{
+		FailureID:       "FAIL-1",
+		SourceCapsuleID: "CAP-1",
+		FailureType:     schema.FailureTest,
+		AffectedFiles:   []string{`.\internal\auth\auth.go`},
+	}); err != nil {
+		t.Fatalf("SaveFailure: %v", err)
+	}
+	out, err := e.st.LoadFailuresForFiles(e.ctx, []string{"internal/auth/auth.go"})
+	if err != nil {
+		t.Fatalf("LoadFailuresForFiles: %v", err)
+	}
+	if len(out) != 1 || out[0].FailureID != "FAIL-1" {
+		t.Fatalf("LoadFailuresForFiles normalized = %+v, want FAIL-1", out)
 	}
 }
 

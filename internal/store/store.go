@@ -111,6 +111,10 @@ type ArtifactStore interface {
 	// patch acceptance: for each claim whose evidence_ids all resolve to artifacts
 	// in the store, call UpdateClaimStatus(verified). orca.md §16.
 	LoadClaimsForCapsule(ctx context.Context, capsuleID string) ([]*schema.ClaimArtifact, error)
+	// LoadClaimsForGoal returns all claims whose source capsule resolves to goalID.
+	// Reconciler uses this to stale-out verified claims when accepted patches
+	// overlap previously validated files/symbols.
+	LoadClaimsForGoal(ctx context.Context, goalID string) ([]*schema.ClaimArtifact, error)
 	// Callers must append claim_status_updated before calling this method.
 	UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error
 

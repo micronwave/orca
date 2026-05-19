@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -255,11 +256,190 @@ func TestReconcileAcceptsPatchAndSnapshotsLastPreSnapshotEvent(t *testing.T) {
 	}
 }
 
+func TestReconcileAcceptedPatchMarksOverlappingVerifiedClaimsStale(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "STALEFILE",
+		evidenceIDs:  []string{"EV-STALEFILE"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/foo/service.go"},
+	})
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-OLD-STALEFILE",
+		ObligationIDs: []string{ids.obligationID},
+		Agent:         schema.AgentClaude,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-OLD-STALEFILE",
+		Text:            "legacy claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: "CAP-OLD-STALEFILE",
+		AffectedFiles:   []string{`internal\foo\service.go`},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-NEW-STALEFILE",
+		Text:            "current claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/foo/service.go"},
+		Status:          schema.ClaimProposed,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+
+	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted=false, reason=%q", result.BlockingReason)
+	}
+	oldClaim, err := env.st.LoadClaim(env.ctx, "CL-OLD-STALEFILE")
+	if err != nil {
+		t.Fatalf("LoadClaim old: %v", err)
+	}
+	if oldClaim.Status != schema.ClaimStale {
+		t.Fatalf("old claim status = %s, want %s", oldClaim.Status, schema.ClaimStale)
+	}
+	newClaim, err := env.st.LoadClaim(env.ctx, "CL-NEW-STALEFILE")
+	if err != nil {
+		t.Fatalf("LoadClaim new: %v", err)
+	}
+	if newClaim.Status != schema.ClaimVerified {
+		t.Fatalf("new claim status = %s, want %s", newClaim.Status, schema.ClaimVerified)
+	}
+
+	events, err := env.log.ReadByType(env.ctx, schema.EventClaimStatusUpdated, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType claim_status_updated: %v", err)
+	}
+	seen := map[string]schema.ClaimStatus{}
+	for _, event := range events {
+		var payload schema.ClaimStatusPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("Unmarshal claim_status_updated payload: %v", err)
+		}
+		seen[payload.ClaimID] = payload.Status
+	}
+	if seen["CL-OLD-STALEFILE"] != schema.ClaimStale {
+		t.Fatalf("CL-OLD-STALEFILE event status = %s, want %s", seen["CL-OLD-STALEFILE"], schema.ClaimStale)
+	}
+	if seen["CL-NEW-STALEFILE"] != schema.ClaimVerified {
+		t.Fatalf("CL-NEW-STALEFILE event status = %s, want %s", seen["CL-NEW-STALEFILE"], schema.ClaimVerified)
+	}
+}
+
+func TestReconcileRejectedPatchDoesNotInvalidateHistoricalClaims(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "NOSTALE",
+		evidenceIDs:  []string{"EV-NOSTALE-MISSING"},
+		saveEvidence: false,
+		changedFiles: []string{"internal/foo/service.go"},
+	})
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-OLD-NOSTALE",
+		ObligationIDs: []string{ids.obligationID},
+		Agent:         schema.AgentClaude,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-OLD-NOSTALE",
+		Text:            "legacy claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: "CAP-OLD-NOSTALE",
+		AffectedFiles:   []string{"internal/foo/service.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+
+	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted=true, want false")
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-OLD-NOSTALE")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status != schema.ClaimVerified {
+		t.Fatalf("claim status = %s, want %s", claim.Status, schema.ClaimVerified)
+	}
+}
+
+func TestReconcileInvalidatesClaimsOnSymbolOverlap(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "STALESYM",
+		evidenceIDs:  []string{"EV-STALESYM"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/new/location.go"},
+	})
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-OLD-STALESYM",
+		ObligationIDs: []string{ids.obligationID},
+		Agent:         schema.AgentClaude,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-OLD-STALESYM",
+		Text:            "legacy symbol claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: "CAP-OLD-STALESYM",
+		AffectedFiles:   []string{"internal/other/file.go"},
+		AffectedSymbols: []string{"Service.Apply"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-NEW-STALESYM",
+		Text:            "new symbol claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedSymbols: []string{"service.apply"},
+		Status:          schema.ClaimProposed,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-OLD-STALESYM")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status != schema.ClaimStale {
+		t.Fatalf("claim status = %s, want %s", claim.Status, schema.ClaimStale)
+	}
+}
+
 type scenarioOptions struct {
 	suffix       string
 	evidenceIDs  []string
 	saveEvidence bool
 	omitVerdict  bool
+	changedFiles []string
 }
 
 type scenarioIDs struct {
@@ -335,6 +515,7 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
 		PatchID:              ids.patchID,
 		CapsuleID:            ids.capsuleID,
+		ChangedFiles:         append([]string(nil), opts.changedFiles...),
 		ObligationIDsClaimed: []string{ids.obligationID},
 		Status:               schema.PatchCandidate,
 	}); err != nil {
