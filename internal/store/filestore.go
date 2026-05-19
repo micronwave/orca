@@ -17,6 +17,14 @@ import (
 // ErrNotFound is returned by Load methods when the requested artifact does not exist.
 var ErrNotFound = errors.New("artifact not found")
 
+var windowsReservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
 // MaterializationError means the authoritative event was durably appended, but
 // updating the file-backed materialized view failed afterward. The caller must
 // not retry the same semantic save as a new event; run replay or inspect Event.
@@ -98,6 +106,13 @@ func validateArtifactID(kind, id string) error {
 	if id == "." || id == ".." || filepath.IsAbs(id) ||
 		strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, ":") {
 		return fmt.Errorf("store: invalid %s id %q", kind, id)
+	}
+	name := id
+	if base, _, ok := strings.Cut(id, "."); ok {
+		name = base
+	}
+	if windowsReservedNames[strings.ToUpper(name)] {
+		return fmt.Errorf("store: %s id %q is a reserved device name on Windows", kind, id)
 	}
 	return nil
 }

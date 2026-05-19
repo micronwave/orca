@@ -2,6 +2,10 @@
 // (1) propose initial obligations from a GoalIR, and (2) check whether evidence
 // satisfies obligations for a given patch. orca.md §6 step 3, §10.
 //
+// Phase 1 decision: ProposeObligations uses fixed deterministic templates for
+// evidence mapping, test/static gate evidence, and scope preservation. It does
+// not call a model or run verifier commands directly.
+//
 // Dependency contract:
 //
 //	Reads  (store):   GoalIR via LoadGoal,

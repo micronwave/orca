@@ -1587,6 +1587,22 @@ func TestSaveRejectsUnsafeArtifactID(t *testing.T) {
 	}
 }
 
+func TestSaveRejectsWindowsReservedArtifactID(t *testing.T) {
+	for _, id := range []string{"NUL", "con"} {
+		t.Run(id, func(t *testing.T) {
+			e := newEnv(t)
+			err := e.st.SaveGoal(e.ctx, &schema.GoalIR{
+				GoalID:         id,
+				OriginalIntent: "bad id",
+				Status:         schema.GoalStatusActive,
+			})
+			if err == nil {
+				t.Fatalf("SaveGoal succeeded with Windows reserved ID %q", id)
+			}
+		})
+	}
+}
+
 // ── Concurrent safety ─────────────────────────────────────────────────────────
 
 func TestConcurrentSaves(t *testing.T) {

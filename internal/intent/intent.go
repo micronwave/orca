@@ -1,6 +1,10 @@
 // Package intent defines the IntentCompiler interface, which converts raw user
 // goal text into a persisted GoalIR with initial GoalConditions.
 //
+// Phase 1 decision: the MVP compiler is deterministic and rule-based. It treats
+// the raw intent as the primary goal condition, adds a no-regression condition,
+// and defaults risk without calling a model.
+//
 // Dependency contract:
 //
 //	Reads  (store):   GoalIR via LoadActiveGoal (to enforce one active goal per

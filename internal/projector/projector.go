@@ -1,6 +1,10 @@
 // Package projector defines the ContextCompiler interface, which builds
 // minimal role-specific context projections from the artifact graph.
 //
+// Phase 1 decision: human-summary implementation approaches are synthesized
+// deterministically from goal text, obligations, capsule scope, topology
+// decisions, and verifier gates. The compiler does not call a model.
+//
 // The package is named "projector" rather than "context" to avoid shadowing
 // the stdlib "context" package in import declarations.
 //
