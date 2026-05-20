@@ -97,6 +97,7 @@ type ArtifactStore interface {
 	LoadEvidence(ctx context.Context, evidenceID string) (*schema.EvidenceArtifact, error)
 	// LoadEvidenceForObligation returns all EvidenceArtifacts that support or weaken obligationID.
 	LoadEvidenceForObligation(ctx context.Context, obligationID string) ([]*schema.EvidenceArtifact, error)
+	LoadReusableEvidenceForObligation(ctx context.Context, obligationID string, evidenceType schema.EvidenceType, reuseKey string, snapshotID string) (*schema.EvidenceArtifact, error)
 
 	// --- Claim Artifacts ---
 
@@ -115,8 +116,12 @@ type ArtifactStore interface {
 	// Reconciler uses this to stale-out verified claims when accepted patches
 	// overlap previously validated files/symbols.
 	LoadClaimsForGoal(ctx context.Context, goalID string) ([]*schema.ClaimArtifact, error)
+	LoadClaimsByStatus(ctx context.Context, goalID string, status schema.ClaimStatus) ([]*schema.ClaimArtifact, error)
 	// Callers must append claim_status_updated before calling this method.
 	UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error
+	// Callers must append claim_status_updated before calling these methods.
+	UpdateClaimDispute(ctx context.Context, claimID string, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error
+	UpdateClaimValidation(ctx context.Context, claimID string, status schema.ClaimStatus, snapshotID string) error
 
 	// --- Failure Fingerprints ---
 
@@ -130,6 +135,7 @@ type ArtifactStore interface {
 	LoadFailuresForCapsule(ctx context.Context, capsuleID string) ([]*schema.FailureFingerprint, error)
 	// LoadAllFailures returns every FailureFingerprint recorded under goalID.
 	LoadAllFailures(ctx context.Context, goalID string) ([]*schema.FailureFingerprint, error)
+	LoadFailuresBySignature(ctx context.Context, goalID string, errorSignature string) ([]*schema.FailureFingerprint, error)
 
 	// --- Verifier Results ---
 
@@ -143,6 +149,12 @@ type ArtifactStore interface {
 
 	SaveDecision(ctx context.Context, d *schema.DecisionRecord) error
 	LoadDecision(ctx context.Context, decisionID string) (*schema.DecisionRecord, error)
+
+	// --- Topology Outcomes ---
+
+	SaveTopologyOutcome(ctx context.Context, r *schema.TopologyOutcomeRecord) error
+	LoadTopologyOutcomesForGoal(ctx context.Context, goalID string) ([]*schema.TopologyOutcomeRecord, error)
+	LoadTopologyOutcomes(ctx context.Context, topology schema.Topology, maxRisk schema.RiskLevel) ([]*schema.TopologyOutcomeRecord, error)
 
 	// --- Budget Records ---
 
@@ -160,4 +172,5 @@ type ArtifactStore interface {
 	// first reconciliation completes). Callers must check errors.Is(err, ErrNotFound)
 	// before accessing the returned snapshot; this is a normal condition, not a failure.
 	LoadLatestSnapshot(ctx context.Context, goalID string) (*schema.StateSnapshot, error)
+	LoadSnapshot(ctx context.Context, snapshotID string) (*schema.StateSnapshot, error)
 }

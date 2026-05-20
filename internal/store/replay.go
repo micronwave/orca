@@ -191,6 +191,16 @@ func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.writeFile(s.artifactPath(dirSnapshots, v.SnapshotID), &v)
 
+	case schema.EventTopologyOutcomeRecorded:
+		var v schema.TopologyOutcomeRecord
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal TopologyOutcomeRecord: %w", err)
+		}
+		if err := validateArtifactID("topology outcome", v.OutcomeID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirTopologyOutcomes, v.OutcomeID), &v)
+
 	// ── state transitions: update existing files ─────────────────────────────
 
 	case schema.EventGoalStatusUpdated:
@@ -221,7 +231,7 @@ func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
 		if p.ClaimID == "" || p.Status == "" {
 			return fmt.Errorf("invalid claim_status_updated payload: claim_id and status are required")
 		}
-		return s.updateClaimStatusNoLock(p.ClaimID, p.Status)
+		return s.updateClaimStatusNoLock(p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
 
 	case schema.EventCapsuleStarted, schema.EventCapsuleCompleted:
 		var p schema.CapsuleTransitionPayload
@@ -294,15 +304,24 @@ func (s *FileStore) updateObligationStatusNoLock(obligationID string, status sch
 	return s.writeFile(path, o)
 }
 
-// updateClaimStatusNoLock reads the claim file, updates Status, writes back.
+// updateClaimStatusNoLock reads the claim file, applies status metadata, writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateClaimStatusNoLock(claimID string, status schema.ClaimStatus) error {
+func (s *FileStore) updateClaimStatusNoLock(claimID string, status schema.ClaimStatus, lastValidatedAgainst string, contradictedBy, invalidatedBy []string) error {
 	path := s.artifactPath(dirClaims, claimID)
 	c, err := readFile[schema.ClaimArtifact](path)
 	if err != nil {
 		return err
 	}
 	c.Status = status
+	if lastValidatedAgainst != "" {
+		c.LastValidatedAgainst = lastValidatedAgainst
+	}
+	if contradictedBy != nil {
+		c.ContradictedBy = cloneStrings(contradictedBy)
+	}
+	if invalidatedBy != nil {
+		c.InvalidatedBy = cloneStrings(invalidatedBy)
+	}
 	return s.writeFile(path, c)
 }
 
@@ -337,7 +356,7 @@ func ReplayDir(root string) []string {
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
 		dirPatches, dirEvidence, dirClaims, dirBudgets,
-		dirFailures, dirDecisions, dirVerifierResults,
+		dirFailures, dirDecisions, dirVerifierResults, dirTopologyOutcomes,
 	}
 	out := make([]string, len(dirs))
 	for i, d := range dirs {

@@ -140,7 +140,7 @@ func TestNew_CreatesDirectories(t *testing.T) {
 	for _, sub := range []string{
 		"state/goals", "state/obligations", "artifacts/patches",
 		"artifacts/projections/executor", "artifacts/projections/human_summary",
-		"artifacts/failures",
+		"artifacts/failures", "artifacts/topology_outcomes",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, sub)); err != nil {
 			t.Errorf("expected dir %s: %v", sub, err)
@@ -768,6 +768,37 @@ func TestEvidence_LoadForObligation(t *testing.T) {
 	}
 }
 
+func TestEvidence_LoadReusableForObligation(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
+	now := time.Now().UTC()
+	for _, ev := range []*schema.EvidenceArtifact{
+		{EvidenceID: "EV-failing", Type: schema.EvidenceTestResult, ExitCode: 1, Supports: []string{"OB-1"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-1", CreatedAt: now},
+		{EvidenceID: "EV-wrong-obligation", Type: schema.EvidenceTestResult, ExitCode: 0, Supports: []string{"OB-2"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-1", CreatedAt: now},
+		{EvidenceID: "EV-wrong-type", Type: schema.EvidenceLintResult, ExitCode: 0, Supports: []string{"OB-1"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-1", CreatedAt: now},
+		{EvidenceID: "EV-wrong-key", Type: schema.EvidenceTestResult, ExitCode: 0, Supports: []string{"OB-1"}, ReuseKey: "other", ValidatedAgainst: "SNAP-1", CreatedAt: now},
+		{EvidenceID: "EV-wrong-snapshot", Type: schema.EvidenceTestResult, ExitCode: 0, Supports: []string{"OB-1"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-2", CreatedAt: now},
+		{EvidenceID: "EV-reusable-old", Type: schema.EvidenceTestResult, ExitCode: 0, Supports: []string{"OB-1"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-1", CreatedAt: now.Add(-time.Minute)},
+		{EvidenceID: "EV-reusable-new", Type: schema.EvidenceTestResult, ExitCode: 0, Supports: []string{"OB-1"}, ReuseKey: "go-test", ValidatedAgainst: "SNAP-1", CreatedAt: now, ContentHash: "hash"},
+	} {
+		if err := e.st.SaveEvidence(e.ctx, ev); err != nil {
+			t.Fatalf("SaveEvidence %s: %v", ev.EvidenceID, err)
+		}
+	}
+	got, err := e.st.LoadReusableEvidenceForObligation(e.ctx, "OB-1", schema.EvidenceTestResult, "go-test", "SNAP-1")
+	if err != nil {
+		t.Fatalf("LoadReusableEvidenceForObligation: %v", err)
+	}
+	if got.EvidenceID != "EV-reusable-new" {
+		t.Fatalf("reusable evidence = %s, want EV-reusable-new", got.EvidenceID)
+	}
+	if _, err := e.st.LoadReusableEvidenceForObligation(e.ctx, "OB-1", schema.EvidenceTestResult, "missing", "SNAP-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing reusable evidence error = %v, want ErrNotFound", err)
+	}
+}
+
 // ── Claim Artifacts ───────────────────────────────────────────────────────────
 
 func TestClaim_SaveLoad(t *testing.T) {
@@ -944,6 +975,66 @@ func TestClaim_LoadClaimsForGoal(t *testing.T) {
 	}
 }
 
+func TestClaim_LoadClaimsByStatus(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedGoal(t, "G-2", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedCapsule(t, "CAP-2", "OB-2")
+	for _, claim := range []*schema.ClaimArtifact{
+		{ClaimID: "CL-1", SourceCapsuleID: "CAP-1", Status: schema.ClaimContested},
+		{ClaimID: "CL-2", SourceCapsuleID: "CAP-1", Status: schema.ClaimInvalidated},
+		{ClaimID: "CL-3", SourceCapsuleID: "CAP-2", Status: schema.ClaimContested},
+	} {
+		if err := e.st.SaveClaim(e.ctx, claim); err != nil {
+			t.Fatalf("SaveClaim %s: %v", claim.ClaimID, err)
+		}
+	}
+	out, err := e.st.LoadClaimsByStatus(e.ctx, "G-1", schema.ClaimContested)
+	if err != nil {
+		t.Fatalf("LoadClaimsByStatus: %v", err)
+	}
+	if len(out) != 1 || out[0].ClaimID != "CL-1" {
+		t.Fatalf("LoadClaimsByStatus = %v, want [CL-1]", claimIDs(out))
+	}
+}
+
+func TestClaim_UpdateDisputeAndValidation(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-1",
+		SourceCapsuleID: "CAP-1",
+		Status:          schema.ClaimProposed,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	if err := e.st.UpdateClaimDispute(e.ctx, "CL-1", schema.ClaimContested, []string{"CL-2"}, []string{"CL-3"}); err != nil {
+		t.Fatalf("UpdateClaimDispute: %v", err)
+	}
+	got, err := e.st.LoadClaim(e.ctx, "CL-1")
+	if err != nil {
+		t.Fatalf("LoadClaim after dispute: %v", err)
+	}
+	if got.Status != schema.ClaimContested || len(got.ContradictedBy) != 1 || got.ContradictedBy[0] != "CL-2" || len(got.InvalidatedBy) != 1 || got.InvalidatedBy[0] != "CL-3" {
+		t.Fatalf("claim after dispute = %+v", got)
+	}
+	if err := e.st.UpdateClaimValidation(e.ctx, "CL-1", schema.ClaimVerified, "SNAP-1"); err != nil {
+		t.Fatalf("UpdateClaimValidation: %v", err)
+	}
+	got, err = e.st.LoadClaim(e.ctx, "CL-1")
+	if err != nil {
+		t.Fatalf("LoadClaim after validation: %v", err)
+	}
+	if got.Status != schema.ClaimVerified || got.LastValidatedAgainst != "SNAP-1" {
+		t.Fatalf("claim after validation = %+v", got)
+	}
+}
+
 func TestGoal_LoadActiveGoal(t *testing.T) {
 	e := newEnv(t)
 
@@ -1116,6 +1207,37 @@ func TestFailure_LoadAllFailuresScopesByGoal(t *testing.T) {
 	}
 	if _, err := e.st.LoadAllFailures(e.ctx, "G-404"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("LoadAllFailures missing goal error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestFailure_LoadBySignatureReturnsOccurrencesOldestFirst(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedGoal(t, "G-2", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedCapsule(t, "CAP-2", "OB-1")
+	e.seedCapsule(t, "CAP-3", "OB-2")
+	for _, f := range []*schema.FailureFingerprint{
+		{FailureID: "FAIL-1", SourceCapsuleID: "CAP-1", FailureType: schema.FailureTest, ErrorSignature: "sig", PriorAttemptCount: 0},
+		{FailureID: "FAIL-other-signature", SourceCapsuleID: "CAP-1", FailureType: schema.FailureTest, ErrorSignature: "other"},
+		{FailureID: "FAIL-2", SourceCapsuleID: "CAP-2", FailureType: schema.FailureTest, ErrorSignature: "sig", PriorAttemptCount: 1, PriorCapsuleIDs: []string{"CAP-1"}, RecommendedNextAction: "run targeted test"},
+		{FailureID: "FAIL-other-goal", SourceCapsuleID: "CAP-3", FailureType: schema.FailureTest, ErrorSignature: "sig"},
+	} {
+		if err := e.st.SaveFailure(e.ctx, f); err != nil {
+			t.Fatalf("SaveFailure %s: %v", f.FailureID, err)
+		}
+	}
+	out, err := e.st.LoadFailuresBySignature(e.ctx, "G-1", "sig")
+	if err != nil {
+		t.Fatalf("LoadFailuresBySignature: %v", err)
+	}
+	if len(out) != 2 || out[0].FailureID != "FAIL-1" || out[1].FailureID != "FAIL-2" {
+		t.Fatalf("LoadFailuresBySignature = %+v, want FAIL-1 then FAIL-2", out)
+	}
+	if out[1].PriorAttemptCount != 1 || len(out[1].PriorCapsuleIDs) != 1 || out[1].PriorCapsuleIDs[0] != "CAP-1" || out[1].RecommendedNextAction == "" {
+		t.Fatalf("recurring failure metadata not preserved: %+v", out[1])
 	}
 }
 
@@ -1398,6 +1520,93 @@ func TestSnapshot_SaveEmitsEvent(t *testing.T) {
 	}
 }
 
+func TestSnapshot_LoadSnapshot(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SaveSnapshot(e.ctx, &schema.StateSnapshot{
+		SnapshotID: "SNAP-1", GoalID: "G-1", SequenceNum: 7, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	got, err := e.st.LoadSnapshot(e.ctx, "SNAP-1")
+	if err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
+	}
+	if got.SnapshotID != "SNAP-1" || got.SequenceNum != 7 {
+		t.Fatalf("snapshot = %+v, want SNAP-1/7", got)
+	}
+}
+
+// ── Topology Outcomes ────────────────────────────────────────────────────────
+
+func TestTopologyOutcome_SaveLoadAndEmitsEvent(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	record := &schema.TopologyOutcomeRecord{
+		OutcomeID:       "TO-1",
+		GoalID:          "G-1",
+		Topology:        schema.TopologySingle,
+		ObligationCount: 2,
+		MaxRiskLevel:    schema.RiskLow,
+		AffectedFiles:   []string{"internal/store/filestore.go"},
+		PatchAccepted:   true,
+		ObligationsMet:  2,
+		TokensSpent:     1200,
+		FailureCount:    0,
+		RecordedAt:      time.Now().UTC(),
+	}
+	if err := e.st.SaveTopologyOutcome(e.ctx, record); err != nil {
+		t.Fatalf("SaveTopologyOutcome: %v", err)
+	}
+	if n := e.countEvents(t, schema.EventTopologyOutcomeRecorded); n != 1 {
+		t.Fatalf("expected 1 topology_outcome_recorded event, got %d", n)
+	}
+	byGoal, err := e.st.LoadTopologyOutcomesForGoal(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(byGoal) != 1 || byGoal[0].OutcomeID != "TO-1" {
+		t.Fatalf("LoadTopologyOutcomesForGoal = %+v, want TO-1", byGoal)
+	}
+	byShape, err := e.st.LoadTopologyOutcomes(e.ctx, schema.TopologySingle, schema.RiskLow)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomes: %v", err)
+	}
+	if len(byShape) != 1 || byShape[0].OutcomeID != "TO-1" {
+		t.Fatalf("LoadTopologyOutcomes = %+v, want TO-1", byShape)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "artifacts", "topology_outcomes", "TO-1.json")); err != nil {
+		t.Fatalf("expected per-artifact topology outcome file: %v", err)
+	}
+}
+
+func TestTopologyOutcome_ReplayReconstructsArtifact(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SaveTopologyOutcome(e.ctx, &schema.TopologyOutcomeRecord{
+		OutcomeID:       "TO-1",
+		GoalID:          "G-1",
+		Topology:        schema.TopologyImplementerReviewer,
+		ObligationCount: 3,
+		MaxRiskLevel:    schema.RiskMedium,
+		RecordedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveTopologyOutcome: %v", err)
+	}
+
+	wipeArtifacts(t, e)
+	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	out, err := e.st.LoadTopologyOutcomes(e.ctx, schema.TopologyImplementerReviewer, schema.RiskMedium)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomes after replay: %v", err)
+	}
+	if len(out) != 1 || out[0].OutcomeID != "TO-1" {
+		t.Fatalf("replayed topology outcomes = %+v, want TO-1", out)
+	}
+}
+
 // ── Replay ────────────────────────────────────────────────────────────────────
 
 func TestReplay_ReconstructsGoalAndObligation(t *testing.T) {
@@ -1570,8 +1779,11 @@ func TestReplay_AppliesClaimStatusUpdated(t *testing.T) {
 		Type:   schema.EventClaimStatusUpdated,
 		GoalID: "G-1",
 		Payload: marshalJSON(t, schema.ClaimStatusPayload{
-			ClaimID: "CL-1",
-			Status:  schema.ClaimVerified,
+			ClaimID:              "CL-1",
+			Status:               schema.ClaimContested,
+			LastValidatedAgainst: "SNAP-1",
+			ContradictedBy:       []string{"CL-2"},
+			InvalidatedBy:        []string{"CL-3"},
 		}),
 	}); err != nil {
 		t.Fatalf("Append claim_status_updated: %v", err)
@@ -1585,8 +1797,11 @@ func TestReplay_AppliesClaimStatusUpdated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadClaim after replay: %v", err)
 	}
-	if got.Status != schema.ClaimVerified {
-		t.Errorf("claim status = %s after replay, want verified", got.Status)
+	if got.Status != schema.ClaimContested ||
+		got.LastValidatedAgainst != "SNAP-1" ||
+		len(got.ContradictedBy) != 1 || got.ContradictedBy[0] != "CL-2" ||
+		len(got.InvalidatedBy) != 1 || got.InvalidatedBy[0] != "CL-3" {
+		t.Errorf("claim after replay = %+v, want contested with dispute metadata", got)
 	}
 }
 
@@ -1941,6 +2156,18 @@ func TestSaveRejectsUnresolvableGoalReferences(t *testing.T) {
 				})
 			},
 		},
+		{
+			name:      "topology outcome missing goal",
+			eventType: schema.EventTopologyOutcomeRecorded,
+			save: func(e *testEnv) error {
+				return e.st.SaveTopologyOutcome(e.ctx, &schema.TopologyOutcomeRecord{
+					OutcomeID:  "TO-orphan",
+					GoalID:     "G-missing",
+					Topology:   schema.TopologySingle,
+					RecordedAt: time.Now().UTC(),
+				})
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -2090,6 +2317,19 @@ func TestChildArtifactEventsCarryResolvedGoalID(t *testing.T) {
 					RelatedIDs: []string{"G-1"},
 					MadeBy:     "system",
 					CreatedAt:  time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "topology outcome",
+			eventType: schema.EventTopologyOutcomeRecorded,
+			save: func(e *testEnv) error {
+				e.seedGoal(t, "G-1", "GC-1")
+				return e.st.SaveTopologyOutcome(e.ctx, &schema.TopologyOutcomeRecord{
+					OutcomeID:  "TO-1",
+					GoalID:     "G-1",
+					Topology:   schema.TopologySingle,
+					RecordedAt: time.Now().UTC(),
 				})
 			},
 		},
@@ -2331,6 +2571,21 @@ func TestSaveRejectsDuplicateIDsWithoutAppendingSecondCreateEvent(t *testing.T) 
 					GoalID:      "G-1",
 					SequenceNum: 1,
 					CreatedAt:   time.Now().UTC(),
+				})
+			},
+		},
+		{
+			name:      "topology outcome",
+			eventType: schema.EventTopologyOutcomeRecorded,
+			save: func(e *testEnv) error {
+				if _, err := e.st.LoadGoal(e.ctx, "G-1"); errors.Is(err, store.ErrNotFound) {
+					e.seedGoal(t, "G-1", "GC-1")
+				}
+				return e.st.SaveTopologyOutcome(e.ctx, &schema.TopologyOutcomeRecord{
+					OutcomeID:  "TO-dup",
+					GoalID:     "G-1",
+					Topology:   schema.TopologySingle,
+					RecordedAt: time.Now().UTC(),
 				})
 			},
 		},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -43,21 +44,22 @@ func (e *MaterializationError) Unwrap() error {
 
 // Directory layout under the store root. Each constant is a path relative to root.
 const (
-	dirGoals           = "state/goals"
-	dirObligations     = "state/obligations"
-	dirCapsules        = "state/capsules"
-	dirSnapshots       = "state/snapshots"
-	dirPatches         = "artifacts/patches"
-	dirEvidence        = "artifacts/evidence"
-	dirClaims          = "artifacts/claims"
-	dirProjExecutor    = "artifacts/projections/executor"
-	dirProjHuman       = "artifacts/projections/human_summary"
-	dirProjReviewer    = "artifacts/projections/reviewer"
-	dirProjTester      = "artifacts/projections/tester"
-	dirFailures        = "artifacts/failures"
-	dirDecisions       = "artifacts/decisions"
-	dirBudgets         = "artifacts/budgets"
-	dirVerifierResults = "artifacts/verifier_results"
+	dirGoals            = "state/goals"
+	dirObligations      = "state/obligations"
+	dirCapsules         = "state/capsules"
+	dirSnapshots        = "state/snapshots"
+	dirPatches          = "artifacts/patches"
+	dirEvidence         = "artifacts/evidence"
+	dirClaims           = "artifacts/claims"
+	dirProjExecutor     = "artifacts/projections/executor"
+	dirProjHuman        = "artifacts/projections/human_summary"
+	dirProjReviewer     = "artifacts/projections/reviewer"
+	dirProjTester       = "artifacts/projections/tester"
+	dirFailures         = "artifacts/failures"
+	dirDecisions        = "artifacts/decisions"
+	dirBudgets          = "artifacts/budgets"
+	dirVerifierResults  = "artifacts/verifier_results"
+	dirTopologyOutcomes = "artifacts/topology_outcomes"
 )
 
 // FileStore is the file-backed JSON implementation of ArtifactStore.
@@ -84,7 +86,7 @@ func New(root string, log eventlog.EventLog) (*FileStore, error) {
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirPatches, dirEvidence, dirClaims,
 		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
-		dirFailures, dirDecisions, dirBudgets, dirVerifierResults,
+		dirFailures, dirDecisions, dirBudgets, dirVerifierResults, dirTopologyOutcomes,
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
@@ -866,6 +868,32 @@ func (s *FileStore) LoadEvidenceForObligation(ctx context.Context, obligationID 
 	return out, nil
 }
 
+func (s *FileStore) LoadReusableEvidenceForObligation(ctx context.Context, obligationID string, evidenceType schema.EvidenceType, reuseKey string, snapshotID string) (*schema.EvidenceArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.EvidenceArtifact](filepath.Join(s.root, dirEvidence))
+	if err != nil {
+		return nil, err
+	}
+	var best *schema.EvidenceArtifact
+	for _, ev := range all {
+		if ev.Type != evidenceType ||
+			ev.ExitCode != 0 ||
+			ev.ReuseKey != reuseKey ||
+			ev.ValidatedAgainst != snapshotID ||
+			!containsString(ev.Supports, obligationID) {
+			continue
+		}
+		if best == nil || ev.CreatedAt.After(best.CreatedAt) || (ev.CreatedAt.Equal(best.CreatedAt) && ev.EvidenceID < best.EvidenceID) {
+			best = ev
+		}
+	}
+	if best == nil {
+		return nil, ErrNotFound
+	}
+	return best, nil
+}
+
 // ── Claim Artifacts ──────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) error {
@@ -974,6 +1002,42 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 	return out, nil
 }
 
+func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, status schema.ClaimStatus) ([]*schema.ClaimArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if goalID == "" {
+		return nil, ErrNotFound
+	}
+	exists, err := s.goalExists(goalID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*schema.ClaimArtifact, 0, len(all))
+	for _, claim := range all {
+		if claim.Status != status {
+			continue
+		}
+		claimGoalID, err := s.goalIDForCapsule(claim.SourceCapsuleID)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if claimGoalID == goalID {
+			out = append(out, claim)
+		}
+	}
+	return out, nil
+}
+
 func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error {
 	if err := validateArtifactID("claim", claimID); err != nil {
 		return err
@@ -986,6 +1050,24 @@ func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, statu
 	}
 	c.Status = status
 	return s.writeFile(s.artifactPath(dirClaims, claimID), c)
+}
+
+func (s *FileStore) UpdateClaimDispute(ctx context.Context, claimID string, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
+	if err := validateArtifactID("claim", claimID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateClaimStatusNoLock(claimID, status, "", contradictedBy, invalidatedBy)
+}
+
+func (s *FileStore) UpdateClaimValidation(ctx context.Context, claimID string, status schema.ClaimStatus, snapshotID string) error {
+	if err := validateArtifactID("claim", claimID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateClaimStatusNoLock(claimID, status, snapshotID, nil, nil)
 }
 
 // ── Failure Fingerprints ─────────────────────────────────────────────────────
@@ -1100,6 +1182,68 @@ func (s *FileStore) LoadAllFailures(_ context.Context, goalID string) ([]*schema
 	return out, nil
 }
 
+func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, errorSignature string) ([]*schema.FailureFingerprint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if goalID == "" {
+		return nil, ErrNotFound
+	}
+	exists, err := s.goalExists(goalID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	events, err := s.log.ReadByType(ctx, schema.EventFailureFingerprintCreated, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("store: LoadFailuresBySignature: read failure events: %w", err)
+	}
+	out := make([]*schema.FailureFingerprint, 0, len(events))
+	seen := make(map[string]bool, len(events))
+	for _, ev := range events {
+		if ev.GoalID != goalID {
+			continue
+		}
+		var failure schema.FailureFingerprint
+		if err := json.Unmarshal(ev.Payload, &failure); err != nil {
+			return nil, fmt.Errorf("store: LoadFailuresBySignature: unmarshal failure event %s: %w", ev.EventID, err)
+		}
+		if failure.ErrorSignature != errorSignature {
+			continue
+		}
+		current, err := readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, failure.FailureID))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, current)
+		seen[failure.FailureID] = true
+	}
+	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		return all[i].FailureID < all[j].FailureID
+	})
+	for _, failure := range all {
+		if seen[failure.FailureID] || failure.ErrorSignature != errorSignature {
+			continue
+		}
+		resolvedGoalID, err := s.goalIDForCapsule(failure.SourceCapsuleID)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if resolvedGoalID == goalID {
+			out = append(out, failure)
+		}
+	}
+	return out, nil
+}
+
 // ── Verifier Results ─────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierResult) error {
@@ -1169,6 +1313,64 @@ func (s *FileStore) LoadDecision(ctx context.Context, decisionID string) (*schem
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.DecisionRecord](s.artifactPath(dirDecisions, decisionID))
+}
+
+// ── Topology Outcomes ────────────────────────────────────────────────────────
+
+func (s *FileStore) SaveTopologyOutcome(ctx context.Context, r *schema.TopologyOutcomeRecord) error {
+	if err := validateArtifactID("topology outcome", r.OutcomeID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ensureArtifactAbsent("topology outcome", s.artifactPath(dirTopologyOutcomes, r.OutcomeID), r.OutcomeID); err != nil {
+		return err
+	}
+	if err := s.requireExistingGoal(r.GoalID); err != nil {
+		return fmt.Errorf("store: SaveTopologyOutcome: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventTopologyOutcomeRecorded, r.GoalID, r.OutcomeID, r)
+	if err != nil {
+		return err
+	}
+	return materializationError(ev, s.writeFile(s.artifactPath(dirTopologyOutcomes, r.OutcomeID), r))
+}
+
+func (s *FileStore) LoadTopologyOutcomesForGoal(ctx context.Context, goalID string) ([]*schema.TopologyOutcomeRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.requireExistingGoal(goalID); err != nil {
+		return nil, err
+	}
+	all, err := scanDir[schema.TopologyOutcomeRecord](filepath.Join(s.root, dirTopologyOutcomes))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*schema.TopologyOutcomeRecord, 0, len(all))
+	for _, r := range all {
+		if r.GoalID == goalID {
+			out = append(out, r)
+		}
+	}
+	sortTopologyOutcomes(out)
+	return out, nil
+}
+
+func (s *FileStore) LoadTopologyOutcomes(ctx context.Context, topology schema.Topology, maxRisk schema.RiskLevel) ([]*schema.TopologyOutcomeRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.TopologyOutcomeRecord](filepath.Join(s.root, dirTopologyOutcomes))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*schema.TopologyOutcomeRecord, 0, len(all))
+	for _, r := range all {
+		if r.Topology == topology && r.MaxRiskLevel == maxRisk {
+			out = append(out, r)
+		}
+	}
+	sortTopologyOutcomes(out)
+	return out, nil
 }
 
 // ── Budget Records ───────────────────────────────────────────────────────────
@@ -1284,6 +1486,12 @@ func (s *FileStore) LoadLatestSnapshot(ctx context.Context, goalID string) (*sch
 	return latest, nil
 }
 
+func (s *FileStore) LoadSnapshot(ctx context.Context, snapshotID string) (*schema.StateSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return readFile[schema.StateSnapshot](s.artifactPath(dirSnapshots, snapshotID))
+}
+
 // ── utility ──────────────────────────────────────────────────────────────────
 
 func containsString(ss []string, s string) bool {
@@ -1301,6 +1509,24 @@ func normalizeArtifactPath(path string) string {
 	path = strings.TrimPrefix(path, "./")
 	path = strings.Trim(path, "/")
 	return strings.ToLower(path)
+}
+
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func sortTopologyOutcomes(records []*schema.TopologyOutcomeRecord) {
+	sort.SliceStable(records, func(i, j int) bool {
+		if !records[i].RecordedAt.Equal(records[j].RecordedAt) {
+			return records[i].RecordedAt.Before(records[j].RecordedAt)
+		}
+		return records[i].OutcomeID < records[j].OutcomeID
+	})
 }
 
 // compile-time interface satisfaction check
