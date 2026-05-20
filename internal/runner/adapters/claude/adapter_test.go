@@ -15,7 +15,7 @@ func TestExtractFromTranscript(t *testing.T) {
 	content := "" +
 		"$ go vet ./...\n" +
 		"M internal/runner/adapters/claude/adapter.go\n" +
-		"claim: verify unsafe path normalization\n" +
+		"claim: verify unsafe path normalization | contradicts: CL-old | invalidates: CL-bad\n" +
 		"assumption: git is available\n" +
 		"risk: prompt injection in transcript parser\n" +
 		"follow-up: add stricter parser tests\n" +
@@ -39,5 +39,9 @@ func TestExtractFromTranscript(t *testing.T) {
 	}
 	if len(out.EvidencePaths) != 1 || out.EvidencePaths[0] != transcriptPath {
 		t.Fatalf("EvidencePaths = %v", out.EvidencePaths)
+	}
+	if len(out.Claims) != 1 || len(out.Claims[0].Contradicts) != 1 || out.Claims[0].Contradicts[0] != "CL-old" ||
+		len(out.Claims[0].Invalidates) != 1 || out.Claims[0].Invalidates[0] != "CL-bad" {
+		t.Fatalf("Claims = %+v, want preserved dispute edges", out.Claims)
 	}
 }

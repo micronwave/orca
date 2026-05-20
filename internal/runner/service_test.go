@@ -102,6 +102,55 @@ func TestRunUsesSidecarPath(t *testing.T) {
 	}
 }
 
+func TestRunPreservesClaimDisputeEdgesAndLeavesVerificationToReconciler(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_claims.txt"), []byte("updated"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"runner_claims.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				Claims: []schema.SidecarClaim{{
+					Claim:       "new evidence supersedes old invariant",
+					Type:        schema.SidecarClaimVerified,
+					Contradicts: []string{"CLM-old"},
+					Invalidates: []string{"CLM-stale"},
+				}},
+				EvidencePaths: []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:       "runner updated claims",
+			}, nil
+		},
+	}
+	result, err := New(env.st, env.log, env.orcaDir, adapter).Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.ClaimIDs) != 1 {
+		t.Fatalf("ClaimIDs = %v, want one claim", result.ClaimIDs)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, result.ClaimIDs[0])
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status != schema.ClaimProposed {
+		t.Fatalf("claim status = %s, want proposed until reconciliation validation", claim.Status)
+	}
+	if len(claim.EvidenceIDs) != 1 || claim.EvidenceIDs[0] != result.EvidenceIDs[0] {
+		t.Fatalf("EvidenceIDs = %v, want first runner evidence %s", claim.EvidenceIDs, result.EvidenceIDs[0])
+	}
+	if len(claim.Contradicts) != 1 || claim.Contradicts[0] != "CLM-old" {
+		t.Fatalf("Contradicts = %v", claim.Contradicts)
+	}
+	if len(claim.Invalidates) != 1 || claim.Invalidates[0] != "CLM-stale" {
+		t.Fatalf("Invalidates = %v", claim.Invalidates)
+	}
+}
+
 func TestRunFallsBackToTranscript(t *testing.T) {
 	env := newRunnerEnv(t)
 	capsuleID := saveRunnerScenario(t, env)

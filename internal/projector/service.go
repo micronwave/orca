@@ -47,7 +47,11 @@ func (s *service) compileAgentProjection(ctx context.Context, capsuleID string, 
 	if err != nil {
 		return nil, err
 	}
-	claims, claimIDs, err := s.loadVerifiedClaims(ctx, capsule.AllowedPaths)
+	freshnessBase, err := s.latestSnapshotID(ctx, goal.GoalID)
+	if err != nil {
+		return nil, err
+	}
+	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, capsule.AllowedPaths, freshnessBase)
 	if err != nil {
 		return nil, err
 	}
@@ -76,17 +80,12 @@ func (s *service) compileAgentProjection(ctx context.Context, capsuleID string, 
 		{key: "required_outputs", text: "required outputs: " + summarizeRequiredOutputs(capsule.RequiredOutputs)},
 		{key: "candidate_patches", text: summarizeCandidatePatches(role, patches)},
 		{key: "prior_evidence", text: "prior evidence: " + summarizeEvidence(evidenceByObligation), removable: true},
-		{key: "verified_claims", text: "verified claims: " + summarizeClaims(claims), removable: true},
+		{key: "claims", text: "claims: " + summarizeClaims(claims, freshnessBase), removable: true},
 		{key: "failure_fingerprints", text: "failure fingerprints: " + summarizeFailures(failures), removable: true},
 	}
 
 	tokenBudget := capsule.Budget.MaxTokens / 2
 	included, omitted := enforceProjectionBudget(sections, tokenBudget)
-	freshnessBase, err := s.latestSnapshotID(ctx, goal.GoalID)
-	if err != nil {
-		return nil, err
-	}
-
 	projection := &schema.ContextProjection{
 		ContextProjectionID: idgen.New("CTX"),
 		Role:                role,
@@ -111,7 +110,15 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 	if err != nil {
 		return nil, err
 	}
-	claims, claimIDs, err := s.loadVerifiedClaims(ctx, capsule.AllowedPaths)
+	freshnessBase, err := s.latestSnapshotID(ctx, goal.GoalID)
+	if err != nil {
+		return nil, err
+	}
+	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, capsule.AllowedPaths, freshnessBase)
+	if err != nil {
+		return nil, err
+	}
+	contestedClaims, contestedClaimIDs, err := s.loadContestedClaims(ctx, goal.GoalID, capsule.AllowedPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +131,7 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 		return nil, err
 	}
 	sourceArtifactIDs = append(sourceArtifactIDs, claimIDs...)
+	sourceArtifactIDs = append(sourceArtifactIDs, contestedClaimIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, evidenceIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, failureIDs...)
 
@@ -135,11 +143,6 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 		return nil, fmt.Errorf("projector: load topology decision %s: %w", capsule.TopologyDecisionID, err)
 	}
 	topology := schema.Topology(decision.Decision)
-	freshnessBase, err := s.latestSnapshotID(ctx, goal.GoalID)
-	if err != nil {
-		return nil, err
-	}
-
 	conditionRefs, err := s.loadConditionRefs(ctx, obligations)
 	if err != nil {
 		return nil, err
@@ -199,7 +202,7 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 				Reason: decision.Rationale,
 			},
 		},
-		PreExecutionRisks: summarizePreExecutionRisks(obligations, failures, claims),
+		PreExecutionRisks: summarizePreExecutionRisks(obligations, failures, claims, contestedClaims, freshnessBase),
 		EvidencePlan:      s.buildEvidencePlan(),
 		Budget: schema.ProjectionBudget{
 			MaxTokens:          capsule.Budget.MaxTokens,
@@ -420,15 +423,34 @@ func summarizeCandidatePatches(role schema.ProjectionRole, patches []*schema.Pat
 	return "candidate patches: " + summarizePatches(patches)
 }
 
-func summarizeClaims(claims []*schema.ClaimArtifact) string {
+func summarizeClaims(claims []*schema.ClaimArtifact, freshnessBase string) string {
 	if len(claims) == 0 {
 		return "none"
 	}
 	parts := make([]string, 0, len(claims))
 	for _, claim := range claims {
-		parts = append(parts, claim.ClaimID+": "+claim.Text)
+		parts = append(parts, claimLabel(claim, freshnessBase)+": "+claim.Text)
 	}
+	sort.Strings(parts)
 	return strings.Join(parts, "; ")
+}
+
+func claimLabel(claim *schema.ClaimArtifact, freshnessBase string) string {
+	switch claim.Status {
+	case schema.ClaimVerified:
+		if strings.TrimSpace(claim.LastValidatedAgainst) == "" || claim.LastValidatedAgainst != freshnessBase {
+			return claim.ClaimID + " [stale - freshness unverified]"
+		}
+		return claim.ClaimID
+	case schema.ClaimProposed:
+		return claim.ClaimID + " [proposed]"
+	case schema.ClaimStale:
+		return claim.ClaimID + " [stale]"
+	case schema.ClaimContested:
+		return claim.ClaimID + " [contested]"
+	default:
+		return claim.ClaimID + " [" + string(claim.Status) + "]"
+	}
 }
 
 func summarizeFailures(failures []*schema.FailureFingerprint) string {
@@ -461,8 +483,10 @@ func summarizePreExecutionRisks(
 	obligations []*schema.Obligation,
 	failures []*schema.FailureFingerprint,
 	claims []*schema.ClaimArtifact,
+	contestedClaims []*schema.ClaimArtifact,
+	freshnessBase string,
 ) []schema.PreExecutionRisk {
-	risks := make([]schema.PreExecutionRisk, 0, len(obligations)+len(failures)+len(claims))
+	risks := make([]schema.PreExecutionRisk, 0, len(obligations)+len(failures)+len(claims)+len(contestedClaims))
 	for _, obligation := range obligations {
 		if obligation.RiskLevel == schema.RiskLow {
 			continue
@@ -483,7 +507,13 @@ func summarizePreExecutionRisks(
 			continue
 		}
 		risks = append(risks, schema.PreExecutionRisk{
-			Description: fmt.Sprintf("verified risk claim %s: %s", claim.ClaimID, claim.Text),
+			Description: fmt.Sprintf("%s: %s", claimLabel(claim, freshnessBase), claim.Text),
+			Source:      "claim",
+		})
+	}
+	for _, claim := range contestedClaims {
+		risks = append(risks, schema.PreExecutionRisk{
+			Description: fmt.Sprintf("contested claim %s: %s", claim.ClaimID, claim.Text),
 			Source:      "claim",
 		})
 	}
@@ -618,16 +648,41 @@ func (s *service) loadPatchesByObligation(
 	return patches, sourceIDs, nil
 }
 
-func (s *service) loadVerifiedClaims(ctx context.Context, files []string) ([]*schema.ClaimArtifact, []string, error) {
-	claims, err := s.store.LoadVerifiedClaimsForFiles(ctx, files)
+func (s *service) loadClaimsForProjection(ctx context.Context, goalID string, files []string, freshnessBase string) ([]*schema.ClaimArtifact, []string, error) {
+	_ = freshnessBase
+	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("projector: load verified claims: %w", err)
+		return nil, nil, fmt.Errorf("projector: load claims: %w", err)
 	}
+	fileSet := normalizedProjectionFiles(files)
+	out := make([]*schema.ClaimArtifact, 0, len(claims))
 	ids := make([]string, 0, len(claims))
 	for _, claim := range claims {
+		if claim.Status == schema.ClaimInvalidated || !claimMatchesFiles(claim, fileSet) {
+			continue
+		}
+		out = append(out, claim)
 		ids = append(ids, claim.ClaimID)
 	}
-	return claims, ids, nil
+	return out, ids, nil
+}
+
+func (s *service) loadContestedClaims(ctx context.Context, goalID string, files []string) ([]*schema.ClaimArtifact, []string, error) {
+	claims, err := s.store.LoadClaimsByStatus(ctx, goalID, schema.ClaimContested)
+	if err != nil {
+		return nil, nil, fmt.Errorf("projector: load contested claims: %w", err)
+	}
+	fileSet := normalizedProjectionFiles(files)
+	out := make([]*schema.ClaimArtifact, 0, len(claims))
+	ids := make([]string, 0, len(claims))
+	for _, claim := range claims {
+		if !claimMatchesFiles(claim, fileSet) {
+			continue
+		}
+		out = append(out, claim)
+		ids = append(ids, claim.ClaimID)
+	}
+	return out, ids, nil
 }
 
 func (s *service) loadFailures(ctx context.Context, files []string) ([]*schema.FailureFingerprint, []string, error) {
@@ -660,6 +715,38 @@ func (s *service) loadConditionRefs(ctx context.Context, obligations []*schema.O
 		})
 	}
 	return refs, nil
+}
+
+func normalizedProjectionFiles(files []string) map[string]bool {
+	out := make(map[string]bool, len(files))
+	for _, file := range files {
+		normalized := strings.TrimSpace(file)
+		normalized = strings.ReplaceAll(normalized, "\\", "/")
+		normalized = strings.TrimPrefix(normalized, "./")
+		normalized = strings.Trim(normalized, "/")
+		normalized = strings.ToLower(normalized)
+		if normalized != "" {
+			out[normalized] = true
+		}
+	}
+	return out
+}
+
+func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) bool {
+	if len(fileSet) == 0 {
+		return true
+	}
+	for _, file := range claim.AffectedFiles {
+		normalized := strings.TrimSpace(file)
+		normalized = strings.ReplaceAll(normalized, "\\", "/")
+		normalized = strings.TrimPrefix(normalized, "./")
+		normalized = strings.Trim(normalized, "/")
+		normalized = strings.ToLower(normalized)
+		if fileSet[normalized] {
+			return true
+		}
+	}
+	return false
 }
 
 var _ ContextCompiler = (*service)(nil)

@@ -183,6 +183,40 @@ func TestReviewProjection_BlocksUntilInput(t *testing.T) {
 	}
 }
 
+func TestReviewProjectionRendersSavedContestedClaimRisk(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	if err := e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+		ContextProjection: schema.ContextProjection{
+			ContextProjectionID: "CTX-contested",
+			SourceArtifactIDs:   []string{"CAP-1", "CL-contested"},
+			CreatedAt:           time.Now().UTC(),
+		},
+		GoalPlain:              "Test goal",
+		ImplementationApproach: "Change only the target code",
+		ObligationsAddressed: []schema.ObligationRef{{
+			ObligationID: "OB-1",
+			Description:  "prove behavior",
+			RiskLevel:    schema.RiskLow,
+		}},
+		Topology: schema.TopologyDecision{Selected: schema.TopologySingle, Rationale: "low risk"},
+		PreExecutionRisks: []schema.PreExecutionRisk{{
+			Source:      "claim",
+			Description: "contested claim CL-contested: API ownership is disputed",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveHumanSummaryProjection: %v", err)
+	}
+	var out bytes.Buffer
+	g := gate.NewWithIO(e.st, strings.NewReader("\n"), &out)
+	if _, err := g.ReviewProjection(e.ctx, "CAP-1", 0); err != nil {
+		t.Fatalf("ReviewProjection: %v", err)
+	}
+	if !strings.Contains(out.String(), "contested claim CL-contested") {
+		t.Fatalf("gate output did not render saved contested risk: %s", out.String())
+	}
+}
+
 func TestReviewWaiver_ApprovesAndRejects(t *testing.T) {
 	tests := []struct {
 		name         string

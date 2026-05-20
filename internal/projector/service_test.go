@@ -139,6 +139,68 @@ func TestCompileExecutorLabelsReusedPriorEvidence(t *testing.T) {
 	}
 }
 
+func TestCompileExecutorLabelsClaimTrustStates(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-claims"
+		conditionID = "GC-proj-claims"
+		obligation  = "OB-proj-claims"
+		capsuleID   = "CAP-proj-claims"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector/service.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-proj-current",
+		GoalID:      goalID,
+		EventID:     "EVT-proj-current",
+		SequenceNum: 10,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	for _, claim := range []*schema.ClaimArtifact{
+		{ClaimID: "CL-proj-verified", Text: "verified fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimVerified, LastValidatedAgainst: "SNAP-proj-current"},
+		{ClaimID: "CL-proj-mismatch", Text: "old verified fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimVerified, LastValidatedAgainst: "SNAP-proj-old"},
+		{ClaimID: "CL-proj-proposed", Text: "proposed fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimProposed},
+		{ClaimID: "CL-proj-stale", Text: "stale fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimStale},
+		{ClaimID: "CL-proj-contested", Text: "contested fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimContested},
+		{ClaimID: "CL-proj-invalid", Text: "invalidated fact", ClaimType: schema.ClaimInvariant, SourceCapsuleID: capsuleID, AffectedFiles: []string{"internal/projector/service.go"}, Status: schema.ClaimInvalidated},
+	} {
+		if err := env.st.SaveClaim(env.ctx, claim); err != nil {
+			t.Fatalf("SaveClaim %s: %v", claim.ClaimID, err)
+		}
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	for _, want := range []string{
+		"CL-proj-verified: verified fact",
+		"CL-proj-mismatch [stale - freshness unverified]: old verified fact",
+		"CL-proj-proposed [proposed]: proposed fact",
+		"CL-proj-stale [stale]: stale fact",
+		"CL-proj-contested [contested]: contested fact",
+	} {
+		if !projectionIncludes(projection, want) {
+			t.Fatalf("projection missing %q: %+v", want, projection.IncludedSections)
+		}
+	}
+	if projectionIncludes(projection, "invalidated fact") {
+		t.Fatalf("projection included invalidated claim: %+v", projection.IncludedSections)
+	}
+}
+
 func TestCompileHumanSummary_buildsImplementationApproachAndTopologyRationale(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +267,65 @@ func TestCompileHumanSummary_buildsImplementationApproachAndTopologyRationale(t 
 	}
 	if _, err := env.st.LoadHumanSummaryProjection(env.ctx, summary.ContextProjectionID); err != nil {
 		t.Fatalf("LoadHumanSummaryProjection: %v", err)
+	}
+}
+
+func TestCompileHumanSummaryAddsContestedClaimRisk(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-contested"
+		conditionID = "GC-proj-contested"
+		obligation  = "OB-proj-contested"
+		capsuleID   = "CAP-proj-contested"
+		decisionID  = "DEC-proj-contested"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decisionID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk",
+		MadeBy:     "system",
+		RelatedIDs: []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		AllowedPaths:       []string{"internal/projector/service.go"},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: decisionID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-proj-risk-contested",
+		Text:            "API ownership is disputed",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/projector/service.go"},
+		Status:          schema.ClaimContested,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	summary, err := New(env.st, config.VerifierConfig{}).CompileHumanSummary(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileHumanSummary: %v", err)
+	}
+	var found bool
+	for _, risk := range summary.PreExecutionRisks {
+		if strings.Contains(risk.Description, "contested claim CL-proj-risk-contested") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("PreExecutionRisks = %+v, want contested claim risk", summary.PreExecutionRisks)
 	}
 }
 

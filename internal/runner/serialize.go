@@ -38,7 +38,7 @@ func SerializeExecutorProjection(p *schema.ContextProjection) (string, error) {
 	b.WriteString("  - files_changed\n")
 	b.WriteString("  - commands_run\n")
 	b.WriteString("  - assumptions\n")
-	b.WriteString("  - claims\n")
+	b.WriteString("  - claims (each claim may include contradicts and invalidates claim-ID arrays)\n")
 	b.WriteString("  - risks\n")
 	b.WriteString("  - follow_up_needed\n")
 	b.WriteString("  - evidence_paths\n")

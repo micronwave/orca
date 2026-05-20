@@ -35,6 +35,15 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{ctx: context.Background(), log: log, st: st}
 }
 
+func marshalJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return data
+}
+
 func TestReconcileRejectsBlockingObligationWithoutEvidenceIDs(t *testing.T) {
 	env := newTestEnv(t)
 	ids := saveReconcileScenario(t, env, scenarioOptions{
@@ -335,6 +344,416 @@ func TestReconcileAcceptedPatchMarksOverlappingVerifiedClaimsStale(t *testing.T)
 	}
 	if seen["CL-NEW-STALEFILE"] != schema.ClaimVerified {
 		t.Fatalf("CL-NEW-STALEFILE event status = %s, want %s", seen["CL-NEW-STALEFILE"], schema.ClaimVerified)
+	}
+}
+
+func TestReconcileClaimVerificationSetsLastValidatedAgainst(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "CLAIMVAL",
+		evidenceIDs:  []string{"EV-CLAIMVAL"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-CLAIMVAL",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-CLAIMVAL",
+		SequenceNum: 10,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-CLAIMVAL",
+		Text:            "claim with evidence",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimProposed,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-CLAIMVAL")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status != schema.ClaimVerified || claim.LastValidatedAgainst != "SNAP-CLAIMVAL" {
+		t.Fatalf("claim validation = status %s snapshot %q, want verified SNAP-CLAIMVAL", claim.Status, claim.LastValidatedAgainst)
+	}
+	events, err := env.log.ReadByType(env.ctx, schema.EventClaimStatusUpdated, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType claim_status_updated: %v", err)
+	}
+	var sawValidation bool
+	for _, event := range events {
+		var payload schema.ClaimStatusPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("Unmarshal claim_status_updated payload: %v", err)
+		}
+		if payload.ClaimID == "CL-CLAIMVAL" && payload.Status == schema.ClaimVerified && payload.LastValidatedAgainst == "SNAP-CLAIMVAL" {
+			sawValidation = true
+		}
+	}
+	if !sawValidation {
+		t.Fatal("missing claim_status_updated payload with LastValidatedAgainst")
+	}
+}
+
+func TestReconcileExplicitContradictionMarksBothClaimsContested(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "CONTEST",
+		evidenceIDs:  []string{"EV-CONTEST"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-CONTEST-OLD",
+		Text:            "old verified claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-CONTEST-NEW",
+		Text:            "new verified claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimProposed,
+		EvidenceIDs:     []string{ids.evidenceID},
+		Contradicts:     []string{"CL-CONTEST-OLD"},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	oldClaim, err := env.st.LoadClaim(env.ctx, "CL-CONTEST-OLD")
+	if err != nil {
+		t.Fatalf("LoadClaim old: %v", err)
+	}
+	newClaim, err := env.st.LoadClaim(env.ctx, "CL-CONTEST-NEW")
+	if err != nil {
+		t.Fatalf("LoadClaim new: %v", err)
+	}
+	if oldClaim.Status != schema.ClaimContested || newClaim.Status != schema.ClaimContested {
+		t.Fatalf("claim statuses old=%s new=%s, want both contested", oldClaim.Status, newClaim.Status)
+	}
+	if len(oldClaim.ContradictedBy) != 1 || oldClaim.ContradictedBy[0] != "CL-CONTEST-NEW" {
+		t.Fatalf("old ContradictedBy = %v", oldClaim.ContradictedBy)
+	}
+	if len(newClaim.ContradictedBy) != 1 || newClaim.ContradictedBy[0] != "CL-CONTEST-OLD" {
+		t.Fatalf("new ContradictedBy = %v", newClaim.ContradictedBy)
+	}
+}
+
+func TestReconcileExplicitInvalidationMarksOnlyTargetInvalidated(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "INVALIDATE",
+		evidenceIDs:  []string{"EV-INVALIDATE"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-INVALIDATE-OLD",
+		Text:            "old verified claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-INVALIDATE-NEW",
+		Text:            "new verified claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimProposed,
+		EvidenceIDs:     []string{ids.evidenceID},
+		Invalidates:     []string{"CL-INVALIDATE-OLD"},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	oldClaim, err := env.st.LoadClaim(env.ctx, "CL-INVALIDATE-OLD")
+	if err != nil {
+		t.Fatalf("LoadClaim old: %v", err)
+	}
+	newClaim, err := env.st.LoadClaim(env.ctx, "CL-INVALIDATE-NEW")
+	if err != nil {
+		t.Fatalf("LoadClaim new: %v", err)
+	}
+	if oldClaim.Status != schema.ClaimInvalidated {
+		t.Fatalf("old status = %s, want invalidated", oldClaim.Status)
+	}
+	if newClaim.Status != schema.ClaimVerified {
+		t.Fatalf("new status = %s, want verified", newClaim.Status)
+	}
+	if len(oldClaim.InvalidatedBy) != 1 || oldClaim.InvalidatedBy[0] != "CL-INVALIDATE-NEW" {
+		t.Fatalf("old InvalidatedBy = %v", oldClaim.InvalidatedBy)
+	}
+}
+
+// TestReconcileVerifierResultInvalidatesTargetClaim verifies the vr.Invalidates
+// path in detectClaimDisputes: a VerifierResult may explicitly invalidate a
+// verified claim by listing its ID in the Invalidates field.
+func TestReconcileVerifierResultInvalidatesTargetClaim(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:              "VRINVAL",
+		evidenceIDs:         []string{"EV-VRINVAL"},
+		saveEvidence:        true,
+		verifierInvalidates: []string{"CL-VRINVAL-TARGET"},
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-VRINVAL-TARGET",
+		Text:            "claim explicitly invalidated by verifier result",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim target: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	target, err := env.st.LoadClaim(env.ctx, "CL-VRINVAL-TARGET")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if target.Status != schema.ClaimInvalidated {
+		t.Fatalf("target status = %s, want invalidated", target.Status)
+	}
+	if len(target.InvalidatedBy) != 1 || target.InvalidatedBy[0] != ids.verifierResultID {
+		t.Fatalf("target InvalidatedBy = %v, want [%s]", target.InvalidatedBy, ids.verifierResultID)
+	}
+}
+
+// TestReconcileDecisionInvalidatesTargetClaim verifies the decisionInvalidations
+// path in detectClaimDisputes: a DecisionRecord may explicitly invalidate a
+// verified claim by listing its ID in the Invalidates field.
+func TestReconcileDecisionInvalidatesTargetClaim(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "DECINVAL",
+		evidenceIDs:  []string{"EV-DECINVAL"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVAL-TARGET",
+		Text:            "claim explicitly invalidated by decision record",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/reconciler/reconciler.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim target: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID:  "DEC-DECINVAL",
+		Context:     "claim_invalidation",
+		Decision:    "invalidate stale architectural claim",
+		Rationale:   "claim no longer applies after refactor",
+		MadeBy:      "human",
+		RelatedIDs:  []string{ids.goalID},
+		Invalidates: []string{"CL-DECINVAL-TARGET"},
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	target, err := env.st.LoadClaim(env.ctx, "CL-DECINVAL-TARGET")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if target.Status != schema.ClaimInvalidated {
+		t.Fatalf("target status = %s, want invalidated", target.Status)
+	}
+	if len(target.InvalidatedBy) != 1 || target.InvalidatedBy[0] != "DEC-DECINVAL" {
+		t.Fatalf("target InvalidatedBy = %v, want [DEC-DECINVAL]", target.InvalidatedBy)
+	}
+}
+
+// TestReconcileVerifiedClaimWithEmptyLVAGetsSnapshotSet verifies the plan
+// requirement: "Do not leave permanent verified facts without a freshness base."
+// A claim already saved as verified with no LastValidatedAgainst must have its
+// snapshot ID set the next time Reconcile processes the owning capsule.
+func TestReconcileVerifiedClaimWithEmptyLVAGetsSnapshotSet(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "EMPTYSNAP",
+		evidenceIDs:  []string{"EV-EMPTYSNAP"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-EMPTYSNAP",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-EMPTYSNAP",
+		SequenceNum: 10,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	// Claim is already verified but has no LastValidatedAgainst — simulating a
+	// claim created before snapshot tracking was introduced or by an adapter
+	// that did not populate the field.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:              "CL-EMPTYSNAP",
+		Text:                 "already verified, no snapshot",
+		ClaimType:            schema.ClaimInvariant,
+		SourceCapsuleID:      ids.capsuleID,
+		AffectedFiles:        []string{"internal/reconciler/reconciler.go"},
+		Status:               schema.ClaimVerified,
+		LastValidatedAgainst: "",
+		EvidenceIDs:          []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-EMPTYSNAP")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.LastValidatedAgainst != "SNAP-EMPTYSNAP" {
+		t.Fatalf("LastValidatedAgainst = %q, want SNAP-EMPTYSNAP", claim.LastValidatedAgainst)
+	}
+	if claim.Status != schema.ClaimVerified {
+		t.Fatalf("status = %s, want verified", claim.Status)
+	}
+}
+
+func TestReconcileOverlapAloneDoesNotContestClaims(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "NOCONTEST",
+		evidenceIDs:  []string{"EV-NOCONTEST"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/foo/service.go"},
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-NOCONTEST-OLD",
+		Text:            "old verified claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/foo/service.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-NOCONTEST-OLD")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status == schema.ClaimContested {
+		t.Fatal("overlapping files alone marked claim contested")
+	}
+}
+
+func TestFreshnessCheckMarksClaimsStaleAfterInterveningAcceptedPatch(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "FRESH",
+		evidenceIDs:  []string{"EV-FRESH"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/fresh/service.go"},
+	})
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-FRESH-OLD",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-FRESH-OLD",
+		SequenceNum: 1,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot old: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:              "CL-FRESH-STALE",
+		Text:                 "validated before patch",
+		ClaimType:            schema.ClaimInvariant,
+		SourceCapsuleID:      ids.capsuleID,
+		AffectedFiles:        []string{`internal\fresh\service.go`},
+		Status:               schema.ClaimVerified,
+		EvidenceIDs:          []string{ids.evidenceID},
+		LastValidatedAgainst: "SNAP-FRESH-OLD",
+	}); err != nil {
+		t.Fatalf("SaveClaim stale: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:              "CL-FRESH-KEEP",
+		Text:                 "unrelated validated claim",
+		ClaimType:            schema.ClaimInvariant,
+		SourceCapsuleID:      ids.capsuleID,
+		AffectedFiles:        []string{"internal/other/file.go"},
+		Status:               schema.ClaimVerified,
+		EvidenceIDs:          []string{ids.evidenceID},
+		LastValidatedAgainst: "SNAP-FRESH-OLD",
+	}); err != nil {
+		t.Fatalf("SaveClaim keep: %v", err)
+	}
+	if _, err := env.log.Append(env.ctx, schema.Event{
+		Type:       schema.EventPatchAccepted,
+		GoalID:     ids.goalID,
+		ArtifactID: ids.patchID,
+		Payload:    marshalJSON(t, schema.PatchStatusPayload{PatchID: ids.patchID}),
+	}); err != nil {
+		t.Fatalf("append patch accepted: %v", err)
+	}
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-FRESH-CURRENT",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-FRESH-CURRENT",
+		SequenceNum: 100,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot current: %v", err)
+	}
+
+	if err := New(env.st, env.log).FreshnessCheck(env.ctx, ids.goalID); err != nil {
+		t.Fatalf("FreshnessCheck: %v", err)
+	}
+	stale, err := env.st.LoadClaim(env.ctx, "CL-FRESH-STALE")
+	if err != nil {
+		t.Fatalf("LoadClaim stale: %v", err)
+	}
+	keep, err := env.st.LoadClaim(env.ctx, "CL-FRESH-KEEP")
+	if err != nil {
+		t.Fatalf("LoadClaim keep: %v", err)
+	}
+	if stale.Status != schema.ClaimStale {
+		t.Fatalf("stale claim status = %s, want stale", stale.Status)
+	}
+	if keep.Status != schema.ClaimVerified {
+		t.Fatalf("unrelated claim status = %s, want verified", keep.Status)
 	}
 }
 
@@ -672,6 +1091,7 @@ type scenarioOptions struct {
 	changedFiles         []string
 	recommendedAction    schema.RecommendedAction
 	recommendation       string
+	verifierInvalidates  []string
 }
 
 type scenarioIDs struct {
@@ -767,6 +1187,7 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		PatchID:                 ids.patchID,
 		CapsuleID:               ids.capsuleID,
 		ObligationResults:       verdicts,
+		Invalidates:             opts.verifierInvalidates,
 		RecommendedAction:       pickRecommendedAction(opts.recommendedAction),
 		RecommendationRationale: pickRecommendationRationale(opts.recommendation),
 		CreatedAt:               now,

@@ -238,11 +238,13 @@ func sidecarJSONSchema() string {
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["claim", "type", "evidence"],
+        "required": ["claim", "type", "evidence", "contradicts", "invalidates"],
         "properties": {
           "claim": {"type": "string"},
           "type": {"type": "string", "enum": ["verified", "proposed"]},
-          "evidence": {"type": "string", "description": "Evidence reference or empty string"}
+          "evidence": {"type": "string", "description": "Evidence reference or empty string"},
+          "contradicts": {"type": "array", "items": {"type": "string"}},
+          "invalidates": {"type": "array", "items": {"type": "string"}}
         }
       }
     },
@@ -331,15 +333,55 @@ func collectClaims(text string) []schema.SidecarClaim {
 		lower := strings.ToLower(line)
 		switch {
 		case strings.HasPrefix(lower, "claim verified:"):
+			claim, contradicts, invalidates := splitClaimMetadata(line[len("claim verified:"):])
 			out = append(out, schema.SidecarClaim{
-				Claim: strings.TrimSpace(line[len("claim verified:"):]),
-				Type:  schema.SidecarClaimVerified,
+				Claim:       claim,
+				Type:        schema.SidecarClaimVerified,
+				Contradicts: contradicts,
+				Invalidates: invalidates,
 			})
 		case strings.HasPrefix(lower, "claim:"):
+			claim, contradicts, invalidates := splitClaimMetadata(line[len("claim:"):])
 			out = append(out, schema.SidecarClaim{
-				Claim: strings.TrimSpace(line[len("claim:"):]),
-				Type:  schema.SidecarClaimProposed,
+				Claim:       claim,
+				Type:        schema.SidecarClaimProposed,
+				Contradicts: contradicts,
+				Invalidates: invalidates,
 			})
+		}
+	}
+	return out
+}
+
+func splitClaimMetadata(raw string) (string, []string, []string) {
+	parts := strings.Split(raw, "|")
+	claim := strings.TrimSpace(parts[0])
+	var contradicts []string
+	var invalidates []string
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "contradicts":
+			contradicts = append(contradicts, splitIDs(value)...)
+		case "invalidates":
+			invalidates = append(invalidates, splitIDs(value)...)
+		}
+	}
+	return claim, contradicts, invalidates
+}
+
+func splitIDs(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		trimmed := strings.TrimSpace(field)
+		if trimmed != "" {
+			out = append(out, trimmed)
 		}
 	}
 	return out

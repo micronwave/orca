@@ -52,6 +52,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,12 @@ type Reconciler interface {
 	// MergeReady and HumanGateRequired to decide whether to surface a merge gate,
 	// merge directly, or loop back to the planner with FollowUpObligationIDs.
 	Reconcile(ctx context.Context, patchID string) (ReconcileResult, error)
+
+	// FreshnessCheck marks previously verified claims stale when their validation
+	// snapshot is older than the current state and accepted patches since then
+	// touched the files those claims describe. Phase 3.6 wires this into the
+	// control loop before planning.
+	FreshnessCheck(ctx context.Context, goalID string) error
 }
 
 type service struct {
@@ -267,6 +274,9 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 	if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
 		return ReconcileResult{}, err
 	}
+	if err := s.detectClaimDisputes(ctx, goal.GoalID, vr); err != nil {
+		return ReconcileResult{}, err
+	}
 	if result.PatchAccepted {
 		if err := s.invalidateStaleClaims(ctx, goal.GoalID, patch); err != nil {
 			return ReconcileResult{}, err
@@ -383,8 +393,15 @@ func (s *service) verifyClaims(ctx context.Context, goalID, capsuleID string) er
 	if err != nil {
 		return fmt.Errorf("reconciler: load claims for capsule %s: %w", capsuleID, err)
 	}
+	snapshotID, err := s.latestSnapshotID(ctx, goalID)
+	if err != nil {
+		return err
+	}
 	for _, claim := range claims {
-		if claim.Status == schema.ClaimVerified || len(claim.EvidenceIDs) == 0 {
+		if claim.Status == schema.ClaimVerified && claim.LastValidatedAgainst != "" {
+			continue
+		}
+		if len(claim.EvidenceIDs) == 0 {
 			continue
 		}
 		allPresent := true
@@ -401,16 +418,246 @@ func (s *service) verifyClaims(ctx context.Context, goalID, capsuleID string) er
 			continue
 		}
 		if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
-			ClaimID: claim.ClaimID,
-			Status:  schema.ClaimVerified,
+			ClaimID:              claim.ClaimID,
+			Status:               schema.ClaimVerified,
+			LastValidatedAgainst: snapshotID,
 		}); err != nil {
 			return err
 		}
-		if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, schema.ClaimVerified); err != nil {
+		if err := s.store.UpdateClaimValidation(ctx, claim.ClaimID, schema.ClaimVerified, snapshotID); err != nil {
 			return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
 		}
 	}
 	return nil
+}
+
+func (s *service) detectClaimDisputes(ctx context.Context, goalID string, vr *schema.VerifierResult) error {
+	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
+	if err != nil {
+		return fmt.Errorf("reconciler: load claims for disputes for goal %s: %w", goalID, err)
+	}
+	claimsByID := make(map[string]*schema.ClaimArtifact, len(claims))
+	for _, claim := range claims {
+		claimsByID[claim.ClaimID] = claim
+	}
+	for _, claim := range claims {
+		if claim.Status != schema.ClaimVerified {
+			continue
+		}
+		for _, targetID := range claim.Contradicts {
+			target := claimsByID[targetID]
+			if target == nil || target.Status != schema.ClaimVerified {
+				continue
+			}
+			if err := s.markClaimDisputed(ctx, goalID, claim, schema.ClaimContested, []string{target.ClaimID}, nil); err != nil {
+				return err
+			}
+			if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimContested, []string{claim.ClaimID}, nil); err != nil {
+				return err
+			}
+			claim.Status = schema.ClaimContested
+			target.Status = schema.ClaimContested
+		}
+		// A claim that became contested via the Contradicts loop above is no
+		// longer verified, so it must not be allowed to invalidate other claims.
+		if claim.Status == schema.ClaimVerified {
+			for _, targetID := range claim.Invalidates {
+				target := claimsByID[targetID]
+				if target == nil || target.Status != schema.ClaimVerified {
+					continue
+				}
+				if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, []string{claim.ClaimID}); err != nil {
+					return err
+				}
+				target.Status = schema.ClaimInvalidated
+			}
+		}
+	}
+	for _, targetID := range vr.Invalidates {
+		target := claimsByID[targetID]
+		if target == nil || target.Status != schema.ClaimVerified {
+			continue
+		}
+		if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, []string{vr.VerifierResultID}); err != nil {
+			return err
+		}
+		target.Status = schema.ClaimInvalidated
+	}
+	invalidatedByDecision, err := s.decisionInvalidations(ctx, goalID)
+	if err != nil {
+		return err
+	}
+	for claimID, invalidators := range invalidatedByDecision {
+		target := claimsByID[claimID]
+		if target == nil || target.Status != schema.ClaimVerified {
+			continue
+		}
+		if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, invalidators); err != nil {
+			return err
+		}
+		target.Status = schema.ClaimInvalidated
+	}
+	return nil
+}
+
+func (s *service) decisionInvalidations(ctx context.Context, goalID string) (map[string][]string, error) {
+	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("reconciler: read decision events for goal %s: %w", goalID, err)
+	}
+	out := make(map[string][]string)
+	for _, event := range events {
+		if event.Type != schema.EventDecisionRecordCreated {
+			continue
+		}
+		var decision schema.DecisionRecord
+		if err := json.Unmarshal(event.Payload, &decision); err != nil {
+			return nil, fmt.Errorf("reconciler: unmarshal decision %s: %w", event.EventID, err)
+		}
+		for _, claimID := range decision.Invalidates {
+			out[claimID] = append(out[claimID], decision.DecisionID)
+		}
+	}
+	return out, nil
+}
+
+func (s *service) markClaimDisputed(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
+	if claim == nil {
+		return nil
+	}
+	contradicted := mergeStrings(claim.ContradictedBy, contradictedBy)
+	invalidated := mergeStrings(claim.InvalidatedBy, invalidatedBy)
+	if claim.Status == status && sameStrings(claim.ContradictedBy, contradicted) && sameStrings(claim.InvalidatedBy, invalidated) {
+		return nil
+	}
+	if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+		ClaimID:              claim.ClaimID,
+		Status:               status,
+		LastValidatedAgainst: claim.LastValidatedAgainst,
+		ContradictedBy:       contradicted,
+		InvalidatedBy:        invalidated,
+	}); err != nil {
+		return err
+	}
+	if err := s.store.UpdateClaimDispute(ctx, claim.ClaimID, status, contradicted, invalidated); err != nil {
+		return fmt.Errorf("reconciler: update claim dispute %s: %w", claim.ClaimID, err)
+	}
+	claim.Status = status
+	claim.ContradictedBy = contradicted
+	claim.InvalidatedBy = invalidated
+	return nil
+}
+
+func (s *service) FreshnessCheck(ctx context.Context, goalID string) error {
+	if s.store == nil {
+		return errors.New("reconciler: store is required")
+	}
+	if s.log == nil {
+		return errors.New("reconciler: event log is required")
+	}
+	current, err := s.store.LoadLatestSnapshot(ctx, goalID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reconciler: load latest snapshot for goal %s: %w", goalID, err)
+	}
+	claims, err := s.store.LoadClaimsByStatus(ctx, goalID, schema.ClaimVerified)
+	if err != nil {
+		return fmt.Errorf("reconciler: load verified claims for goal %s: %w", goalID, err)
+	}
+	for _, claim := range claims {
+		if claim.LastValidatedAgainst == "" || claim.LastValidatedAgainst == current.SnapshotID {
+			continue
+		}
+		validation, err := s.store.LoadSnapshot(ctx, claim.LastValidatedAgainst)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("reconciler: load validation snapshot %s: %w", claim.LastValidatedAgainst, err)
+		}
+		stale, err := s.claimTouchedSince(ctx, goalID, claim, validation.SequenceNum, current.SequenceNum)
+		if err != nil {
+			return err
+		}
+		if !stale {
+			continue
+		}
+		if err := s.markClaimStatus(ctx, goalID, claim, schema.ClaimStale); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *service) claimTouchedSince(ctx context.Context, goalID string, claim *schema.ClaimArtifact, afterSeq, throughSeq int64) (bool, error) {
+	claimFiles := normalizedSet(claim.AffectedFiles)
+	if len(claimFiles) == 0 {
+		return false, nil
+	}
+	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
+	if err != nil {
+		return false, fmt.Errorf("reconciler: read events for goal %s: %w", goalID, err)
+	}
+	for _, event := range events {
+		if event.SequenceNum <= afterSeq || event.SequenceNum > throughSeq {
+			continue
+		}
+		if event.Type != schema.EventPatchAccepted && event.Type != schema.EventMergeApplied {
+			continue
+		}
+		var payload schema.PatchStatusPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false, fmt.Errorf("reconciler: unmarshal patch event %s: %w", event.EventID, err)
+		}
+		patchID := strings.TrimSpace(payload.PatchID)
+		if patchID == "" {
+			patchID = event.ArtifactID
+		}
+		patch, err := s.store.LoadPatch(ctx, patchID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("reconciler: load patch %s for freshness: %w", patchID, err)
+		}
+		if hasOverlap(claimFiles, normalizedSet(patch.ChangedFiles)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *service) markClaimStatus(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus) error {
+	if claim.Status == status {
+		return nil
+	}
+	if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+		ClaimID:              claim.ClaimID,
+		Status:               status,
+		LastValidatedAgainst: claim.LastValidatedAgainst,
+		ContradictedBy:       claim.ContradictedBy,
+		InvalidatedBy:        claim.InvalidatedBy,
+	}); err != nil {
+		return err
+	}
+	if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, status); err != nil {
+		return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
+	}
+	claim.Status = status
+	return nil
+}
+
+func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
+	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
+	if err == nil {
+		return snapshot.SnapshotID, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	return "", fmt.Errorf("reconciler: load latest snapshot for goal %s: %w", goalID, err)
 }
 
 func (s *service) invalidateStaleClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
@@ -451,14 +698,8 @@ func (s *service) invalidateStaleClaims(ctx context.Context, goalID string, patc
 		if !fileOverlap && !symbolOverlap {
 			continue
 		}
-		if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
-			ClaimID: claim.ClaimID,
-			Status:  schema.ClaimStale,
-		}); err != nil {
+		if err := s.markClaimStatus(ctx, goalID, claim, schema.ClaimStale); err != nil {
 			return err
-		}
-		if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, schema.ClaimStale); err != nil {
-			return fmt.Errorf("reconciler: stale claim %s: %w", claim.ClaimID, err)
 		}
 	}
 	return nil
@@ -797,4 +1038,35 @@ func hasOverlap(left, right map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+func mergeStrings(existing, add []string) []string {
+	seen := make(map[string]bool, len(existing)+len(add))
+	out := make([]string, 0, len(existing)+len(add))
+	for _, value := range append(append([]string(nil), existing...), add...) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	for i := range leftCopy {
+		if leftCopy[i] != rightCopy[i] {
+			return false
+		}
+	}
+	return true
 }

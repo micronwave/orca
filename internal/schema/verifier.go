@@ -46,6 +46,7 @@ type VerifierResult struct {
 	// BlockingFailures lists obligation IDs or descriptions of failures that block merge.
 	BlockingFailures        []string          `json:"blocking_failures"`
 	Warnings                []string          `json:"warnings"`
+	Invalidates             []string          `json:"invalidates,omitempty"`
 	RecommendedAction       RecommendedAction `json:"recommended_action"`
 	RecommendationRationale string            `json:"recommendation_rationale"`
 	CreatedAt               time.Time         `json:"created_at"`

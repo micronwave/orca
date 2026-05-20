@@ -316,7 +316,7 @@ func (s *service) saveClaims(
 	evidenceIDs []string,
 ) ([]string, error) {
 	claimIDs := make([]string, 0, len(output.Claims)+len(output.Assumptions)+len(output.Risks)+len(output.FollowUpNeeded))
-	addClaim := func(text string, claimType schema.ClaimType, status schema.ClaimStatus, ids []string) error {
+	addClaim := func(text string, claimType schema.ClaimType, status schema.ClaimStatus, ids []string, contradicts, invalidates []string) error {
 		trimmed := strings.TrimSpace(text)
 		if trimmed == "" {
 			return nil
@@ -329,6 +329,8 @@ func (s *service) saveClaims(
 			AffectedFiles:   append([]string(nil), output.FilesChanged...),
 			Status:          status,
 			EvidenceIDs:     append([]string(nil), ids...),
+			Contradicts:     append([]string(nil), contradicts...),
+			Invalidates:     append([]string(nil), invalidates...),
 		}
 		if err := s.store.SaveClaim(ctx, claim); err != nil {
 			return fmt.Errorf("runner: save claim %s: %w", claim.ClaimID, err)
@@ -338,28 +340,26 @@ func (s *service) saveClaims(
 	}
 
 	for _, c := range output.Claims {
-		status := schema.ClaimProposed
 		ids := []string(nil)
 		if c.Type == schema.SidecarClaimVerified && len(evidenceIDs) > 0 {
-			status = schema.ClaimVerified
 			ids = []string{evidenceIDs[0]}
 		}
-		if err := addClaim(c.Claim, schema.ClaimInvariant, status, ids); err != nil {
+		if err := addClaim(c.Claim, schema.ClaimInvariant, schema.ClaimProposed, ids, c.Contradicts, c.Invalidates); err != nil {
 			return nil, err
 		}
 	}
 	for _, assumption := range output.Assumptions {
-		if err := addClaim(assumption, schema.ClaimAssumption, schema.ClaimProposed, nil); err != nil {
+		if err := addClaim(assumption, schema.ClaimAssumption, schema.ClaimProposed, nil, nil, nil); err != nil {
 			return nil, err
 		}
 	}
 	for _, risk := range output.Risks {
-		if err := addClaim(risk, schema.ClaimRisk, schema.ClaimProposed, nil); err != nil {
+		if err := addClaim(risk, schema.ClaimRisk, schema.ClaimProposed, nil, nil, nil); err != nil {
 			return nil, err
 		}
 	}
 	for _, followUp := range output.FollowUpNeeded {
-		if err := addClaim(followUp, schema.ClaimOpenQuestion, schema.ClaimProposed, nil); err != nil {
+		if err := addClaim(followUp, schema.ClaimOpenQuestion, schema.ClaimProposed, nil, nil, nil); err != nil {
 			return nil, err
 		}
 	}

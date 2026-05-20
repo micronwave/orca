@@ -15,7 +15,7 @@ func TestExtractFromTranscript(t *testing.T) {
 	content := "" +
 		"$ go test ./...\n" +
 		"M internal/runner/service.go\n" +
-		"claim verified: scope gate passed\n" +
+		"claim verified: scope gate passed | contradicts: CL-old | invalidates: CL-bad\n" +
 		"assumption: go toolchain present\n" +
 		"risk: flaky integration test\n" +
 		"follow-up: add retries for flaky test\n" +
@@ -39,5 +39,9 @@ func TestExtractFromTranscript(t *testing.T) {
 	}
 	if len(out.EvidencePaths) != 1 || out.EvidencePaths[0] != transcriptPath {
 		t.Fatalf("EvidencePaths = %v", out.EvidencePaths)
+	}
+	if len(out.Claims) != 1 || len(out.Claims[0].Contradicts) != 1 || out.Claims[0].Contradicts[0] != "CL-old" ||
+		len(out.Claims[0].Invalidates) != 1 || out.Claims[0].Invalidates[0] != "CL-bad" {
+		t.Fatalf("Claims = %+v, want preserved dispute edges", out.Claims)
 	}
 }

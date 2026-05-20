@@ -166,7 +166,7 @@ reads this field via `store.LoadDecision(capsule.TopologyDecisionID)` to populat
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), verified `ClaimArtifacts` via `LoadVerifiedClaimsForFiles`, `EvidenceArtifacts` via `LoadEvidenceForObligation`, `FailureFingerprints` via `LoadFailuresForFiles`, `ExecutionCapsule` via `LoadCapsule`, `DecisionRecord` via `LoadDecision` (topology decision, via `capsule.TopologyDecisionID`), `StateSnapshot` via `LoadLatestSnapshot` |
+| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), `ClaimArtifacts` via `LoadClaimsForGoal` / `LoadClaimsByStatus` for labeled projection injection and contested-claim risks, `EvidenceArtifacts` via `LoadEvidenceForObligation`, `FailureFingerprints` via `LoadFailuresForFiles`, `ExecutionCapsule` via `LoadCapsule`, `DecisionRecord` via `LoadDecision` (topology decision, via `capsule.TopologyDecisionID`), `StateSnapshot` via `LoadLatestSnapshot` |
 | **Writes (store)** | `ContextProjection` (executor), `HumanSummaryProjection` |
 | **Writes (log)** | none directly — store emits `context_projection_created` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/budget`, `internal/gate` |
@@ -183,6 +183,12 @@ strips the developer of go/no-go information. orca.md §5.4.
 The topology rationale for `HumanSummaryProjection.Topology` is obtained by calling
 `store.LoadDecision(capsule.TopologyDecisionID)`. The planner sets this field when
 creating the capsule (see obligation_planner section above).
+
+Projection claim rules: verified claims are injected as facts only when their
+`LastValidatedAgainst` matches the projection's latest `StateSnapshot`. Proposed,
+stale, and contested claims are included only with labels. Invalidated claims are
+excluded. Contested-claim risks shown to the gate are written into the saved
+`HumanSummaryProjection`; the gate does not query claims directly.
 
 ---
 
@@ -243,8 +249,9 @@ not create new evidence by running agents.
 
 | | |
 |---|---|
-| **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule`, `BudgetRecords` via `LoadBudgetForGoal` |
-| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; future topology outcomes via `SaveTopologyOutcome` |
+| **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule` / `LoadClaimsForGoal` / `LoadClaimsByStatus`, `StateSnapshot` via `LoadLatestSnapshot` / `LoadSnapshot`, `BudgetRecords` via `LoadBudgetForGoal` |
+| **Reads (log)** | goal events via `ReadForGoal` during `FreshnessCheck` and explicit decision invalidation processing |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; future topology outcomes via `SaveTopologyOutcome` |
 | **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
@@ -253,8 +260,11 @@ not create new evidence by running agents.
 The reconciler is the component that closes the loop: it reads the verifier's
 verdict and translates it into durable state changes. Follow-up obligations
 created here are the input to the next `ObligationPlanner.Plan` call.
-Phase 3 claim dispute and validation writes also belong here; file or symbol
-overlap alone does not imply a claim dispute without explicit structured edges.
+Phase 3 claim dispute, validation, and freshness writes also belong here. File or
+symbol overlap alone does not imply a claim dispute without explicit structured
+`Contradicts` or `Invalidates` edges. `FreshnessCheck(ctx, goalID)` marks claims
+stale when their validation snapshot is older than the latest snapshot and
+accepted patches since validation touched their affected files.
 
 ---
 
@@ -314,6 +324,7 @@ Control loop (orca.md §6):
 
 ```
 1.  intent_compiler.Compile(rawIntent)
+1a. reconciler.FreshnessCheck(goalID)                       [Phase 3.6 wiring]
 2.  verifier_engine.ProposeObligations(goalID)               [orca.md §6 step 3]
 3.  obligation_planner.Plan(ctx, goalID)   → PlanResult{CapsuleIDs, Topology, DecisionID}
     orchestrator emits topology_selected(PlanResult.Topology, PlanResult.DecisionID)

@@ -18,6 +18,7 @@ type DecisionRecord struct {
 	// MadeBy is "human", a capsule ID, or "system".
 	MadeBy string `json:"made_by"`
 	// RelatedIDs holds capsule, obligation, patch, or goal IDs relevant to this decision.
-	RelatedIDs []string  `json:"related_ids"`
-	CreatedAt  time.Time `json:"created_at"`
+	RelatedIDs  []string  `json:"related_ids"`
+	Invalidates []string  `json:"invalidates,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }

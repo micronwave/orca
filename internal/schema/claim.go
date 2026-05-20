@@ -38,6 +38,8 @@ type ClaimArtifact struct {
 	AffectedSymbols []string    `json:"affected_symbols"`
 	Status          ClaimStatus `json:"status"`
 	EvidenceIDs     []string    `json:"evidence_ids"`
+	Contradicts     []string    `json:"contradicts,omitempty"`
+	Invalidates     []string    `json:"invalidates,omitempty"`
 	// LastValidatedAgainst is the state_snapshot_id current when this claim was last checked.
 	LastValidatedAgainst string   `json:"last_validated_against"`
 	ContradictedBy       []string `json:"contradicted_by"`
