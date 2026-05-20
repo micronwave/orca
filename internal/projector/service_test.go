@@ -94,6 +94,51 @@ func TestCompileExecutor_handlesNoSnapshotAndBudgetOmissions(t *testing.T) {
 	}
 }
 
+func TestCompileExecutorLabelsReusedPriorEvidence(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-reuse"
+		conditionID = "GC-proj-reuse"
+		obligation  = "OB-proj-reuse"
+		capsuleID   = "CAP-proj-reuse"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		AllowedPaths:       []string{`internal\projector`},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: "DEC-unused",
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID:   "EV-proj-reused",
+		Type:         schema.EvidenceTestResult,
+		Source:       "verifier",
+		Command:      "go test ./internal/projector",
+		ExitCode:     0,
+		Summary:      "pass",
+		Supports:     []string{obligation},
+		ReusedFromID: "EV-proj-source",
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	projection, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "EV-proj-reused [reused from EV-proj-source]") {
+		t.Fatalf("projection missing reused evidence label: %+v", projection.IncludedSections)
+	}
+}
+
 func TestCompileHumanSummary_buildsImplementationApproachAndTopologyRationale(t *testing.T) {
 	t.Parallel()
 

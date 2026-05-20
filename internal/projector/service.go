@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -378,8 +379,18 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 	}
 	parts := make([]string, 0, len(evidenceByObligation))
 	for obligationID, evidence := range evidenceByObligation {
-		parts = append(parts, fmt.Sprintf("%s=%d artifacts", obligationID, len(evidence)))
+		labels := make([]string, 0, len(evidence))
+		for _, item := range evidence {
+			label := item.EvidenceID
+			if strings.TrimSpace(item.ReusedFromID) != "" {
+				label += " [reused from " + item.ReusedFromID + "]"
+			}
+			labels = append(labels, label)
+		}
+		sort.Strings(labels)
+		parts = append(parts, fmt.Sprintf("%s=%d artifacts (%s)", obligationID, len(evidence), strings.Join(labels, ", ")))
 	}
+	sort.Strings(parts)
 	return strings.Join(parts, "; ")
 }
 
