@@ -227,6 +227,9 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 	}
 
 	for {
+		if err := rt.reconciler.FreshnessCheck(ctx, goal.GoalID); err != nil {
+			return fmt.Errorf("orca: freshness check for goal %s: %w", goal.GoalID, err)
+		}
 		plan, err := rt.planner.Plan(ctx, goal.GoalID)
 		if err != nil {
 			return err
@@ -953,6 +956,10 @@ func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig, noLear
 }
 
 func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string, noLearning bool) planner.ObligationPlanner {
+	var outcomes planner.OutcomeReader
+	if !noLearning {
+		outcomes = st
+	}
 	return planner.New(st, planner.Config{
 		OrcaDir:            orcaDir,
 		ApprovalPolicy:     "auto",
@@ -960,7 +967,7 @@ func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string,
 		DefaultMaxWallTime: cfg.DefaultMaxWallTimeSeconds,
 		DefaultMaxRetries:  cfg.DefaultMaxRetries,
 		NoLearning:         noLearning,
-	}, st)
+	}, outcomes)
 }
 
 func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.ContextCompiler {

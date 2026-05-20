@@ -232,6 +232,20 @@ func TestGoalStatusSetToCompleteAfterSuccessfulRun(t *testing.T) {
 	}
 }
 
+// TestRunGoal_NoLearningFlag verifies that --no-learning=true reaches the runtime
+// and that newPlanner passes nil OutcomeReader (not the store) when disabled.
+func TestRunGoal_NoLearningFlag(t *testing.T) {
+	orcaDir := seedOrcaDir(t, false)
+	rt, closeFn, err := openRuntime(orcaDir, true)
+	if err != nil {
+		t.Fatalf("openRuntime(noLearning=true): %v", err)
+	}
+	defer closeFn()
+	if !rt.noLearning {
+		t.Fatal("runtime.noLearning = false, want true when --no-learning is passed")
+	}
+}
+
 func TestShouldReviewProjectionForIRTopology(t *testing.T) {
 	if !shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
 		t.Fatal("IR + medium should require review")

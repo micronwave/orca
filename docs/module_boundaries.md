@@ -325,8 +325,9 @@ Control loop (orca.md §6):
 
 ```
 1.  intent_compiler.Compile(rawIntent)
-1a. reconciler.FreshnessCheck(goalID)                       [Phase 3.6 wiring]
 2.  verifier_engine.ProposeObligations(goalID)               [orca.md §6 step 3]
+    ── for each planning iteration (loop) ──────────────────────────────────────
+1a. reconciler.FreshnessCheck(goalID)                       [Phase 3.6 wiring]
 3.  obligation_planner.Plan(ctx, goalID)   → PlanResult{CapsuleIDs, Topology, DecisionID}
     orchestrator emits topology_selected(PlanResult.Topology, PlanResult.DecisionID)
 4.  projector.CompileHumanSummary(capsuleID) → HumanSummaryProjection
