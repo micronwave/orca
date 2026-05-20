@@ -213,6 +213,9 @@ Both `Execute` (sidecar) and `ExtractFromTranscript` paths must produce
 structurally equivalent `AgentSidecarOutput`. Downstream consumers must not be
 able to distinguish which path was used. `SidecarUsed` in `RunResult` is for
 observability only; it must not drive different downstream logic. orca.md §8.
+Runner adapters may preserve evidence reuse metadata from sidecar output as
+artifact fields, but they must not query reusable evidence or skip agent
+execution based on reusable evidence. Evidence reuse is verifier-owned.
 
 ---
 
@@ -220,8 +223,8 @@ observability only; it must not drive different downstream logic. orca.md §8.
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions` (`ProposeObligations`); `PatchArtifact`, `ExecutionCapsule` (scope), `Obligations`, `EvidenceArtifacts` (`Verify`); future reusable evidence lookup |
-| **Writes (store)** | `Obligations` via `SaveObligation` (`ProposeObligations`); `VerifierResult` (`Verify`) |
+| **Reads (store)** | `GoalIR`, `GoalConditions` (`ProposeObligations`); `PatchArtifact`, `ExecutionCapsule` (scope), `Obligations`, `EvidenceArtifacts`, latest `StateSnapshot`, reusable `EvidenceArtifacts` via `LoadReusableEvidenceForObligation` (`Verify`) |
+| **Writes (store)** | `Obligations` via `SaveObligation` (`ProposeObligations`); verifier-owned gate `EvidenceArtifacts`, including reused-reference artifacts; `VerifierResult` (`Verify`) |
 | **Writes (log)** | none directly — store emits `obligation_created` on `SaveObligation`, `verifier_result_created` on `SaveVerifierResult` |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT call** | `store.SaveCapsule`, `store.SaveBudgetRecord`, `store.UpdateObligationStatus` |
@@ -240,7 +243,7 @@ not create new evidence by running agents.
 
 | | |
 |---|---|
-| **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence`, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule`, `BudgetRecords` via `LoadBudgetForGoal` |
+| **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule`, `BudgetRecords` via `LoadBudgetForGoal` |
 | **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; future topology outcomes via `SaveTopologyOutcome` |
 | **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
