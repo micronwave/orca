@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,28 @@ import (
 
 type fakeGateRunner struct {
 	results map[string]gateResult
+}
+
+func TestEvidenceContentHashIsTruncatedHex(t *testing.T) {
+	got := evidenceContentHash(
+		schema.EvidenceTestResult,
+		"go test ./...",
+		".",
+		0,
+		"ok",
+		[]string{"OB-2", "OB-1"},
+		"G-1",
+		"SNAP-1",
+	)
+	if len(got) != 16 {
+		t.Fatalf("content hash length = %d, want 16", len(got))
+	}
+	if _, err := hex.DecodeString(got); err != nil {
+		t.Fatalf("content hash %q is not hex: %v", got, err)
+	}
+	if strings.Contains(got, ":") {
+		t.Fatalf("content hash %q must not contain a prefix or path separator", got)
+	}
 }
 
 type gateResult struct {

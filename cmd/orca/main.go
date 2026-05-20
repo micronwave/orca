@@ -212,7 +212,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log eventlo
 		projector:      newProjector(st, cfg.Verifier),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
-		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters),
+		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, noLearning),
 		reconciler:     newReconciler(st, log, noLearning),
 	}, nil
 }
@@ -982,11 +982,12 @@ func newBudgetController(log eventlog.EventLog, cfg config.BudgetConfig) budget.
 	return budget.New(log)
 }
 
-func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg config.AdapterConfig) runner.CapsuleRunner {
-	return runner.New(
+func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg config.AdapterConfig, noLearning bool) runner.CapsuleRunner {
+	return runner.NewWithConfig(
 		st,
 		log,
 		orcaDir,
+		runner.Config{NoLearning: noLearning},
 		codex.New(orcaDir, cfg.CodexPath),
 		claude.New(orcaDir, cfg.ClaudePath),
 	)

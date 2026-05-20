@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,17 @@ func TestRunGoal_NoLearningFlag(t *testing.T) {
 	defer closeFn()
 	if !rt.noLearning {
 		t.Fatal("runtime.noLearning = false, want true when --no-learning is passed")
+	}
+	runnerValue := reflect.ValueOf(rt.runner)
+	if runnerValue.Kind() != reflect.Pointer || runnerValue.IsNil() {
+		t.Fatalf("runtime runner = %T, want non-nil pointer", rt.runner)
+	}
+	field := runnerValue.Elem().FieldByName("noLearning")
+	if !field.IsValid() || field.Kind() != reflect.Bool {
+		t.Fatalf("runtime runner %T has no noLearning bool field", rt.runner)
+	}
+	if !field.Bool() {
+		t.Fatal("runner.noLearning = false, want true when --no-learning is passed")
 	}
 }
 

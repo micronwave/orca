@@ -855,7 +855,7 @@ func evidenceContentHash(
 		goalID,
 		snapshotID,
 	}, "\x00")))
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {
