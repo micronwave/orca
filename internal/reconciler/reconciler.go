@@ -49,6 +49,8 @@ package reconciler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +60,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/eventlog"
+	"github.com/micronwave/orca/internal/failurehistory"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -95,14 +98,22 @@ type Reconciler interface {
 	FreshnessCheck(ctx context.Context, goalID string) error
 }
 
+// Config configures the Reconciler.
+type Config struct {
+	// NoLearning disables topology outcome recording. When true, Reconcile does
+	// not write TopologyOutcomeRecords to the store. orca.md §13.
+	NoLearning bool
+}
+
 type service struct {
-	store store.ArtifactStore
-	log   eventlog.EventLog
+	store      store.ArtifactStore
+	log        eventlog.EventLog
+	noLearning bool
 }
 
 // New returns the default Reconciler implementation.
-func New(st store.ArtifactStore, log eventlog.EventLog) Reconciler {
-	return &service{store: st, log: log}
+func New(st store.ArtifactStore, log eventlog.EventLog, cfg Config) Reconciler {
+	return &service{store: st, log: log, noLearning: cfg.NoLearning}
 }
 
 // ReconcileResult summarizes the reconciler's decision for one patch.
@@ -289,6 +300,11 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 			return ReconcileResult{}, err
 		}
 		result.FollowUpObligationIDs = followUps
+		if actions, err := s.recommendedFailureActions(ctx, patch.CapsuleID); err != nil {
+			return ReconcileResult{}, err
+		} else if len(actions) > 0 {
+			result.BlockingReason = strings.TrimSpace(result.BlockingReason + "; recommended next action: " + strings.Join(actions, "; "))
+		}
 	}
 
 	if err := s.saveBudgetRecords(ctx, goal.GoalID, patch, vr, updatedStatuses, result.PatchAccepted, now); err != nil {
@@ -322,6 +338,10 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 		CreatedAt:   now,
 	}); err != nil {
 		return ReconcileResult{}, fmt.Errorf("reconciler: save snapshot: %w", err)
+	}
+
+	if err := s.saveTopologyOutcome(ctx, goal.GoalID, patch, loadedObligations, updatedStatuses, result.PatchAccepted, now); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	if result.PatchAccepted {
@@ -716,19 +736,35 @@ func (s *service) createFollowUpObligations(ctx context.Context, capsuleID strin
 	conditionID := source[0].GoalConditionID
 	risk := source[0].RiskLevel
 	var ids []string
+	seenSignatures := make(map[string]bool, len(failures))
 	for _, failure := range failures {
-		id := "OB-FOLLOWUP-" + failure.FailureID
+		signature := failurehistory.NormalizeSignature(failure.ErrorSignature)
+		if signature == "" {
+			signature = failurehistory.NormalizeSignature(failure.Summary)
+		}
+		if signature == "" {
+			signature = failure.FailureID
+		}
+		if seenSignatures[signature] {
+			continue
+		}
+		seenSignatures[signature] = true
+		id := "OB-FOLLOWUP-SIG-" + shortSignatureHash(signature)
 		if _, err := s.store.LoadObligation(ctx, id); err == nil {
 			ids = append(ids, id)
 			continue
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("reconciler: check follow-up obligation %s: %w", id, err)
 		}
+		description := "address recurring failure: " + failure.Summary
+		if action := strings.TrimSpace(failure.RecommendedNextAction); action != "" {
+			description += "; recommended next action: " + action
+		}
 		if err := s.store.SaveObligation(ctx, &schema.Obligation{
 			ObligationID:     id,
 			GoalConditionID:  conditionID,
-			Description:      "address failure: " + failure.Summary,
-			EvidenceRequired: []string{string(failure.FailureType)},
+			Description:      description,
+			EvidenceRequired: evidenceRequiredForFailure(failure.FailureType),
 			Blocking:         true,
 			RiskLevel:        risk,
 			Status:           schema.ObligationOpen,
@@ -738,6 +774,46 @@ func (s *service) createFollowUpObligations(ctx context.Context, capsuleID strin
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func shortSignatureHash(signature string) string {
+	sum := sha256.Sum256([]byte(signature))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// evidenceRequiredForFailure maps a FailureType to the EvidenceType strings
+// that a follow-up obligation must require so that the verifier can satisfy it.
+func evidenceRequiredForFailure(ft schema.FailureType) []string {
+	switch ft {
+	case schema.FailureLint:
+		return []string{string(schema.EvidenceLintResult)}
+	case schema.FailureTypecheck:
+		return []string{string(schema.EvidenceTypecheckResult)}
+	case schema.FailureMerge, schema.FailurePolicy:
+		return []string{string(schema.EvidenceDiffRiskReport)}
+	default:
+		// FailureTest, FailureRuntime, FailureInfra, FailureAgent, unknown
+		return []string{string(schema.EvidenceTestResult)}
+	}
+}
+
+func (s *service) recommendedFailureActions(ctx context.Context, capsuleID string) ([]string, error) {
+	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
+	if err != nil {
+		return nil, fmt.Errorf("reconciler: load failure recommendations for capsule %s: %w", capsuleID, err)
+	}
+	actions := make([]string, 0, len(failures))
+	seen := make(map[string]bool, len(failures))
+	for _, failure := range failures {
+		action := strings.TrimSpace(failure.RecommendedNextAction)
+		if action == "" || seen[action] {
+			continue
+		}
+		seen[action] = true
+		actions = append(actions, action)
+	}
+	sort.Strings(actions)
+	return actions, nil
 }
 
 func (s *service) saveBudgetRecords(
@@ -996,6 +1072,81 @@ func recommendationBlockingReason(vr *schema.VerifierResult) string {
 
 func newArtifactID(prefix, patchID string, now time.Time) string {
 	return prefix + "-" + patchID + "-" + strconv.FormatInt(now.UnixNano(), 10)
+}
+
+func (s *service) saveTopologyOutcome(
+	ctx context.Context,
+	goalID string,
+	patch *schema.PatchArtifact,
+	loadedObligations []*schema.Obligation,
+	updatedStatuses map[string]schema.ObligationStatus,
+	patchAccepted bool,
+	now time.Time,
+) error {
+	if s.noLearning {
+		return nil
+	}
+	capsule, err := s.store.LoadCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("reconciler: load capsule %s for topology outcome: %w", patch.CapsuleID, err)
+	}
+	if capsule.TopologyDecisionID == "" {
+		return nil
+	}
+	decision, err := s.store.LoadDecision(ctx, capsule.TopologyDecisionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("reconciler: load decision %s for topology outcome: %w", capsule.TopologyDecisionID, err)
+	}
+	topology := schema.Topology(decision.Decision)
+
+	obligationsMet := 0
+	for _, status := range updatedStatuses {
+		if status == schema.ObligationSatisfied || status == schema.ObligationWaived {
+			obligationsMet++
+		}
+	}
+
+	maxRisk := schema.RiskLow
+	for _, obl := range loadedObligations {
+		switch obl.RiskLevel {
+		case schema.RiskHigh:
+			maxRisk = schema.RiskHigh
+		case schema.RiskMedium:
+			if maxRisk != schema.RiskHigh {
+				maxRisk = schema.RiskMedium
+			}
+		}
+	}
+
+	failures, err := s.store.LoadFailuresForCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		return fmt.Errorf("reconciler: load failures for topology outcome %s: %w", patch.CapsuleID, err)
+	}
+
+	outcomeID := newArtifactID("TOP-OUT", patch.PatchID, now)
+	record := &schema.TopologyOutcomeRecord{
+		OutcomeID:       outcomeID,
+		GoalID:          goalID,
+		Topology:        topology,
+		ObligationCount: len(loadedObligations),
+		MaxRiskLevel:    maxRisk,
+		AffectedFiles:   append([]string(nil), patch.ChangedFiles...),
+		PatchAccepted:   patchAccepted,
+		ObligationsMet:  obligationsMet,
+		TokensSpent:     patch.TokensUsed,
+		FailureCount:    len(failures),
+		RecordedAt:      now,
+	}
+	if err := s.store.SaveTopologyOutcome(ctx, record); err != nil {
+		return fmt.Errorf("reconciler: save topology outcome %s: %w", outcomeID, err)
+	}
+	return nil
 }
 
 func normalizedSet(values []string) map[string]bool {

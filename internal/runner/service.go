@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/eventlog"
+	"github.com/micronwave/orca/internal/failurehistory"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/orcapath"
 	"github.com/micronwave/orca/internal/schema"
@@ -20,14 +21,25 @@ import (
 )
 
 type service struct {
-	store    store.ArtifactStore
-	log      eventlog.EventLog
-	orcaDir  string
-	adapters map[schema.AgentType]Adapter
+	store      store.ArtifactStore
+	log        eventlog.EventLog
+	orcaDir    string
+	noLearning bool
+	adapters   map[schema.AgentType]Adapter
+}
+
+type Config struct {
+	NoLearning bool
 }
 
 // New returns the default CapsuleRunner implementation.
 func New(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, adapters ...Adapter) CapsuleRunner {
+	return NewWithConfig(st, log, orcaDir, Config{}, adapters...)
+}
+
+// NewWithConfig returns the default CapsuleRunner implementation with
+// runner-local options.
+func NewWithConfig(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg Config, adapters ...Adapter) CapsuleRunner {
 	registry := make(map[schema.AgentType]Adapter, len(adapters))
 	for _, adapter := range adapters {
 		if adapter == nil {
@@ -36,10 +48,11 @@ func New(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, adapters
 		registry[adapter.AgentType()] = adapter
 	}
 	return &service{
-		store:    st,
-		log:      log,
-		orcaDir:  strings.TrimSpace(orcaDir),
-		adapters: registry,
+		store:      st,
+		log:        log,
+		orcaDir:    strings.TrimSpace(orcaDir),
+		noLearning: cfg.NoLearning,
+		adapters:   registry,
 	}
 }
 
@@ -259,6 +272,9 @@ func (s *service) failCapsule(
 		FailureType:     schema.FailureInfra,
 		Summary:         runErr.Error(),
 		ErrorSignature:  errorSignature(runErr),
+	}
+	if err := failurehistory.Prepare(ctx, s.store, goalID, failure, s.noLearning); err != nil {
+		return "", fmt.Errorf("runner: prepare failure history for capsule %s: %w", capsule.CapsuleID, err)
 	}
 	if err := s.store.SaveFailure(ctx, failure); err != nil {
 		return "", fmt.Errorf("runner: save failure for capsule %s: %w", capsule.CapsuleID, err)

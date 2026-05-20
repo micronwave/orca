@@ -52,7 +52,7 @@ func TestReconcileRejectsBlockingObligationWithoutEvidenceIDs(t *testing.T) {
 		saveEvidence: false,
 	})
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestReconcileRejectsAbsentEvidenceArtifact(t *testing.T) {
 		saveEvidence: false,
 	})
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestReconcileRejectsClaimedBlockingObligationWithoutVerdict(t *testing.T) {
 		omitVerdict:  true,
 	})
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestReconcileAcceptsWhenNonBlockingObligationHasGhostEvidence(t *testing.T)
 		t.Fatalf("SaveVerifierResult: %v", err)
 	}
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestReconcileAcceptsPatchAndSnapshotsLastPreSnapshotEvent(t *testing.T) {
 		saveEvidence: true,
 	})
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestReconcileAcceptedPatchMarksOverlappingVerifiedClaimsStale(t *testing.T)
 		t.Fatalf("SaveClaim new: %v", err)
 	}
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestReconcileClaimVerificationSetsLastValidatedAgainst(t *testing.T) {
 		t.Fatalf("SaveClaim: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	claim, err := env.st.LoadClaim(env.ctx, "CL-CLAIMVAL")
@@ -435,7 +435,7 @@ func TestReconcileExplicitContradictionMarksBothClaimsContested(t *testing.T) {
 		t.Fatalf("SaveClaim new: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	oldClaim, err := env.st.LoadClaim(env.ctx, "CL-CONTEST-OLD")
@@ -488,7 +488,7 @@ func TestReconcileExplicitInvalidationMarksOnlyTargetInvalidated(t *testing.T) {
 		t.Fatalf("SaveClaim new: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	oldClaim, err := env.st.LoadClaim(env.ctx, "CL-INVALIDATE-OLD")
@@ -533,7 +533,7 @@ func TestReconcileVerifierResultInvalidatesTargetClaim(t *testing.T) {
 		t.Fatalf("SaveClaim target: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	target, err := env.st.LoadClaim(env.ctx, "CL-VRINVAL-TARGET")
@@ -582,7 +582,7 @@ func TestReconcileDecisionInvalidatesTargetClaim(t *testing.T) {
 		t.Fatalf("SaveDecision: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	target, err := env.st.LoadClaim(env.ctx, "CL-DECINVAL-TARGET")
@@ -633,7 +633,7 @@ func TestReconcileVerifiedClaimWithEmptyLVAGetsSnapshotSet(t *testing.T) {
 		t.Fatalf("SaveClaim: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	claim, err := env.st.LoadClaim(env.ctx, "CL-EMPTYSNAP")
@@ -667,7 +667,7 @@ func TestReconcileOverlapAloneDoesNotContestClaims(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveClaim old: %v", err)
 	}
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	claim, err := env.st.LoadClaim(env.ctx, "CL-NOCONTEST-OLD")
@@ -738,7 +738,7 @@ func TestFreshnessCheckMarksClaimsStaleAfterInterveningAcceptedPatch(t *testing.
 		t.Fatalf("SaveSnapshot current: %v", err)
 	}
 
-	if err := New(env.st, env.log).FreshnessCheck(env.ctx, ids.goalID); err != nil {
+	if err := New(env.st, env.log, Config{}).FreshnessCheck(env.ctx, ids.goalID); err != nil {
 		t.Fatalf("FreshnessCheck: %v", err)
 	}
 	stale, err := env.st.LoadClaim(env.ctx, "CL-FRESH-STALE")
@@ -785,7 +785,7 @@ func TestReconcileRejectedPatchDoesNotInvalidateHistoricalClaims(t *testing.T) {
 		t.Fatalf("SaveClaim old: %v", err)
 	}
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -841,7 +841,7 @@ func TestReconcileInvalidatesClaimsOnSymbolOverlap(t *testing.T) {
 		t.Fatalf("SaveClaim new: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	claim, err := env.st.LoadClaim(env.ctx, "CL-OLD-STALESYM")
@@ -863,7 +863,7 @@ func TestReconcile_RecommendedHumanReviewRequiresGate(t *testing.T) {
 		recommendation:    "reviewer identified unresolved risk claim",
 	})
 
-	result, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID)
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -878,6 +878,67 @@ func TestReconcile_RecommendedHumanReviewRequiresGate(t *testing.T) {
 	}
 }
 
+func TestReconcile_DeduplicatesFollowUpsByNormalizedSignatureAndUsesRecommendation(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "SIGFOLLOW",
+		evidenceIDs:  []string{"EV-SIGFOLLOW-MISSING"},
+		saveEvidence: false,
+	})
+	signature := "go test ./...\nfailure"
+	for _, failure := range []*schema.FailureFingerprint{
+		{
+			FailureID:             "FAIL-SIGFOLLOW-1",
+			SourceCapsuleID:       ids.capsuleID,
+			FailureType:           schema.FailureTest,
+			Summary:               "test gate failed first",
+			ErrorSignature:        signature,
+			RecommendedNextAction: "rerun the targeted test after fixing the regression",
+		},
+		{
+			FailureID:             "FAIL-SIGFOLLOW-2",
+			SourceCapsuleID:       ids.capsuleID,
+			FailureType:           schema.FailureTest,
+			Summary:               "test gate failed second",
+			ErrorSignature:        " GO TEST ./...\n\nFAILURE ",
+			RecommendedNextAction: "rerun the targeted test after fixing the regression",
+		},
+	} {
+		if err := env.st.SaveFailure(env.ctx, failure); err != nil {
+			t.Fatalf("SaveFailure %s: %v", failure.FailureID, err)
+		}
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted=true, want rejection")
+	}
+	wantID := "OB-FOLLOWUP-SIG-" + shortSignatureHash(signature)
+	if len(result.FollowUpObligationIDs) != 1 || result.FollowUpObligationIDs[0] != wantID {
+		t.Fatalf("FollowUpObligationIDs = %v, want [%s]", result.FollowUpObligationIDs, wantID)
+	}
+	followUp, err := env.st.LoadObligation(env.ctx, wantID)
+	if err != nil {
+		t.Fatalf("LoadObligation follow-up: %v", err)
+	}
+	if !strings.Contains(followUp.Description, "rerun the targeted test") {
+		t.Fatalf("follow-up Description = %q, want recommended next action", followUp.Description)
+	}
+	if len(followUp.EvidenceRequired) != 1 || followUp.EvidenceRequired[0] != string(schema.EvidenceTestResult) {
+		t.Fatalf("follow-up EvidenceRequired = %v, want [%s]", followUp.EvidenceRequired, string(schema.EvidenceTestResult))
+	}
+	decision, err := env.st.LoadDecision(env.ctx, result.DecisionID)
+	if err != nil {
+		t.Fatalf("LoadDecision: %v", err)
+	}
+	if !strings.Contains(decision.Rationale, "rerun the targeted test") {
+		t.Fatalf("decision Rationale = %q, want recommended next action", decision.Rationale)
+	}
+}
+
 func TestReconcile_WritesPerObligationBudgetRecord(t *testing.T) {
 	env := newTestEnv(t)
 	ids := saveReconcileScenario(t, env, scenarioOptions{
@@ -886,7 +947,7 @@ func TestReconcile_WritesPerObligationBudgetRecord(t *testing.T) {
 		saveEvidence: true,
 	})
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	records, err := env.st.LoadBudgetForGoal(env.ctx, ids.goalID)
@@ -927,7 +988,7 @@ func TestReconcile_BudgetCountsReusedEvidenceByReusedFromID(t *testing.T) {
 		evidenceReusedFromID: "EV-BUDREUSE-SOURCE",
 	})
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	records, err := env.st.LoadBudgetForGoal(env.ctx, ids.goalID)
@@ -1047,7 +1108,7 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 		t.Fatalf("SaveVerifierResult: %v", err)
 	}
 
-	if _, err := New(env.st, env.log).Reconcile(env.ctx, patchID); err != nil {
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
@@ -1212,4 +1273,458 @@ func pickRecommendationRationale(rationale string) string {
 		return "tests passed"
 	}
 	return rationale
+}
+
+func TestReconcile_SavesTopologyOutcomeOnAcceptedPatch(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-TOPOUT-ACCEPT"
+		condID  = "GC-TOPOUT-ACCEPT"
+		oblID   = "OB-TOPOUT-ACCEPT"
+		capsID  = "CAP-TOPOUT-ACCEPT"
+		patchID = "PATCH-TOPOUT-ACCEPT"
+		vrID    = "VR-TOPOUT-ACCEPT"
+		evID    = "EV-TOPOUT-ACCEPT"
+		decID   = "DEC-TOPOUT-ACCEPT"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "topology outcome acceptance test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskMedium,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskMedium,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologyImplementerReviewer),
+		Rationale:  "medium risk -> implementer_reviewer",
+		MadeBy:     "system",
+		RelatedIDs: []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsID,
+		ObligationIDs:      []string{oblID},
+		Agent:              schema.AgentCodex,
+		Role:               schema.RoleExecutor,
+		State:              schema.CapsuleStateCompleted,
+		TopologyDecisionID: decID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: evID,
+		Type:       schema.EvidenceTestResult,
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ChangedFiles:         []string{"internal/foo/service.go"},
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+		TokensUsed:           150,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{evID},
+		}},
+		RecommendedAction:       schema.ActionAccept,
+		RecommendationRationale: "tests passed",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted=false: %s", result.BlockingReason)
+	}
+
+	outcomes, err := env.st.LoadTopologyOutcomesForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("topology outcomes = %d, want 1", len(outcomes))
+	}
+	o := outcomes[0]
+	if o.Topology != schema.TopologyImplementerReviewer {
+		t.Errorf("Topology = %s, want %s", o.Topology, schema.TopologyImplementerReviewer)
+	}
+	if !o.PatchAccepted {
+		t.Errorf("PatchAccepted = false, want true")
+	}
+	if o.ObligationsMet != 1 {
+		t.Errorf("ObligationsMet = %d, want 1", o.ObligationsMet)
+	}
+	if o.TokensSpent != 150 {
+		t.Errorf("TokensSpent = %d, want 150", o.TokensSpent)
+	}
+	if o.MaxRiskLevel != schema.RiskMedium {
+		t.Errorf("MaxRiskLevel = %s, want %s", o.MaxRiskLevel, schema.RiskMedium)
+	}
+	if o.ObligationCount != 1 {
+		t.Errorf("ObligationCount = %d, want 1", o.ObligationCount)
+	}
+	if len(o.AffectedFiles) != 1 || o.AffectedFiles[0] != "internal/foo/service.go" {
+		t.Errorf("AffectedFiles = %v, want [internal/foo/service.go]", o.AffectedFiles)
+	}
+	if o.GoalID != goalID {
+		t.Errorf("GoalID = %s, want %s", o.GoalID, goalID)
+	}
+}
+
+func TestReconcile_SavesTopologyOutcomeOnRejectedPatch(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-TOPOUT-REJECT"
+		condID  = "GC-TOPOUT-REJECT"
+		oblID   = "OB-TOPOUT-REJECT"
+		capsID  = "CAP-TOPOUT-REJECT"
+		patchID = "PATCH-TOPOUT-REJECT"
+		vrID    = "VR-TOPOUT-REJECT"
+		decID   = "DEC-TOPOUT-REJECT"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "topology outcome rejection test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk -> single",
+		MadeBy:     "system",
+		RelatedIDs: []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsID,
+		ObligationIDs:      []string{oblID},
+		Agent:              schema.AgentCodex,
+		Role:               schema.RoleExecutor,
+		State:              schema.CapsuleStateCompleted,
+		TopologyDecisionID: decID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// no evidence ID — will trigger rejection
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  nil,
+		}},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("expected patch rejection (no evidence IDs)")
+	}
+
+	outcomes, err := env.st.LoadTopologyOutcomesForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("topology outcomes = %d, want 1", len(outcomes))
+	}
+	o := outcomes[0]
+	if o.Topology != schema.TopologySingle {
+		t.Errorf("Topology = %s, want %s", o.Topology, schema.TopologySingle)
+	}
+	if o.PatchAccepted {
+		t.Error("PatchAccepted = true, want false")
+	}
+}
+
+func TestReconcile_NoLearningSkipsTopologyOutcome(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-TOPOUT-NOLEARN"
+		condID  = "GC-TOPOUT-NOLEARN"
+		oblID   = "OB-TOPOUT-NOLEARN"
+		capsID  = "CAP-TOPOUT-NOLEARN"
+		patchID = "PATCH-TOPOUT-NOLEARN"
+		vrID    = "VR-TOPOUT-NOLEARN"
+		evID    = "EV-TOPOUT-NOLEARN"
+		decID   = "DEC-TOPOUT-NOLEARN"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "topology outcome no-learning test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk -> single",
+		MadeBy:     "system",
+		RelatedIDs: []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsID,
+		ObligationIDs:      []string{oblID},
+		Agent:              schema.AgentCodex,
+		Role:               schema.RoleExecutor,
+		State:              schema.CapsuleStateCompleted,
+		TopologyDecisionID: decID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: evID,
+		Type:       schema.EvidenceTestResult,
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{evID},
+		}},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	if _, err := New(env.st, env.log, Config{NoLearning: true}).Reconcile(env.ctx, patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	outcomes, err := env.st.LoadTopologyOutcomesForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(outcomes) != 0 {
+		t.Fatalf("topology outcomes = %d, want 0 when NoLearning=true", len(outcomes))
+	}
+}
+
+// TestReconcile_TopologyOutcomeSkippedWhenNoTopologyDecisionID verifies that
+// saveTopologyOutcome is a safe no-op when the capsule has no TopologyDecisionID
+// (i.e. the goal was not routed through the planner's topology decision path).
+// This happens in direct-run scenarios where a capsule is created without
+// a prior topology decision record.
+func TestReconcile_TopologyOutcomeSkippedWhenNoTopologyDecisionID(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-TOPOUT-NODEC"
+		condID  = "GC-TOPOUT-NODEC"
+		oblID   = "OB-TOPOUT-NODEC"
+		capsID  = "CAP-TOPOUT-NODEC"
+		patchID = "PATCH-TOPOUT-NODEC"
+		vrID    = "VR-TOPOUT-NODEC"
+		evID    = "EV-TOPOUT-NODEC"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "topology outcome no-decision-id skip test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "implement feature",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	// Capsule has no TopologyDecisionID — not routed via topology planning.
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsID,
+		ObligationIDs:      []string{oblID},
+		Agent:              schema.AgentCodex,
+		Role:               schema.RoleExecutor,
+		State:              schema.CapsuleStateCompleted,
+		TopologyDecisionID: "",
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: evID,
+		Type:       schema.EvidenceTestResult,
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		ChangedFiles:         []string{"internal/foo/foo.go"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{evID},
+		}},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	// Reconcile must succeed — the missing TopologyDecisionID causes a silent
+	// skip of topology outcome recording, not an error.
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	outcomes, err := env.st.LoadTopologyOutcomesForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(outcomes) != 0 {
+		t.Fatalf("topology outcomes = %d, want 0 when capsule has no TopologyDecisionID", len(outcomes))
+	}
 }

@@ -289,6 +289,26 @@ func TestVerify_failsBlockingObligationWhenTestGateFails(t *testing.T) {
 	if len(result.BlockingFailures) == 0 {
 		t.Fatal("BlockingFailures is empty, want at least one failure")
 	}
+	if len(result.FailureIDs) != 1 {
+		t.Fatalf("FailureIDs = %v, want one verifier gate failure", result.FailureIDs)
+	}
+	failure, err := st.LoadFailure(ctx, result.FailureIDs[0])
+	if err != nil {
+		t.Fatalf("LoadFailure: %v", err)
+	}
+	if failure.SourceCapsuleID != "CAP-fail" || failure.FailureType != schema.FailureTest {
+		t.Fatalf("failure = %+v, want test failure for capsule CAP-fail", failure)
+	}
+	if failure.ErrorSignature != "go test ./...\ntest gate \"go_test\" failed" {
+		t.Fatalf("ErrorSignature = %q, want normalized gate signature", failure.ErrorSignature)
+	}
+	failuresForCapsule, err := st.LoadFailuresForCapsule(ctx, "CAP-fail")
+	if err != nil {
+		t.Fatalf("LoadFailuresForCapsule: %v", err)
+	}
+	if len(failuresForCapsule) != 1 || failuresForCapsule[0].FailureID != result.FailureIDs[0] {
+		t.Fatalf("LoadFailuresForCapsule = %+v, want verifier failure", failuresForCapsule)
+	}
 }
 
 func TestVerify_ReusesMatchingGateEvidenceForCurrentSnapshot(t *testing.T) {

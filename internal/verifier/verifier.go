@@ -16,6 +16,7 @@
 //	                  EvidenceArtifacts via LoadEvidenceForObligation and LoadEvidence,
 //	                  ClaimArtifacts via LoadClaim (for supplemental review signals)
 //	Writes (store):   Obligations via SaveObligation (ProposeObligations only),
+//	                  verifier-owned gate FailureFingerprints via SaveFailure,
 //	                  VerifierResult via SaveVerifierResult (Verify only)
 //	Writes (log):     none directly — the ArtifactStore implementation emits
 //	                  obligation_created on SaveObligation,
@@ -44,6 +45,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/config"
+	"github.com/micronwave/orca/internal/failurehistory"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
@@ -232,6 +234,7 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		createdEvidence  []*schema.EvidenceArtifact
 		warnings         []string
 		blockingFailures []string
+		failureIDs       []string
 	)
 
 	if strings.TrimSpace(patch.BaseCommit) == "" {
@@ -249,6 +252,13 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		return nil, err
 	}
 	createdEvidence = append(createdEvidence, scopeEvidence)
+	if scopeExitCode != 0 {
+		failureID, err := s.saveGateFailure(ctx, goalID, capsule.CapsuleID, schema.FailurePolicy, "scope check", scopeSummary, patch.ChangedFiles)
+		if err != nil {
+			return nil, err
+		}
+		failureIDs = append(failureIDs, failureID)
+	}
 
 	testGateIndex := -1
 	for i, gate := range s.config.Gates {
@@ -269,7 +279,13 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		}
 		createdEvidence = append(createdEvidence, evidence...)
 		if gate.Blocking && exitCode != 0 {
-			blockingFailures = append(blockingFailures, fmt.Sprintf("static gate %q failed", gate.Name))
+			summary := fmt.Sprintf("static gate %q failed", gate.Name)
+			blockingFailures = append(blockingFailures, summary)
+			failureID, err := s.saveGateFailure(ctx, goalID, capsule.CapsuleID, failureTypeForEvidence(evidenceType), gate.Command, summary, patch.ChangedFiles)
+			if err != nil {
+				return nil, err
+			}
+			failureIDs = append(failureIDs, failureID)
 		}
 	}
 
@@ -281,7 +297,13 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		}
 		createdEvidence = append(createdEvidence, evidence...)
 		if testGate.Blocking && exitCode != 0 {
-			blockingFailures = append(blockingFailures, fmt.Sprintf("test gate %q failed", testGate.Name))
+			summary := fmt.Sprintf("test gate %q failed", testGate.Name)
+			blockingFailures = append(blockingFailures, summary)
+			failureID, err := s.saveGateFailure(ctx, goalID, capsule.CapsuleID, schema.FailureTest, testGate.Command, summary, patch.ChangedFiles)
+			if err != nil {
+				return nil, err
+			}
+			failureIDs = append(failureIDs, failureID)
 		}
 	} else {
 		warnings = append(warnings, "targeted tests stage: no test gate configured")
@@ -354,6 +376,7 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		CapsuleID:               patch.CapsuleID,
 		ObligationResults:       obligationResults,
 		BlockingFailures:        blockingFailures,
+		FailureIDs:              uniqueStrings(failureIDs),
 		Warnings:                warnings,
 		RecommendedAction:       recommendedAction,
 		RecommendationRationale: recommendationRationale,
@@ -567,6 +590,45 @@ func hasFailedEvidence(evidence []*schema.EvidenceArtifact) bool {
 		}
 	}
 	return false
+}
+
+func (s *service) saveGateFailure(
+	ctx context.Context,
+	goalID string,
+	capsuleID string,
+	failureType schema.FailureType,
+	command string,
+	summary string,
+	changedFiles []string,
+) (string, error) {
+	failure := &schema.FailureFingerprint{
+		FailureID:       idgen.New("FAIL"),
+		SourceCapsuleID: capsuleID,
+		FailureType:     failureType,
+		Summary:         summary,
+		AffectedFiles:   append([]string(nil), changedFiles...),
+		ErrorSignature:  command + "\n" + summary,
+	}
+	if err := failurehistory.Prepare(ctx, s.store, goalID, failure, s.noLearning); err != nil {
+		return "", fmt.Errorf("verifier: prepare gate failure history for capsule %s: %w", capsuleID, err)
+	}
+	if err := s.store.SaveFailure(ctx, failure); err != nil {
+		return "", fmt.Errorf("verifier: save gate failure %s: %w", failure.FailureID, err)
+	}
+	return failure.FailureID, nil
+}
+
+func failureTypeForEvidence(evidenceType schema.EvidenceType) schema.FailureType {
+	switch evidenceType {
+	case schema.EvidenceTestResult:
+		return schema.FailureTest
+	case schema.EvidenceTypecheckResult:
+		return schema.FailureTypecheck
+	case schema.EvidenceLintResult:
+		return schema.FailureLint
+	default:
+		return schema.FailurePolicy
+	}
 }
 
 func uniqueStrings(values []string) []string {

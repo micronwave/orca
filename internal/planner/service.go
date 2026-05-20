@@ -26,16 +26,19 @@ type service struct {
 	store      store.ArtifactStore
 	config     Config
 	classifier TopologyClassifier
+	outcomes   OutcomeReader // may be nil; nil disables historical routing hints
 }
 
 type topologyClassifier struct{}
 
 // New returns the default ObligationPlanner implementation.
-func New(st store.ArtifactStore, cfg Config) ObligationPlanner {
+// outcomes may be nil; when nil, historical routing hints are disabled.
+func New(st store.ArtifactStore, cfg Config, outcomes OutcomeReader) ObligationPlanner {
 	return &service{
 		store:      st,
 		config:     cfg,
 		classifier: topologyClassifier{},
+		outcomes:   outcomes,
 	}
 }
 
@@ -57,7 +60,8 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	if len(obligations) == 0 {
 		return PlanResult{}, fmt.Errorf("planner: no open obligations for goal %s", goalID)
 	}
-	failures, err := s.store.LoadAllFailures(ctx, goalID)
+	expectedFiles := expectedFilesByObligation(obligations)
+	failures, err := s.loadRelevantFailures(ctx, goalID, expectedFiles)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner: load failures for goal %s: %w", goalID, err)
 	}
@@ -74,7 +78,7 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		Fingerprints:              classifyFingerprints,
 		ApprovalPolicy:            s.config.ApprovalPolicy,
 		BudgetRemaining:           s.config.DefaultMaxTokens,
-		ExpectedFilesByObligation: expectedFilesByObligation(obligations),
+		ExpectedFilesByObligation: expectedFiles,
 		TestsExist:                testsExist(goal, obligations),
 		RequiredTools:             requiredTools(goal, obligations),
 	}
@@ -82,6 +86,13 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	topology, rationale, err := s.classifier.Classify(classifyInput)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner: classify topology: %w", err)
+	}
+
+	if !s.config.NoLearning && s.outcomes != nil {
+		topology, rationale, err = s.applyHistoricalRoutingHint(ctx, topology, rationale, obligations)
+		if err != nil {
+			return PlanResult{}, fmt.Errorf("planner: apply historical routing hint: %w", err)
+		}
 	}
 
 	obligationIDs := make([]string, 0, len(obligations))
@@ -121,6 +132,32 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		DecisionID:        decision.DecisionID,
 		MaxObligationRisk: maxRisk(obligations),
 	}, nil
+}
+
+func (s *service) loadRelevantFailures(ctx context.Context, goalID string, expectedFiles map[string][]string) ([]*schema.FailureFingerprint, error) {
+	files := uniqueExpectedFiles(expectedFiles)
+	if len(files) == 0 {
+		return s.store.LoadAllFailures(ctx, goalID)
+	}
+	fileMatches, err := s.store.LoadFailuresForFiles(ctx, files)
+	if err != nil {
+		return nil, err
+	}
+	goalMatches, err := s.store.LoadAllFailures(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
+	inGoal := make(map[string]bool, len(goalMatches))
+	for _, failure := range goalMatches {
+		inGoal[failure.FailureID] = true
+	}
+	out := make([]*schema.FailureFingerprint, 0, len(fileMatches))
+	for _, failure := range fileMatches {
+		if inGoal[failure.FailureID] {
+			out = append(out, failure)
+		}
+	}
+	return out, nil
 }
 
 func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.Obligation, goal *schema.GoalIR, decisionID string, hints routingHints) []schema.ExecutionCapsule {
@@ -237,12 +274,15 @@ func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string
 		}
 	}
 	for _, failure := range input.Fingerprints {
+		if failure.PriorAttemptCount < 2 {
+			continue
+		}
 		file := "(unknown file)"
 		if len(failure.AffectedFiles) > 0 && strings.TrimSpace(failure.AffectedFiles[0]) != "" {
 			file = failure.AffectedFiles[0]
 		}
 		return schema.TopologyHumanGated,
-			fmt.Sprintf("%s; failure fingerprint %s affects %s -> human_gated", summary, failure.FailureID, file),
+			fmt.Sprintf("%s; failure fingerprint %s has prior_attempt_count=%d and affects %s -> human_gated", summary, failure.FailureID, failure.PriorAttemptCount, file),
 			nil
 	}
 
@@ -339,6 +379,21 @@ func expectedFilesByObligation(obligations []*schema.Obligation) map[string][]st
 		filesByObligation[obligation.ObligationID] = normalizePaths(obligation.ExpectedFiles)
 	}
 	return filesByObligation
+}
+
+func uniqueExpectedFiles(filesByObligation map[string][]string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, files := range filesByObligation {
+		for _, file := range normalizePaths(files) {
+			if file == "" || seen[file] {
+				continue
+			}
+			seen[file] = true
+			out = append(out, file)
+		}
+	}
+	return out
 }
 
 func hasExpectedFileOverlap(filesByObligation map[string][]string) bool {
@@ -577,6 +632,9 @@ func deriveRoutingHints(obligations []*schema.Obligation, failures []*schema.Fai
 	}
 	count := 0
 	for _, failure := range failures {
+		if failure.PriorAttemptCount < 2 {
+			continue
+		}
 		if len(expectedFiles) == 0 {
 			count++
 			continue
@@ -609,3 +667,64 @@ func selectExecutorAgent(hints routingHints) schema.AgentType {
 
 var _ ObligationPlanner = (*service)(nil)
 var _ TopologyClassifier = topologyClassifier{}
+
+const (
+	historicalMinSamples = 3
+	historicalThreshold  = 0.15
+)
+
+// applyHistoricalRoutingHint overrides the classifier's topology to
+// implementer_reviewer when historical outcome data shows its acceptance rate
+// exceeds single's acceptance rate by more than historicalThreshold, with at
+// least historicalMinSamples for each topology at the same risk level.
+// The hint is only applied when the classifier returned single or
+// implementer_reviewer; forced topologies (human_gated, parallel, etc.) are
+// not overridden.
+func (s *service) applyHistoricalRoutingHint(
+	ctx context.Context,
+	topology schema.Topology,
+	rationale string,
+	obligations []*schema.Obligation,
+) (schema.Topology, string, error) {
+	// The hint can only upgrade single → implementer_reviewer.
+	// If the classifier already chose implementer_reviewer, or if the topology
+	// is a forced type (human_gated, parallel, etc.), there is nothing to do.
+	if topology != schema.TopologySingle {
+		return topology, rationale, nil
+	}
+	risk := maxRisk(obligations)
+	irOutcomes, err := s.outcomes.LoadTopologyOutcomes(ctx, schema.TopologyImplementerReviewer, risk)
+	if err != nil {
+		return topology, rationale, fmt.Errorf("load implementer_reviewer outcomes: %w", err)
+	}
+	singleOutcomes, err := s.outcomes.LoadTopologyOutcomes(ctx, schema.TopologySingle, risk)
+	if err != nil {
+		return topology, rationale, fmt.Errorf("load single outcomes: %w", err)
+	}
+	if len(irOutcomes) < historicalMinSamples || len(singleOutcomes) < historicalMinSamples {
+		return topology, rationale, nil
+	}
+	irRate := acceptanceRate(irOutcomes)
+	singleRate := acceptanceRate(singleOutcomes)
+	if irRate > singleRate+historicalThreshold {
+		hint := fmt.Sprintf(
+			"historical routing: implementer_reviewer accepted %.0f%% (n=%d) vs single %.0f%% (n=%d) at risk=%s, threshold +%.0f%% met -> implementer_reviewer",
+			irRate*100, len(irOutcomes), singleRate*100, len(singleOutcomes), risk, historicalThreshold*100,
+		)
+		return schema.TopologyImplementerReviewer, rationale + "; " + hint, nil
+	}
+	return topology, rationale, nil
+}
+
+func acceptanceRate(outcomes []*schema.TopologyOutcomeRecord) float64 {
+	if len(outcomes) == 0 {
+		return 0
+	}
+	accepted := 0
+	for _, o := range outcomes {
+		if o.PatchAccepted {
+			accepted++
+		}
+	}
+	return float64(accepted) / float64(len(outcomes))
+}

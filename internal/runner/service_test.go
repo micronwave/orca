@@ -306,6 +306,79 @@ func TestRunFailureTransitionsCapsuleAndPersistsInfraFailure(t *testing.T) {
 	}
 }
 
+func TestRunFailureAddsPriorAttemptHistoryWithoutOverwriting(t *testing.T) {
+	env := newRunnerEnv(t)
+	firstCapsuleID := saveRunnerScenario(t, env)
+	secondCapsuleID := "CAP-2"
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           secondCapsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-1",
+		AllowedPaths:        []string{"."},
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: 60,
+			MaxRetries:         1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule second: %v", err)
+	}
+
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			return nil, errors.New("adapter exploded")
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	firstResult, firstErr := r.Run(env.ctx, firstCapsuleID)
+	if firstErr == nil {
+		t.Fatal("first Run returned nil error")
+	}
+	secondResult, secondErr := r.Run(env.ctx, secondCapsuleID)
+	if secondErr == nil {
+		t.Fatal("second Run returned nil error")
+	}
+	if len(firstResult.FailureIDs) != 1 || len(secondResult.FailureIDs) != 1 {
+		t.Fatalf("failure IDs first=%v second=%v, want one each", firstResult.FailureIDs, secondResult.FailureIDs)
+	}
+	if firstResult.FailureIDs[0] == secondResult.FailureIDs[0] {
+		t.Fatalf("failure ID was reused: %s", firstResult.FailureIDs[0])
+	}
+	firstFailure, err := env.st.LoadFailure(env.ctx, firstResult.FailureIDs[0])
+	if err != nil {
+		t.Fatalf("LoadFailure first: %v", err)
+	}
+	secondFailure, err := env.st.LoadFailure(env.ctx, secondResult.FailureIDs[0])
+	if err != nil {
+		t.Fatalf("LoadFailure second: %v", err)
+	}
+	if firstFailure.PriorAttemptCount != 0 {
+		t.Fatalf("first PriorAttemptCount = %d, want 0", firstFailure.PriorAttemptCount)
+	}
+	if secondFailure.PriorAttemptCount != 1 {
+		t.Fatalf("second PriorAttemptCount = %d, want 1", secondFailure.PriorAttemptCount)
+	}
+	if len(secondFailure.PriorCapsuleIDs) != 1 || secondFailure.PriorCapsuleIDs[0] != firstCapsuleID {
+		t.Fatalf("second PriorCapsuleIDs = %v, want [%s]", secondFailure.PriorCapsuleIDs, firstCapsuleID)
+	}
+	failuresForSecond, err := env.st.LoadFailuresForCapsule(env.ctx, secondCapsuleID)
+	if err != nil {
+		t.Fatalf("LoadFailuresForCapsule second: %v", err)
+	}
+	if len(failuresForSecond) != 1 || failuresForSecond[0].FailureID != secondResult.FailureIDs[0] {
+		t.Fatalf("LoadFailuresForCapsule second = %+v, want current capsule failure only", failuresForSecond)
+	}
+}
+
 func saveRunnerScenario(t *testing.T, env *runnerEnv) string {
 	t.Helper()
 	now := time.Now().UTC()

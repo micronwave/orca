@@ -15,8 +15,8 @@ const (
 )
 
 // FailureFingerprint is a normalized failure record used to avoid repeated bad retries.
-// Prior attempt history, likely cause inference, and recommended action generation
-// are deferred to Phase 3. orca.md §5.9.
+// Prior attempt history and recommended action generation are populated by
+// failure-memory producers before saving each distinct fingerprint artifact.
 type FailureFingerprint struct {
 	FailureID string `json:"failure_id"`
 	// SourceCapsuleID is the capsule that produced this failure. Required so the

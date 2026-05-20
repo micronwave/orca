@@ -213,7 +213,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log eventlo
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
 		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters),
-		reconciler:     newReconciler(st, log),
+		reconciler:     newReconciler(st, log, noLearning),
 	}, nil
 }
 
@@ -960,7 +960,7 @@ func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string,
 		DefaultMaxWallTime: cfg.DefaultMaxWallTimeSeconds,
 		DefaultMaxRetries:  cfg.DefaultMaxRetries,
 		NoLearning:         noLearning,
-	})
+	}, st)
 }
 
 func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.ContextCompiler {
@@ -985,6 +985,6 @@ func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir str
 	)
 }
 
-func newReconciler(st store.ArtifactStore, log eventlog.EventLog) reconciler.Reconciler {
-	return reconciler.New(st, log)
+func newReconciler(st store.ArtifactStore, log eventlog.EventLog, noLearning bool) reconciler.Reconciler {
+	return reconciler.New(st, log, reconciler.Config{NoLearning: noLearning})
 }

@@ -109,3 +109,12 @@ type TopologyClassifier interface {
 	// decision (e.g. "high-risk obligations, 3 prior failures in affected files").
 	Classify(input ClassifyInput) (topology schema.Topology, rationale string, err error)
 }
+
+// OutcomeReader is the planner-owned interface for reading historical topology
+// outcomes. It is defined here (consumer side) rather than in internal/store so
+// that the planner package can be tested without a concrete FileStore dependency.
+// The concrete implementation is typically the ArtifactStore, wired by cmd/orca.
+// TopologyClassifier operates correctly when the reader is nil.
+type OutcomeReader interface {
+	LoadTopologyOutcomes(ctx context.Context, topology schema.Topology, maxRisk schema.RiskLevel) ([]*schema.TopologyOutcomeRecord, error)
+}

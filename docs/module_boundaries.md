@@ -134,7 +134,7 @@ have no corresponding `Save*` call.
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions`, open `Obligations`, `FailureFingerprints`; future Phase 3 topology outcome reads through a narrow planner-owned interface |
+| **Reads (store)** | `GoalIR`, `GoalConditions`, open `Obligations`, `FailureFingerprints`; topology outcome reads through the planner-owned `OutcomeReader` interface (Phase 3.5) |
 | **Writes (store)** | `ExecutionCapsules` via `SaveCapsule`, `DecisionRecord` (topology decision) via `SaveDecision` |
 | **Writes (log)** | none directly — store emits `capsule_created`, `decision_record_created`; orchestrator emits `topology_selected` after `Plan` returns |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
@@ -230,7 +230,7 @@ execution based on reusable evidence. Evidence reuse is verifier-owned.
 | | |
 |---|---|
 | **Reads (store)** | `GoalIR`, `GoalConditions` (`ProposeObligations`); `PatchArtifact`, `ExecutionCapsule` (scope), `Obligations`, `EvidenceArtifacts`, latest `StateSnapshot`, reusable `EvidenceArtifacts` via `LoadReusableEvidenceForObligation` (`Verify`) |
-| **Writes (store)** | `Obligations` via `SaveObligation` (`ProposeObligations`); verifier-owned gate `EvidenceArtifacts`, including reused-reference artifacts; `VerifierResult` (`Verify`) |
+| **Writes (store)** | `Obligations` via `SaveObligation` (`ProposeObligations`); verifier-owned gate `EvidenceArtifacts`, including reused-reference artifacts; verifier-owned gate `FailureFingerprints` for failed gates; `VerifierResult` (`Verify`) |
 | **Writes (log)** | none directly — store emits `obligation_created` on `SaveObligation`, `verifier_result_created` on `SaveVerifierResult` |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT call** | `store.SaveCapsule`, `store.SaveBudgetRecord`, `store.UpdateObligationStatus` |
@@ -240,8 +240,9 @@ execution based on reusable evidence. Evidence reuse is verifier-owned.
 The verifier has two distinct roles. `ProposeObligations` acts as an obligation
 generator: it reads the GoalIR and derives what must be proven before any capsule
 runs (orca.md §6 step 3). `Verify` acts as an evidence arbiter: it checks whether
-existing evidence satisfies existing obligations after a capsule completes. It does
-not create new evidence by running agents.
+existing evidence satisfies existing obligations after a capsule completes. It may
+persist verifier-owned evidence and failure fingerprints for failed verifier gates,
+but it does not create new evidence by running agents.
 
 ---
 
@@ -251,7 +252,7 @@ not create new evidence by running agents.
 |---|---|
 | **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule` / `LoadClaimsForGoal` / `LoadClaimsByStatus`, `StateSnapshot` via `LoadLatestSnapshot` / `LoadSnapshot`, `BudgetRecords` via `LoadBudgetForGoal` |
 | **Reads (log)** | goal events via `ReadForGoal` during `FreshnessCheck` and explicit decision invalidation processing |
-| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; future topology outcomes via `SaveTopologyOutcome` |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; `TopologyOutcomeRecord` via `SaveTopologyOutcome` (skipped when `NoLearning` is true) |
 | **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
