@@ -64,10 +64,12 @@ func TestRunUsesSidecarPath(t *testing.T) {
 				Claims: []schema.SidecarClaim{
 					{Claim: "tests pass", Type: schema.SidecarClaimVerified},
 				},
-				Risks:          []string{"none"},
-				FollowUpNeeded: nil,
-				EvidencePaths:  []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
-				Summary:        "runner updated one file",
+				Risks:           []string{"none"},
+				FollowUpNeeded:  nil,
+				EvidencePaths:   []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:         "runner updated one file",
+				TokensUsed:      123,
+				WallTimeSeconds: 4.5,
 			}, nil
 		},
 	}
@@ -81,6 +83,16 @@ func TestRunUsesSidecarPath(t *testing.T) {
 	}
 	if result.PatchID == "" || len(result.EvidenceIDs) == 0 {
 		t.Fatalf("RunResult = %+v", result)
+	}
+	if result.TokensUsed != 123 || result.WallTimeSeconds != 4.5 {
+		t.Fatalf("RunResult cost metadata tokens=%d wall=%.2f, want 123 and 4.50", result.TokensUsed, result.WallTimeSeconds)
+	}
+	patch, err := env.st.LoadPatch(env.ctx, result.PatchID)
+	if err != nil {
+		t.Fatalf("LoadPatch: %v", err)
+	}
+	if patch.TokensUsed != 123 || patch.WallTimeSeconds != 4.5 {
+		t.Fatalf("patch cost metadata tokens=%d wall=%.2f, want 123 and 4.50", patch.TokensUsed, patch.WallTimeSeconds)
 	}
 	capsule, err := env.st.LoadCapsule(env.ctx, capsuleID)
 	if err != nil {
@@ -99,6 +111,47 @@ func TestRunUsesSidecarPath(t *testing.T) {
 	}
 	if len(started) != 1 || len(completed) != 1 {
 		t.Fatalf("capsule lifecycle events started=%d completed=%d, want 1 each", len(started), len(completed))
+	}
+}
+
+func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_walltime.txt"), []byte("updated"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			time.Sleep(time.Millisecond) // ensure measurable duration for the fallback timer
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"runner_walltime.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				Claims:               []schema.SidecarClaim{{Claim: "ok", Type: schema.SidecarClaimVerified}},
+				Risks:                []string{"none"},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "runner wall time fallback test",
+				TokensUsed:           0,
+				WallTimeSeconds:      0, // adapter does not report wall time; runAdapter must fill it
+			}, nil
+		},
+	}
+	before := time.Now()
+	result, err := New(env.st, env.log, env.orcaDir, adapter).Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(before).Seconds()
+	if result.WallTimeSeconds <= 0 || result.WallTimeSeconds > elapsed+1 {
+		t.Fatalf("RunResult.WallTimeSeconds = %.6f, want > 0 and <= %.6f", result.WallTimeSeconds, elapsed+1)
+	}
+	patch, err := env.st.LoadPatch(env.ctx, result.PatchID)
+	if err != nil {
+		t.Fatalf("LoadPatch: %v", err)
+	}
+	if patch.WallTimeSeconds <= 0 {
+		t.Fatalf("patch.WallTimeSeconds = %.6f, want > 0 (fallback should propagate)", patch.WallTimeSeconds)
 	}
 }
 

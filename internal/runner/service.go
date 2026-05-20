@@ -140,6 +140,8 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 		return result, err
 	}
 	result.SidecarUsed = sidecarUsed
+	result.TokensUsed = output.TokensUsed
+	result.WallTimeSeconds = output.WallTimeSeconds
 
 	diffPath, changedFiles, err := buildPatchDiff(runCtx, s.orcaDir, capsule.CapsuleID, capsule.Sandbox.WorktreePath)
 	if err != nil {
@@ -172,6 +174,7 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 			Status:               schema.PatchCandidate,
 			ScopeViolations:      scopeViolations,
 			TokensUsed:           output.TokensUsed,
+			WallTimeSeconds:      output.WallTimeSeconds,
 		}
 		if patch.Summary == "" {
 			patch.Summary = "capsule output recorded by runner"
@@ -209,8 +212,12 @@ func (s *service) runAdapter(
 	capsule *schema.ExecutionCapsule,
 	projection *schema.ContextProjection,
 ) (*schema.AgentSidecarOutput, bool, error) {
+	start := time.Now()
 	output, err := adapter.Execute(ctx, capsule, projection)
 	if err == nil {
+		if output.WallTimeSeconds <= 0 {
+			output.WallTimeSeconds = time.Since(start).Seconds()
+		}
 		return output, true, nil
 	}
 	if !errors.Is(err, ErrNoSidecar) && !errors.Is(err, ErrInvalidSidecar) {
@@ -220,6 +227,9 @@ func (s *service) runAdapter(
 	output, extractErr := adapter.ExtractFromTranscript(ctx, capsule, transcriptPath)
 	if extractErr != nil {
 		return nil, false, fmt.Errorf("runner: transcript extraction for capsule %s after %v: %w", capsule.CapsuleID, err, extractErr)
+	}
+	if output.WallTimeSeconds <= 0 {
+		output.WallTimeSeconds = time.Since(start).Seconds()
 	}
 	return output, false, nil
 }

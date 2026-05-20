@@ -92,6 +92,11 @@ type RunResult struct {
 	// SidecarUsed is true when the sidecar collection path was used,
 	// false when transcript extraction was the primary path. orca.md §8.
 	SidecarUsed bool
+
+	// TokensUsed and WallTimeSeconds are execution-cost metadata reported by the
+	// adapter and persisted on the patch artifact when a patch is produced.
+	TokensUsed      int
+	WallTimeSeconds float64
 }
 
 // Adapter translates a specific coding-agent CLI into Orca's artifact schema.
