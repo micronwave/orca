@@ -63,7 +63,12 @@ event to the event log on every `Save*` call. This means:
 - `SaveVerifierResult` → appends `verifier_result_created`
 - `SaveProjection` / `SaveHumanSummaryProjection` → appends `context_projection_created`
 - `SaveDecision` → appends `decision_record_created`
+- `SaveTopologyOutcome` → appends `topology_outcome_recorded`
 - etc.
+
+Replay reconstructs topology outcomes from `topology_outcome_recorded` into
+`.orca/artifacts/topology_outcomes/<OutcomeID>.json`, matching the per-artifact
+layout used by the rest of the artifact graph.
 
 **`topology_selected` exception:** `topology_selected` is a distinct event type
 (schema.EventTopologySelected) that the orchestrator (`cmd/orca`) emits directly
@@ -93,7 +98,7 @@ directly alongside their store writes.
 | `internal/reconciler` | `reconciler` | `Reconciler`, `ReconcileResult` |
 | `internal/budget` | `budget` | `BudgetController`, `BudgetCheck`, `Spend`, `ROI` |
 | `internal/gate` | `gate` | `HumanGatekeeper`, `GateDecision` |
-| `internal/schema` | `schema` | all MVP data types (Phase 2, complete) |
+| `internal/schema` | `schema` | data-only artifact and event types |
 
 `internal/projector` is named "projector" rather than "context" to avoid
 shadowing the stdlib `context` package in import declarations.
@@ -129,7 +134,7 @@ have no corresponding `Save*` call.
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions`, open `Obligations`, `FailureFingerprints` |
+| **Reads (store)** | `GoalIR`, `GoalConditions`, open `Obligations`, `FailureFingerprints`; future Phase 3 topology outcome reads through a narrow planner-owned interface |
 | **Writes (store)** | `ExecutionCapsules` via `SaveCapsule`, `DecisionRecord` (topology decision) via `SaveDecision` |
 | **Writes (log)** | none directly — store emits `capsule_created`, `decision_record_created`; orchestrator emits `topology_selected` after `Plan` returns |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
@@ -215,7 +220,7 @@ observability only; it must not drive different downstream logic. orca.md §8.
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions` (`ProposeObligations`); `PatchArtifact`, `ExecutionCapsule` (scope), `Obligations`, `EvidenceArtifacts` (`Verify`) |
+| **Reads (store)** | `GoalIR`, `GoalConditions` (`ProposeObligations`); `PatchArtifact`, `ExecutionCapsule` (scope), `Obligations`, `EvidenceArtifacts` (`Verify`); future reusable evidence lookup |
 | **Writes (store)** | `Obligations` via `SaveObligation` (`ProposeObligations`); `VerifierResult` (`Verify`) |
 | **Writes (log)** | none directly — store emits `obligation_created` on `SaveObligation`, `verifier_result_created` on `SaveVerifierResult` |
 | **Must NOT import** | `internal/planner`, `internal/runner`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
@@ -236,8 +241,8 @@ not create new evidence by running agents.
 | | |
 |---|---|
 | **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence`, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule`, `BudgetRecords` via `LoadBudgetForGoal` |
-| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status via `UpdateClaimStatus` (proposed → verified), new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot` |
-| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status updates; `obligation_created` (follow-ups), `decision_record_created`, `merge_applied` |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; future topology outcomes via `SaveTopologyOutcome` |
+| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
 | **Must NOT accept** | a patch without mapping evidence to every blocking obligation |
@@ -245,6 +250,8 @@ not create new evidence by running agents.
 The reconciler is the component that closes the loop: it reads the verifier's
 verdict and translates it into durable state changes. Follow-up obligations
 created here are the input to the next `ObligationPlanner.Plan` call.
+Phase 3 claim dispute and validation writes also belong here; file or symbol
+overlap alone does not imply a claim dispute without explicit structured edges.
 
 ---
 
