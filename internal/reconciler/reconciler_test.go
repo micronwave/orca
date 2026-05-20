@@ -499,6 +499,43 @@ func TestReconcile_WritesPerObligationBudgetRecord(t *testing.T) {
 	}
 }
 
+func TestReconcile_BudgetCountsReusedEvidenceByReusedFromID(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:               "BUDREUSE",
+		evidenceIDs:          []string{"EV-BUDREUSE"},
+		saveEvidence:         true,
+		evidenceReusedFromID: "EV-BUDREUSE-SOURCE",
+	})
+
+	if _, err := New(env.st, env.log).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	records, err := env.st.LoadBudgetForGoal(env.ctx, ids.goalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	var summary *schema.BudgetRecord
+	var obligationRecord *schema.BudgetRecord
+	for _, record := range records {
+		if record.BudgetID == "BUD-"+ids.capsuleID && record.ObligationID == "" {
+			summary = record
+		}
+		if record.ObligationID == ids.obligationID {
+			obligationRecord = record
+		}
+	}
+	if summary == nil || obligationRecord == nil {
+		t.Fatalf("missing budget records: summary=%v obligation=%v", summary != nil, obligationRecord != nil)
+	}
+	if summary.EvidenceArtifactsReused != 1 {
+		t.Fatalf("summary EvidenceArtifactsReused = %d, want 1", summary.EvidenceArtifactsReused)
+	}
+	if obligationRecord.EvidenceArtifactsReused != 1 {
+		t.Fatalf("obligation EvidenceArtifactsReused = %d, want 1", obligationRecord.EvidenceArtifactsReused)
+	}
+}
+
 func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 	env := newTestEnv(t)
 	now := time.Now().UTC()
@@ -627,13 +664,14 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 }
 
 type scenarioOptions struct {
-	suffix            string
-	evidenceIDs       []string
-	saveEvidence      bool
-	omitVerdict       bool
-	changedFiles      []string
-	recommendedAction schema.RecommendedAction
-	recommendation    string
+	suffix               string
+	evidenceIDs          []string
+	saveEvidence         bool
+	evidenceReusedFromID string
+	omitVerdict          bool
+	changedFiles         []string
+	recommendedAction    schema.RecommendedAction
+	recommendation       string
 }
 
 type scenarioIDs struct {
@@ -696,12 +734,13 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 			t.Fatal("saveEvidence requires an evidence ID")
 		}
 		if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
-			EvidenceID: ids.evidenceID,
-			Type:       schema.EvidenceTestResult,
-			Command:    "go test ./...",
-			ExitCode:   0,
-			Supports:   []string{ids.obligationID},
-			CreatedAt:  now,
+			EvidenceID:   ids.evidenceID,
+			Type:         schema.EvidenceTestResult,
+			Command:      "go test ./...",
+			ExitCode:     0,
+			Supports:     []string{ids.obligationID},
+			ReusedFromID: opts.evidenceReusedFromID,
+			CreatedAt:    now,
 		}); err != nil {
 			t.Fatalf("SaveEvidence: %v", err)
 		}

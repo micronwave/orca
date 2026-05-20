@@ -723,7 +723,7 @@ func (s *service) budgetMetricsForEvidenceIDs(
 			return budgetMetrics{}, fmt.Errorf("reconciler: load evidence %s for budget metrics: %w", evidenceID, err)
 		}
 		metrics.toolCalls++
-		if evidence.Source != "verifier" {
+		if strings.TrimSpace(evidence.ReusedFromID) != "" {
 			metrics.evidenceArtifactsReused++
 		}
 	}
