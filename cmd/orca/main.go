@@ -17,6 +17,7 @@ import (
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
+	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/intent"
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
@@ -240,6 +241,9 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		if err := rt.emitTopologySelected(ctx, goal.GoalID, plan); err != nil {
 			return err
 		}
+		if err := rt.emitCycleStartSnapshot(ctx, goal.GoalID); err != nil {
+			return err
+		}
 
 		var patchIDs []string
 		var supplementalEvidenceIDs []string
@@ -373,6 +377,29 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		}
 		return fmt.Errorf("orca: reconciliation stopped: %s", blockingReason)
 	}
+}
+
+func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string) error {
+	events, err := rt.eventLog.ReadForGoal(ctx, goalID, 0, 0)
+	if err != nil {
+		return fmt.Errorf("orca: read events for cycle snapshot goal %s: %w", goalID, err)
+	}
+	if len(events) == 0 {
+		return fmt.Errorf("orca: goal %s has no events for cycle snapshot", goalID)
+	}
+	lastEvent := events[len(events)-1]
+	now := time.Now().UTC()
+	snapshot := &schema.StateSnapshot{
+		SnapshotID:  idgen.New("SNAP-CYCLE"),
+		GoalID:      goalID,
+		EventID:     lastEvent.EventID,
+		SequenceNum: lastEvent.SequenceNum,
+		CreatedAt:   now,
+	}
+	if err := rt.store.SaveSnapshot(ctx, snapshot); err != nil {
+		return fmt.Errorf("orca: save cycle snapshot for goal %s: %w", goalID, err)
+	}
+	return nil
 }
 
 func (rt *runtime) verifyPatch(ctx context.Context, patchID string, supplementalEvidenceIDs, supplementalClaimIDs []string) (*schema.VerifierResult, error) {
@@ -932,7 +959,7 @@ func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) boo
 	}
 }
 
-func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWindow time.Duration) time.Duration {
+func reviewWindowFor(topology schema.Topology, _ schema.RiskLevel, defaultWindow time.Duration) time.Duration {
 	if topology == schema.TopologyHumanGated {
 		return 0
 	}
@@ -974,11 +1001,11 @@ func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.C
 	return projector.New(st, cfg)
 }
 
-func newGatekeeper(st store.ArtifactStore, cfg config.GateConfig) gate.HumanGatekeeper {
+func newGatekeeper(st store.ArtifactStore, _ config.GateConfig) gate.HumanGatekeeper {
 	return gate.New(st)
 }
 
-func newBudgetController(log eventlog.EventLog, cfg config.BudgetConfig) budget.BudgetController {
+func newBudgetController(log eventlog.EventLog, _ config.BudgetConfig) budget.BudgetController {
 	return budget.New(log)
 }
 

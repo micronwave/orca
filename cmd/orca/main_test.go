@@ -233,6 +233,55 @@ func TestGoalStatusSetToCompleteAfterSuccessfulRun(t *testing.T) {
 	}
 }
 
+func TestEmitCycleStartSnapshotPersistsLatestGoalEvent(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer closeFn()
+
+	before, err := rt.eventLog.ReadForGoal(context.Background(), "G-1", 0, 0)
+	if err != nil {
+		t.Fatalf("ReadForGoal before snapshot: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("seeded goal produced no events")
+	}
+	lastBefore := before[len(before)-1]
+
+	if err := rt.emitCycleStartSnapshot(context.Background(), "G-1"); err != nil {
+		t.Fatalf("emitCycleStartSnapshot: %v", err)
+	}
+
+	snapshot, err := rt.store.LoadLatestSnapshot(context.Background(), "G-1")
+	if err != nil {
+		t.Fatalf("LoadLatestSnapshot: %v", err)
+	}
+	if !strings.HasPrefix(snapshot.SnapshotID, "SNAP-CYCLE-") {
+		t.Fatalf("SnapshotID = %q, want SNAP-CYCLE prefix", snapshot.SnapshotID)
+	}
+	if snapshot.EventID != lastBefore.EventID || snapshot.SequenceNum != lastBefore.SequenceNum {
+		t.Fatalf("snapshot event = (%q,%d), want (%q,%d)", snapshot.EventID, snapshot.SequenceNum, lastBefore.EventID, lastBefore.SequenceNum)
+	}
+
+	after, err := rt.eventLog.ReadForGoal(context.Background(), "G-1", 0, 0)
+	if err != nil {
+		t.Fatalf("ReadForGoal after snapshot: %v", err)
+	}
+	snapshotEvent := after[len(after)-1]
+	if snapshotEvent.Type != schema.EventStateSnapshotSaved || snapshotEvent.ArtifactID != snapshot.SnapshotID {
+		t.Fatalf("last event = %+v, want state_snapshot_saved for %s", snapshotEvent, snapshot.SnapshotID)
+	}
+	var payload schema.StateSnapshot
+	if err := json.Unmarshal(snapshotEvent.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal snapshot event payload: %v", err)
+	}
+	if payload.SnapshotID != snapshot.SnapshotID || payload.GoalID != "G-1" {
+		t.Fatalf("snapshot event payload = %+v, want snapshot_id %s and goal_id G-1", payload, snapshot.SnapshotID)
+	}
+}
+
 // TestRunGoal_NoLearningFlag verifies that --no-learning=true reaches the runtime
 // and that newPlanner passes nil OutcomeReader (not the store) when disabled.
 func TestRunGoal_NoLearningFlag(t *testing.T) {
