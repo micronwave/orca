@@ -33,6 +33,8 @@ package verifier
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -102,18 +104,33 @@ type GateRunner interface {
 type service struct {
 	store          store.ArtifactStore
 	config         config.VerifierConfig
+	noLearning     bool
 	runner         GateRunner
 	commandChecker func(string) error
 }
 
+// Config defines verifier-owned options that are not part of the repo config
+// file contract.
+type Config struct {
+	Gates      []config.VerifierGate
+	WorkingDir string
+	NoLearning bool
+}
+
 // New returns the default VerifierEngine implementation.
 func New(st store.ArtifactStore, cfg config.VerifierConfig, runner GateRunner) VerifierEngine {
+	return NewWithConfig(st, Config{Gates: cfg.Gates, WorkingDir: cfg.WorkingDir}, runner)
+}
+
+// NewWithConfig returns the default VerifierEngine with verifier-local options.
+func NewWithConfig(st store.ArtifactStore, cfg Config, runner GateRunner) VerifierEngine {
 	if runner == nil {
 		runner = execGateRunner{}
 	}
 	return &service{
 		store:          st,
-		config:         cfg,
+		config:         config.VerifierConfig{Gates: cfg.Gates, WorkingDir: cfg.WorkingDir},
+		noLearning:     cfg.NoLearning,
 		runner:         runner,
 		commandChecker: checkCommandPresent,
 	}
@@ -202,6 +219,14 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 	if workingDir == "" {
 		workingDir = strings.TrimSpace(capsule.Sandbox.WorktreePath)
 	}
+	goalID, err := s.goalIDForObligations(ctx, obligationRefs)
+	if err != nil {
+		return nil, err
+	}
+	latestSnapshotID, err := s.latestSnapshotID(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
 
 	var (
 		createdEvidence  []*schema.EvidenceArtifact
@@ -212,18 +237,6 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 	if strings.TrimSpace(patch.BaseCommit) == "" {
 		warnings = append(warnings, "preflight: patch base commit is empty; clean-base check skipped")
 	}
-	for _, gate := range s.config.Gates {
-		if strings.TrimSpace(gate.Command) == "" {
-			blockingFailures = append(blockingFailures, fmt.Sprintf("preflight: verifier gate %q has empty command", gate.Name))
-			continue
-		}
-		if err := s.commandChecker(gate.Command); err != nil {
-			blockingFailures = append(
-				blockingFailures,
-				fmt.Sprintf("preflight: verifier gate %q command not found: %v", gate.Name, err),
-			)
-		}
-	}
 
 	scopeExitCode := 0
 	scopeSummary := "scope check passed"
@@ -231,7 +244,7 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		scopeExitCode = 1
 		scopeSummary = "scope check failed: " + strings.Join(violations, ", ")
 	}
-	scopeEvidence, err := s.saveEvidence(ctx, schema.EvidenceDiffRiskReport, "scope check", scopeExitCode, scopeSummary, obligationRefs)
+	scopeEvidence, err := s.saveEvidence(ctx, schema.EvidenceDiffRiskReport, "scope check", scopeExitCode, scopeSummary, obligationRefs, "", "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -249,16 +262,12 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 		if i == testGateIndex {
 			continue
 		}
-		exitCode, output, runErr := s.runner.Run(ctx, gate.Command, workingDir)
-		if runErr != nil {
-			return nil, fmt.Errorf("verifier: run static gate %q: %w", gate.Name, runErr)
-		}
 		evidenceType := staticEvidenceType(gate)
-		evidence, err := s.saveEvidence(ctx, evidenceType, gate.Command, exitCode, summarizeOutput(output), obligationRefs)
+		evidence, exitCode, err := s.runOrReuseGate(ctx, goalID, latestSnapshotID, gate, evidenceType, workingDir, obligationRefs)
 		if err != nil {
 			return nil, err
 		}
-		createdEvidence = append(createdEvidence, evidence)
+		createdEvidence = append(createdEvidence, evidence...)
 		if gate.Blocking && exitCode != 0 {
 			blockingFailures = append(blockingFailures, fmt.Sprintf("static gate %q failed", gate.Name))
 		}
@@ -266,15 +275,11 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 
 	if testGateIndex >= 0 {
 		testGate := s.config.Gates[testGateIndex]
-		exitCode, output, runErr := s.runner.Run(ctx, testGate.Command, workingDir)
-		if runErr != nil {
-			return nil, fmt.Errorf("verifier: run test gate %q: %w", testGate.Name, runErr)
-		}
-		evidence, err := s.saveEvidence(ctx, schema.EvidenceTestResult, testGate.Command, exitCode, summarizeOutput(output), obligationRefs)
+		evidence, exitCode, err := s.runOrReuseGate(ctx, goalID, latestSnapshotID, testGate, schema.EvidenceTestResult, workingDir, obligationRefs)
 		if err != nil {
 			return nil, err
 		}
-		createdEvidence = append(createdEvidence, evidence)
+		createdEvidence = append(createdEvidence, evidence...)
 		if testGate.Blocking && exitCode != 0 {
 			blockingFailures = append(blockingFailures, fmt.Sprintf("test gate %q failed", testGate.Name))
 		}
@@ -584,6 +589,9 @@ func (s *service) saveEvidence(
 	exitCode int,
 	summary string,
 	obligationRefs []string,
+	reuseKey string,
+	validatedAgainst string,
+	contentHash string,
 ) (*schema.EvidenceArtifact, error) {
 	supports := append([]string(nil), obligationRefs...)
 	weakens := []string(nil)
@@ -592,20 +600,200 @@ func (s *service) saveEvidence(
 		weakens = append([]string(nil), obligationRefs...)
 	}
 	evidence := &schema.EvidenceArtifact{
-		EvidenceID: idgen.New("EV"),
-		Type:       evidenceType,
-		Source:     "verifier",
-		Command:    command,
-		ExitCode:   exitCode,
-		Summary:    summary,
-		Supports:   supports,
-		Weakens:    weakens,
-		CreatedAt:  time.Now().UTC(),
+		EvidenceID:       idgen.New("EV"),
+		Type:             evidenceType,
+		Source:           "verifier",
+		Command:          command,
+		ExitCode:         exitCode,
+		Summary:          summary,
+		Supports:         supports,
+		Weakens:          weakens,
+		ContentHash:      contentHash,
+		ReuseKey:         reuseKey,
+		ValidatedAgainst: validatedAgainst,
+		CreatedAt:        time.Now().UTC(),
 	}
 	if err := s.store.SaveEvidence(ctx, evidence); err != nil {
 		return nil, fmt.Errorf("verifier: save evidence %s: %w", evidence.EvidenceID, err)
 	}
 	return evidence, nil
+}
+
+func (s *service) runOrReuseGate(
+	ctx context.Context,
+	goalID string,
+	snapshotID string,
+	gate config.VerifierGate,
+	evidenceType schema.EvidenceType,
+	workingDir string,
+	obligationRefs []string,
+) ([]*schema.EvidenceArtifact, int, error) {
+	command := strings.TrimSpace(gate.Command)
+	if command == "" {
+		return nil, 1, nil
+	}
+	reuseKey := verifierReuseKey(evidenceType, command, workingDir, obligationRefs, snapshotID)
+	if snapshotID != "" && !s.noLearning {
+		reused, err := s.reuseGateEvidence(ctx, evidenceType, command, obligationRefs, reuseKey, snapshotID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(reused) > 0 {
+			return reused, 0, nil
+		}
+	}
+	if err := s.commandChecker(command); err != nil {
+		return nil, 1, nil
+	}
+	exitCode, output, runErr := s.runner.Run(ctx, command, workingDir)
+	if runErr != nil {
+		return nil, 0, fmt.Errorf("verifier: run gate %q: %w", gate.Name, runErr)
+	}
+	contentHash := evidenceContentHash(evidenceType, command, workingDir, exitCode, output, obligationRefs, goalID, snapshotID)
+	evidence, err := s.saveEvidence(ctx, evidenceType, command, exitCode, summarizeOutput(output), obligationRefs, reuseKey, snapshotID, contentHash)
+	if err != nil {
+		return nil, 0, err
+	}
+	return []*schema.EvidenceArtifact{evidence}, exitCode, nil
+}
+
+func (s *service) reuseGateEvidence(
+	ctx context.Context,
+	evidenceType schema.EvidenceType,
+	command string,
+	obligationRefs []string,
+	reuseKey string,
+	snapshotID string,
+) ([]*schema.EvidenceArtifact, error) {
+	matches := make([]*schema.EvidenceArtifact, 0, len(obligationRefs))
+	for _, obligationID := range obligationRefs {
+		match, err := s.store.LoadReusableEvidenceForObligation(ctx, obligationID, evidenceType, reuseKey, snapshotID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("verifier: load reusable evidence for obligation %s: %w", obligationID, err)
+		}
+		matches = append(matches, match)
+	}
+	reused := make([]*schema.EvidenceArtifact, 0, len(matches))
+	for _, match := range matches {
+		evidence := &schema.EvidenceArtifact{
+			EvidenceID:       idgen.New("EV"),
+			Type:             match.Type,
+			Source:           "verifier",
+			Command:          command,
+			ExitCode:         match.ExitCode,
+			Summary:          match.Summary,
+			RawLogPath:       match.RawLogPath,
+			InlineOutput:     match.InlineOutput,
+			Supports:         append([]string(nil), match.Supports...),
+			Weakens:          append([]string(nil), match.Weakens...),
+			ContentHash:      match.ContentHash,
+			ReuseKey:         reuseKey,
+			ValidatedAgainst: snapshotID,
+			ReusedFromID:     match.EvidenceID,
+			CreatedAt:        time.Now().UTC(),
+		}
+		if err := s.store.SaveEvidence(ctx, evidence); err != nil {
+			return nil, fmt.Errorf("verifier: save reused evidence %s: %w", evidence.EvidenceID, err)
+		}
+		reused = append(reused, evidence)
+	}
+	return reused, nil
+}
+
+func (s *service) goalIDForObligations(ctx context.Context, obligationRefs []string) (string, error) {
+	goal, err := s.store.LoadActiveGoal(ctx)
+	if err != nil {
+		return "", fmt.Errorf("verifier: load active goal for snapshot scope: %w", err)
+	}
+	if goal == nil {
+		return "", fmt.Errorf("verifier: no active goal found")
+	}
+	conditionIDs := make(map[string]bool, len(goal.GoalConditions))
+	for _, condition := range goal.GoalConditions {
+		conditionIDs[condition.ID] = true
+	}
+	for _, obligationID := range obligationRefs {
+		obligation, err := s.store.LoadObligation(ctx, obligationID)
+		if err != nil {
+			return "", fmt.Errorf("verifier: load obligation %s for snapshot scope: %w", obligationID, err)
+		}
+		if !conditionIDs[obligation.GoalConditionID] {
+			return "", fmt.Errorf("verifier: obligation %s is outside active goal %s", obligationID, goal.GoalID)
+		}
+	}
+	return goal.GoalID, nil
+}
+
+func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
+	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
+	if err == nil {
+		return snapshot.SnapshotID, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	return "", fmt.Errorf("verifier: load latest snapshot for goal %s: %w", goalID, err)
+}
+
+func verifierReuseKey(evidenceType schema.EvidenceType, command, workingDir string, obligationRefs []string, snapshotID string) string {
+	normalizedObligations := append([]string(nil), obligationRefs...)
+	sort.Strings(normalizedObligations)
+	parts := []string{
+		"type=" + string(evidenceType),
+		"command=" + commandIdentity(command),
+		"scope=" + normalizedWorkingDir(workingDir),
+		"obligations=" + strings.Join(normalizedObligations, ","),
+		"snapshot=" + strings.TrimSpace(snapshotID),
+	}
+	return strings.Join(parts, "|")
+}
+
+func commandIdentity(command string) string {
+	return strings.Join(strings.Fields(command), " ")
+}
+
+func normalizedWorkingDir(workingDir string) string {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		workingDir = "."
+	}
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		workingDir = abs
+	}
+	workingDir = filepath.Clean(workingDir)
+	workingDir = strings.ReplaceAll(workingDir, "\\", "/")
+	if len(workingDir) >= 2 && workingDir[1] == ':' {
+		workingDir = strings.ToLower(workingDir[:1]) + workingDir[1:]
+	}
+	return workingDir
+}
+
+func evidenceContentHash(
+	evidenceType schema.EvidenceType,
+	command string,
+	workingDir string,
+	exitCode int,
+	output string,
+	obligationRefs []string,
+	goalID string,
+	snapshotID string,
+) string {
+	obligations := append([]string(nil), obligationRefs...)
+	sort.Strings(obligations)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		string(evidenceType),
+		commandIdentity(command),
+		normalizedWorkingDir(workingDir),
+		fmt.Sprintf("exit=%d", exitCode),
+		output,
+		strings.Join(obligations, ","),
+		goalID,
+		snapshotID,
+	}, "\x00")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {
