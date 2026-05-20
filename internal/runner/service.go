@@ -159,7 +159,7 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	}
 	scopeViolations := findScopeViolations(changedFiles, capsule.AllowedPaths, capsule.ForbiddenPaths)
 
-	if len(changedFiles) > 0 || !evidenceOnly {
+	if !evidenceOnly {
 		patch := &schema.PatchArtifact{
 			PatchID:              idgen.New("PATCH"),
 			CapsuleID:            capsule.CapsuleID,
