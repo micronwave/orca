@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/micronwave/orca/internal/orcapath"
 	"github.com/micronwave/orca/internal/runner"
@@ -113,13 +114,14 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		"-o", absSidecarPath,
 		"-",
 	}
-	if _, _, runErr := runCommandWithTranscript(ctx, commandSpec{
+	_, _, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
 		args:       args,
 		worktree:   capsule.Sandbox.WorktreePath,
 		transcript: transcriptPath,
 		stdin:      briefingFile,
-	}); runErr != nil {
+	})
+	if runErr != nil {
 		return nil, fmt.Errorf("codex adapter: execute failed: %w", runErr)
 	}
 
@@ -134,6 +136,7 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
 		return nil, runner.ErrInvalidSidecar
 	}
+	sidecar.WallTimeSeconds = duration.Seconds()
 	return sidecar, nil
 }
 
@@ -168,10 +171,10 @@ type commandSpec struct {
 	stdin      io.Reader
 }
 
-func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, string, error) {
+func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, string, time.Duration, error) {
 	file, err := os.Create(spec.transcript)
 	if err != nil {
-		return "", "", fmt.Errorf("create transcript %s: %w", spec.transcript, err)
+		return "", "", 0, fmt.Errorf("create transcript %s: %w", spec.transcript, err)
 	}
 	defer file.Close()
 
@@ -184,10 +187,11 @@ func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, st
 	var stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&stdout, file)
 	cmd.Stderr = io.MultiWriter(&stderr, file)
+	start := time.Now()
 	if err := cmd.Run(); err != nil {
-		return stdout.String(), stderr.String(), err
+		return stdout.String(), stderr.String(), time.Since(start), err
 	}
-	return stdout.String(), stderr.String(), nil
+	return stdout.String(), stderr.String(), time.Since(start), nil
 }
 
 func ensureCleanWorktree(ctx context.Context, worktreePath string) error {
