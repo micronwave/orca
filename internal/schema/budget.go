@@ -13,7 +13,9 @@ type BudgetRecord struct {
 	CapsuleID    string `json:"capsule_id,omitempty"`
 	ObligationID string `json:"obligation_id,omitempty"`
 
-	// Consumption
+	// Consumption. CLI-backed capsules may report zero tokens when the underlying
+	// CLI does not expose usage, but wall time should be populated from measured
+	// execution duration.
 	TokensSpent     int     `json:"tokens_spent"`
 	WallTimeSeconds float64 `json:"wall_time_seconds"`
 	ToolCalls       int     `json:"tool_calls"`
