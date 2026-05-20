@@ -844,6 +844,7 @@ func (s *service) saveBudgetRecords(
 	// execution time. budgetMetricsForResult has no source for tokens, so we
 	// override here rather than threading it through evidence-based metrics.
 	metrics.tokensSpent = patch.TokensUsed
+	metrics.wallTimeSeconds = patch.WallTimeSeconds
 
 	// Tokens are a capsule-level cost. Split them evenly across obligation-level
 	// records, assigning remainder tokens in verdict order so per-obligation
@@ -855,6 +856,7 @@ func (s *service) saveBudgetRecords(
 		}
 	}
 	tokenShareByObligation := make(map[string]int, len(eligibleVerdicts))
+	wallTimeShareByObligation := make(map[string]float64, len(eligibleVerdicts))
 	if patch.TokensUsed > 0 && len(eligibleVerdicts) > 0 {
 		baseShare := patch.TokensUsed / len(eligibleVerdicts)
 		remainder := patch.TokensUsed % len(eligibleVerdicts)
@@ -864,6 +866,12 @@ func (s *service) saveBudgetRecords(
 				share++
 			}
 			tokenShareByObligation[obligationID] = share
+		}
+	}
+	if patch.WallTimeSeconds > 0 && len(eligibleVerdicts) > 0 {
+		share := patch.WallTimeSeconds / float64(len(eligibleVerdicts))
+		for _, obligationID := range eligibleVerdicts {
+			wallTimeShareByObligation[obligationID] = share
 		}
 	}
 
@@ -911,6 +919,7 @@ func (s *service) saveBudgetRecords(
 			return err
 		}
 		obligationMetrics.tokensSpent = tokenShareByObligation[verdict.ObligationID]
+		obligationMetrics.wallTimeSeconds = wallTimeShareByObligation[verdict.ObligationID]
 		recordID := "BUD-" + patch.CapsuleID + "-" + verdict.ObligationID
 		record := recordsByID[recordID]
 		found := record != nil

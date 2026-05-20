@@ -1020,12 +1020,13 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 	env := newTestEnv(t)
 	now := time.Now().UTC()
 	const (
-		goalID   = "G-BUDTOKENS"
-		condID   = "GC-BUDTOKENS"
-		capsID   = "CAP-BUDTOKENS"
-		patchID  = "PATCH-BUDTOKENS"
-		vrID     = "VR-BUDTOKENS"
-		totalTok = 5
+		goalID    = "G-BUDTOKENS"
+		condID    = "GC-BUDTOKENS"
+		capsID    = "CAP-BUDTOKENS"
+		patchID   = "PATCH-BUDTOKENS"
+		vrID      = "VR-BUDTOKENS"
+		totalTok  = 5
+		totalWall = 7.5
 	)
 	obligationIDs := []string{"OB-BUDTOKENS-1", "OB-BUDTOKENS-2", "OB-BUDTOKENS-3"}
 	evidenceIDs := []string{"EV-BUDTOKENS-1", "EV-BUDTOKENS-2", "EV-BUDTOKENS-3"}
@@ -1085,6 +1086,7 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 		ObligationIDsClaimed: append([]string(nil), obligationIDs...),
 		Status:               schema.PatchCandidate,
 		TokensUsed:           totalTok,
+		WallTimeSeconds:      totalWall,
 	}); err != nil {
 		t.Fatalf("SavePatch: %v", err)
 	}
@@ -1128,8 +1130,12 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 	if summary.TokensSpent != totalTok {
 		t.Fatalf("summary TokensSpent = %d, want %d", summary.TokensSpent, totalTok)
 	}
+	if summary.WallTimeSeconds != totalWall {
+		t.Fatalf("summary WallTimeSeconds = %.2f, want %.2f", summary.WallTimeSeconds, totalWall)
+	}
 
 	var perObligationTotal int
+	var perObligationWallTotal float64
 	for _, obligationID := range obligationIDs {
 		recordID := "BUD-" + capsID + "-" + obligationID
 		record := recordsByID[recordID]
@@ -1137,9 +1143,13 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 			t.Fatalf("missing per-obligation record %s", recordID)
 		}
 		perObligationTotal += record.TokensSpent
+		perObligationWallTotal += record.WallTimeSeconds
 	}
 	if perObligationTotal != totalTok {
 		t.Fatalf("per-obligation token total = %d, want %d", perObligationTotal, totalTok)
+	}
+	if diff := perObligationWallTotal - totalWall; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("per-obligation wall total = %.6f, want %.6f", perObligationWallTotal, totalWall)
 	}
 }
 
