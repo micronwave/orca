@@ -13,9 +13,6 @@ const (
 )
 
 // ClaimStatus tracks the trust level of a claim.
-// "contested" and "invalidated" are deferred to Phase 3; see
-// docs/phase2_claim_status_decision.md for the explicit Phase 2 scope decision.
-// orca.md §5.8, §14.
 type ClaimStatus string
 
 const (
@@ -24,7 +21,9 @@ const (
 	// ClaimVerified means supported by a tool, independent agent, or human.
 	ClaimVerified ClaimStatus = "verified"
 	// ClaimStale means the affected code changed since the claim was validated.
-	ClaimStale ClaimStatus = "stale"
+	ClaimStale       ClaimStatus = "stale"
+	ClaimContested   ClaimStatus = "contested"
+	ClaimInvalidated ClaimStatus = "invalidated"
 )
 
 // ClaimArtifact replaces the old EpistemicResidual as the durable memory unit.
@@ -40,5 +39,7 @@ type ClaimArtifact struct {
 	Status          ClaimStatus `json:"status"`
 	EvidenceIDs     []string    `json:"evidence_ids"`
 	// LastValidatedAgainst is the state_snapshot_id current when this claim was last checked.
-	LastValidatedAgainst string `json:"last_validated_against"`
+	LastValidatedAgainst string   `json:"last_validated_against"`
+	ContradictedBy       []string `json:"contradicted_by"`
+	InvalidatedBy        []string `json:"invalidated_by"`
 }

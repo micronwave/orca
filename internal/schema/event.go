@@ -29,6 +29,7 @@ const (
 	EventBudgetRecordSaved         EventType = "budget_record_saved"
 	EventBudgetRecordUpdated       EventType = "budget_record_updated"
 	EventStateSnapshotSaved        EventType = "state_snapshot_saved"
+	EventTopologyOutcomeRecorded   EventType = "topology_outcome_recorded"
 	EventGoalStatusUpdated         EventType = "goal_status_updated"
 	EventObligationStatusUpdated   EventType = "obligation_status_updated"
 	EventClaimStatusUpdated        EventType = "claim_status_updated"
@@ -72,8 +73,11 @@ type ObligationStatusPayload struct {
 
 // ClaimStatusPayload is the event payload for claim_status_updated.
 type ClaimStatusPayload struct {
-	ClaimID string      `json:"claim_id"`
-	Status  ClaimStatus `json:"status"`
+	ClaimID              string      `json:"claim_id"`
+	Status               ClaimStatus `json:"status"`
+	LastValidatedAgainst string      `json:"last_validated_against"`
+	ContradictedBy       []string    `json:"contradicted_by"`
+	InvalidatedBy        []string    `json:"invalidated_by"`
 }
 
 // CapsuleTransitionPayload is the required payload for capsule_started and

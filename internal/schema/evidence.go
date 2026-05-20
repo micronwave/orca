@@ -31,6 +31,10 @@ type EvidenceArtifact struct {
 	// Supports lists obligation IDs this evidence helps satisfy.
 	Supports []string `json:"supports"`
 	// Weakens lists obligation IDs this evidence undermines.
-	Weakens   []string  `json:"weakens"`
-	CreatedAt time.Time `json:"created_at"`
+	Weakens          []string  `json:"weakens"`
+	ContentHash      string    `json:"content_hash"`
+	ReuseKey         string    `json:"reuse_key"`
+	ValidatedAgainst string    `json:"validated_against"`
+	ReusedFromID     string    `json:"reused_from_id"`
+	CreatedAt        time.Time `json:"created_at"`
 }

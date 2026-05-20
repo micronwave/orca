@@ -15,7 +15,9 @@ type SidecarClaim struct {
 	Claim string             `json:"claim"`
 	Type  SidecarClaimStatus `json:"type"`
 	// Evidence is an artifact reference (e.g. "evidence_artifacts.json#ev-test-run").
-	Evidence string `json:"evidence,omitempty"`
+	Evidence    string   `json:"evidence,omitempty"`
+	Contradicts []string `json:"contradicts,omitempty"`
+	Invalidates []string `json:"invalidates,omitempty"`
 }
 
 // AgentSidecarOutput is the structured output an agent produces alongside its

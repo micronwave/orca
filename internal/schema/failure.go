@@ -28,5 +28,8 @@ type FailureFingerprint struct {
 	AffectedSymbols []string    `json:"affected_symbols"`
 	// ErrorSignature is a normalized string that identifies the failure pattern,
 	// used for deduplication and retry routing.
-	ErrorSignature string `json:"error_signature"`
+	ErrorSignature        string   `json:"error_signature"`
+	PriorAttemptCount     int      `json:"prior_attempt_count"`
+	PriorCapsuleIDs       []string `json:"prior_capsule_ids"`
+	RecommendedNextAction string   `json:"recommended_next_action"`
 }
