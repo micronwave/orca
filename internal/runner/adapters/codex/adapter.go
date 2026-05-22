@@ -145,10 +145,8 @@ func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.Exe
 	if err != nil {
 		return nil, fmt.Errorf("codex adapter: read transcript %s: %w", transcriptPath, err)
 	}
-	text := string(data)
 	_ = ctx
-	_ = capsule
-	return extractSidecarFromTranscript(text, transcriptPath), nil
+	return extractSidecarFromTranscript(string(data), transcriptPath, capsule.ObligationIDs), nil
 }
 
 func (a *Adapter) lookupCommand() (string, error) {
@@ -275,13 +273,16 @@ func sidecarJSONSchema() string {
 }`
 }
 
-func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSidecarOutput {
+func extractSidecarFromTranscript(text, transcriptPath string, allowedObligationIDs []string) *schema.AgentSidecarOutput {
 	filesChanged := uniqueMatches(text, regexp.MustCompile(`(?m)^\s*(?:M|A|D|R)\s+([^\s]+)`))
 	if len(filesChanged) == 0 {
 		filesChanged = uniqueMatches(text, regexp.MustCompile(`(?m)^\+\+\+\s+b\/([^\s]+)`))
 	}
 	commands := collectCommandLines(text)
-	obligationIDs := uniqueMatches(text, regexp.MustCompile(`\b(OB-[A-Za-z0-9\-]+)\b`))
+	obligationIDs := filterToAllowed(
+		uniqueMatches(text, regexp.MustCompile(`\b(OB-[A-Za-z0-9\-]+)\b`)),
+		allowedObligationIDs,
+	)
 	assumptions := collectByPrefix(text, "assumption:")
 	risks := collectByPrefix(text, "risk:")
 	followUp := collectByPrefix(text, "follow-up:")
@@ -301,6 +302,23 @@ func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSide
 		FollowUpNeeded:       followUp,
 		EvidencePaths:        []string{transcriptPath},
 	}
+}
+
+func filterToAllowed(ids, allowed []string) []string {
+	if len(allowed) == 0 {
+		return ids
+	}
+	set := make(map[string]bool, len(allowed))
+	for _, id := range allowed {
+		set[id] = true
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if set[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func collectCommandLines(text string) []string {

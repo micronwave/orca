@@ -144,10 +144,8 @@ func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.Exe
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: read transcript %s: %w", transcriptPath, err)
 	}
-	text := string(data)
 	_ = ctx
-	_ = capsule
-	return extractSidecarFromTranscript(text, transcriptPath), nil
+	return extractSidecarFromTranscript(string(data), transcriptPath, capsule.ObligationIDs), nil
 }
 
 func (a *Adapter) lookupCommand() (string, error) {
@@ -212,13 +210,16 @@ func sidecarJSONSchemaInline() string {
 	return `{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","required":["obligations_addressed","files_changed","commands_run","assumptions","claims","risks","follow_up_needed","evidence_paths"],"properties":{"obligations_addressed":{"type":"array","items":{"type":"string"},"description":"IDs of obligations addressed (OB-xxxx format)"},"files_changed":{"type":"array","items":{"type":"string"},"description":"Relative paths of files modified or created"},"commands_run":{"type":"array","items":{"type":"string"},"description":"Shell commands executed"},"assumptions":{"type":"array","items":{"type":"string"}},"claims":{"type":"array","items":{"type":"object","required":["claim","type"],"properties":{"claim":{"type":"string"},"type":{"type":"string","enum":["verified","proposed"]},"evidence":{"type":"string"},"contradicts":{"type":"array","items":{"type":"string"}},"invalidates":{"type":"array","items":{"type":"string"}}}}},"risks":{"type":"array","items":{"type":"string"}},"follow_up_needed":{"type":"array","items":{"type":"string"}},"evidence_paths":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}}}`
 }
 
-func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSidecarOutput {
+func extractSidecarFromTranscript(text, transcriptPath string, allowedObligationIDs []string) *schema.AgentSidecarOutput {
 	filesChanged := uniqueMatches(text, regexp.MustCompile(`(?m)^\s*(?:M|A|D|R)\s+([^\s]+)`))
 	if len(filesChanged) == 0 {
 		filesChanged = uniqueMatches(text, regexp.MustCompile(`(?m)^\+\+\+\s+b\/([^\s]+)`))
 	}
 	commands := collectCommandLines(text)
-	obligationIDs := uniqueMatches(text, regexp.MustCompile(`\b(OB-[A-Za-z0-9\-]+)\b`))
+	obligationIDs := filterToAllowed(
+		uniqueMatches(text, regexp.MustCompile(`\b(OB-[A-Za-z0-9\-]+)\b`)),
+		allowedObligationIDs,
+	)
 	assumptions := collectByPrefix(text, "assumption:")
 	risks := collectByPrefix(text, "risk:")
 	followUp := collectByPrefix(text, "follow-up:")
@@ -238,6 +239,23 @@ func extractSidecarFromTranscript(text, transcriptPath string) *schema.AgentSide
 		FollowUpNeeded:       followUp,
 		EvidencePaths:        []string{transcriptPath},
 	}
+}
+
+func filterToAllowed(ids, allowed []string) []string {
+	if len(allowed) == 0 {
+		return ids
+	}
+	set := make(map[string]bool, len(allowed))
+	for _, id := range allowed {
+		set[id] = true
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if set[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func collectCommandLines(text string) []string {
