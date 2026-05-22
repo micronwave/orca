@@ -14,9 +14,18 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
+type lineResult struct {
+	line string
+	err  error
+}
+
 type service struct {
 	store store.ArtifactStore
-	in    io.Reader
+	// lines is fed by a single goroutine started in NewWithIO. All gate calls
+	// receive from this channel, so only one goroutine ever reads from stdin at
+	// a time (no data races, no buffering loss across calls). Channel capacity 1
+	// lets the reader goroutine park one result while a gate is busy.
+	lines chan lineResult
 	out   io.Writer
 }
 
@@ -33,7 +42,26 @@ func NewWithIO(st store.ArtifactStore, in io.Reader, out io.Writer) HumanGatekee
 	if out == nil {
 		out = os.Stdout
 	}
-	return &service{store: st, in: in, out: out}
+	lines := make(chan lineResult, 1)
+	go func() {
+		r := bufio.NewReader(in)
+		for {
+			line, err := r.ReadString('\n')
+			if err == io.EOF && line == "" {
+				lines <- lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF)}
+				return
+			}
+			if err != nil && err != io.EOF {
+				lines <- lineResult{err: err}
+				return
+			}
+			lines <- lineResult{line: line}
+			if err == io.EOF {
+				return
+			}
+		}
+	}()
+	return &service{store: st, lines: lines, out: out}
 }
 
 func (s *service) ReviewProjection(ctx context.Context, capsuleID string, reviewWindow time.Duration) (GateDecision, error) {
@@ -54,7 +82,11 @@ func (s *service) ReviewMerge(ctx context.Context, patchID string) (GateDecision
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load verifier result for patch %s: %w", patchID, err)
 	}
-	display := renderMerge(result)
+	patch, err := s.store.LoadPatch(ctx, patchID)
+	if err != nil {
+		return GateDecision{}, fmt.Errorf("gate: load patch for merge review %s: %w", patchID, err)
+	}
+	display := renderMerge(result, patch)
 	approved, proceeded, notes, err := s.review(ctx, display, 0, false)
 	if err != nil {
 		return GateDecision{Approved: false}, err
@@ -83,12 +115,16 @@ func (s *service) review(ctx context.Context, display string, reviewWindow time.
 		if _, err := fmt.Fprint(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject.]\n"); err != nil {
 			return false, false, "", err
 		}
-		line, err := readLine(ctx, s.in)
-		if err != nil {
-			return false, false, "", err
+		select {
+		case result := <-s.lines:
+			if result.err != nil {
+				return false, false, "", result.err
+			}
+			approved, proceeded, notes := parseApproval(result.line)
+			return approved, proceeded, notes, nil
+		case <-ctx.Done():
+			return false, false, "", ctx.Err()
 		}
-		approved, proceeded, notes := parseApproval(line)
-		return approved, proceeded, notes, nil
 	}
 	if !allowTimeout {
 		return false, false, "", fmt.Errorf("gate: timeout is not allowed for this gate")
@@ -96,56 +132,36 @@ func (s *service) review(ctx context.Context, display string, reviewWindow time.
 	if _, err := fmt.Fprintf(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject. Auto-proceeding in %v...]\n", reviewWindow); err != nil {
 		return false, false, "", err
 	}
-	lineCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(s.in).ReadString('\n')
-		if err != nil && err != io.EOF {
-			errCh <- err
-			return
-		}
-		lineCh <- line
-	}()
 	timer := time.NewTimer(reviewWindow)
 	defer timer.Stop()
 	select {
-	case line := <-lineCh:
-		approved, _, notes := parseApproval(line)
+	case result := <-s.lines:
+		if result.err != nil {
+			return false, false, "", result.err
+		}
+		approved, _, notes := parseApproval(result.line)
 		return approved, false, notes, nil
-	case err := <-errCh:
-		return false, false, "", err
 	case <-timer.C:
+		// Discard any line buffered during this window so the next gate
+		// starts clean — do not carry stale input forward.
+		select {
+		case <-s.lines:
+		default:
+		}
 		return true, true, "", nil
 	case <-ctx.Done():
 		return false, false, "", ctx.Err()
 	}
 }
 
-func readLine(ctx context.Context, in io.Reader) (string, error) {
-	lineCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(in).ReadString('\n')
-		if err != nil && err != io.EOF {
-			errCh <- err
-			return
-		}
-		lineCh <- line
-	}()
-	select {
-	case line := <-lineCh:
-		return line, nil
-	case err := <-errCh:
-		return "", err
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-}
-
+// parseApproval interprets a trimmed input line as approve or reject.
+// Rejections: text starting with "reject" (handles "reject because X"),
+// or the tokens "no" / "n". Everything else approves, with the text as notes.
 func parseApproval(line string) (approved bool, proceeded bool, notes string) {
 	text := strings.TrimSpace(line)
-	if strings.EqualFold(text, "reject") {
-		return false, false, "reject"
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, "reject") || lower == "no" || lower == "n" {
+		return false, false, text
 	}
 	return true, false, text
 }
@@ -207,23 +223,59 @@ func renderProjection(p *schema.HumanSummaryProjection) string {
 	return b.String()
 }
 
-func renderMerge(r *schema.VerifierResult) string {
+func renderMerge(r *schema.VerifierResult, p *schema.PatchArtifact) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Merge Review\n\n")
-	fmt.Fprintf(&b, "Patch: %s\n", r.PatchID)
+	fmt.Fprintf(&b, "Patch: %s (capsule %s)\n", r.PatchID, p.CapsuleID)
+	if p.Summary != "" {
+		fmt.Fprintf(&b, "Summary: %s\n", p.Summary)
+	}
+	if len(p.ChangedFiles) > 0 {
+		fmt.Fprintf(&b, "Changed files: %s\n", strings.Join(p.ChangedFiles, ", "))
+	}
+	if p.DiffPath != "" {
+		fmt.Fprintf(&b, "Diff: %s\n", p.DiffPath)
+	}
+	if len(p.ObligationIDsClaimed) > 0 {
+		fmt.Fprintf(&b, "Claimed obligations: %s\n", strings.Join(p.ObligationIDsClaimed, ", "))
+	}
+	if len(p.RiskNotes) > 0 {
+		fmt.Fprintf(&b, "Risk notes: %s\n", strings.Join(p.RiskNotes, "; "))
+	}
+	if len(p.ScopeViolations) > 0 {
+		fmt.Fprintf(&b, "Scope violations: %s\n", strings.Join(p.ScopeViolations, ", "))
+	}
 	fmt.Fprintf(&b, "Recommended action: %s\n", r.RecommendedAction)
 	if r.RecommendationRationale != "" {
 		fmt.Fprintf(&b, "Rationale: %s\n", r.RecommendationRationale)
 	}
 	if len(r.BlockingFailures) > 0 {
 		fmt.Fprintf(&b, "\nBlocking failures:\n")
-		for _, failure := range r.BlockingFailures {
-			fmt.Fprintf(&b, "- %s\n", failure)
+		for _, f := range r.BlockingFailures {
+			fmt.Fprintf(&b, "- %s\n", f)
 		}
+	}
+	if len(r.Warnings) > 0 {
+		fmt.Fprintf(&b, "\nWarnings:\n")
+		for _, w := range r.Warnings {
+			fmt.Fprintf(&b, "- %s\n", w)
+		}
+	}
+	if len(r.Invalidates) > 0 {
+		fmt.Fprintf(&b, "\nInvalidates: %s\n", strings.Join(r.Invalidates, ", "))
+	}
+	if len(r.FailureIDs) > 0 {
+		fmt.Fprintf(&b, "Failure records: %s\n", strings.Join(r.FailureIDs, ", "))
 	}
 	fmt.Fprintf(&b, "\nObligation results:\n")
 	for _, result := range r.ObligationResults {
 		fmt.Fprintf(&b, "- %s: %s", result.ObligationID, result.Verdict)
+		if len(result.EvidenceIDs) > 0 {
+			fmt.Fprintf(&b, " [evidence: %s]", strings.Join(result.EvidenceIDs, ", "))
+		}
+		if result.WaivedBy != "" {
+			fmt.Fprintf(&b, " [waived by: %s]", result.WaivedBy)
+		}
 		if result.Notes != "" {
 			fmt.Fprintf(&b, " - %s", result.Notes)
 		}

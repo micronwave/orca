@@ -257,7 +257,47 @@ func TestReviewWaiver_ApprovesAndRejects(t *testing.T) {
 	}
 }
 
-func TestReviewProjection_ContextCancellation(t *testing.T) {
+func TestReviewProjection_ClosedStdin_Errors(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	e.seedProjection(t)
+	// Empty reader simulates stdin closed immediately (EOF with no data).
+	g := gate.NewWithIO(e.st, strings.NewReader(""), &bytes.Buffer{})
+	_, err := g.ReviewProjection(e.ctx, "CAP-1", 0)
+	if err == nil {
+		t.Fatal("expected error on closed stdin, got nil — would have silently approved")
+	}
+}
+
+func TestReviewProjection_RejectsAliases(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"no", "no\n"},
+		{"n", "n\n"},
+		{"reject_with_reason", "reject because it is unsafe\n"},
+		{"REJECT_upper", "REJECT\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newGateEnv(t)
+			e.seedCore(t)
+			e.seedProjection(t)
+			var out bytes.Buffer
+			g := gate.NewWithIO(e.st, strings.NewReader(tt.input), &out)
+			decision, err := g.ReviewProjection(e.ctx, "CAP-1", 0)
+			if err != nil {
+				t.Fatalf("ReviewProjection: %v", err)
+			}
+			if decision.Approved {
+				t.Fatalf("input %q: Approved = true, want false (rejection)", tt.input)
+			}
+		})
+	}
+}
+
+func TestReviewContextCancellation(t *testing.T) {
 	e := newGateEnv(t)
 	e.seedCore(t)
 	e.seedProjection(t)
@@ -270,5 +310,57 @@ func TestReviewProjection_ContextCancellation(t *testing.T) {
 	_, err := g.ReviewProjection(ctx, "CAP-1", 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestReviewMerge_RendersPatches(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	if err := e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-2",
+		CapsuleID:            "CAP-1",
+		Status:               schema.PatchCandidate,
+		Summary:              "add String() to RiskLevel",
+		ChangedFiles:         []string{"internal/schema/common.go"},
+		DiffPath:             ".orca/artifacts/patches/PATCH-2.diff",
+		ObligationIDsClaimed: []string{"OB-1"},
+		RiskNotes:            []string{"touches exported type"},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := e.st.SaveVerifierResult(e.ctx, &schema.VerifierResult{
+		VerifierResultID:  "VR-2",
+		PatchID:           "PATCH-2",
+		CapsuleID:         "CAP-1",
+		RecommendedAction: schema.ActionAccept,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: "OB-1",
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{"EV-1"},
+		}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	var out bytes.Buffer
+	g := gate.NewWithIO(e.st, strings.NewReader("\n"), &out)
+	decision, err := g.ReviewMerge(e.ctx, "PATCH-2")
+	if err != nil {
+		t.Fatalf("ReviewMerge: %v", err)
+	}
+	if !decision.Approved {
+		t.Fatalf("decision = %+v, want approved", decision)
+	}
+	rendered := out.String()
+	for _, want := range []string{
+		"add String() to RiskLevel",
+		"internal/schema/common.go",
+		"PATCH-2.diff",
+		"OB-1",
+		"EV-1",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("merge render missing %q:\n%s", want, rendered)
+		}
 	}
 }
