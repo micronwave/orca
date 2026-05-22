@@ -176,7 +176,7 @@ func (s *service) ProposeObligations(ctx context.Context, goalID string) ([]stri
 				GoalConditionID:  condition.ID,
 				Description:      "Confirm only intended files changed (scope check)",
 				EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
-				Blocking:         false,
+				Blocking:         true,
 				RiskLevel:        schema.RiskLow,
 				Status:           schema.ObligationOpen,
 			},
@@ -701,7 +701,14 @@ func (s *service) runOrReuseGate(
 			return nil, 0, err
 		}
 		if len(reused) > 0 {
-			return reused, 0, nil
+			reuseExitCode := 0
+			for _, ev := range reused {
+				if ev.ExitCode != 0 {
+					reuseExitCode = ev.ExitCode
+					break
+				}
+			}
+			return reused, reuseExitCode, nil
 		}
 	}
 	if err := s.commandChecker(command); err != nil {
