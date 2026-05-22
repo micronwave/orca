@@ -30,6 +30,7 @@ type BudgetRecord struct {
 	PatchesAccepted         int `json:"patches_accepted"`
 	PatchesRejected         int `json:"patches_rejected"`
 	EvidenceArtifactsReused int `json:"evidence_artifacts_reused"`
+	AvoidedRetries          int `json:"avoided_retries"`
 	HumanInterventions      int `json:"human_interventions"`
 
 	CreatedAt time.Time `json:"created_at"`
