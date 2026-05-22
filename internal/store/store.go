@@ -67,7 +67,8 @@ type ArtifactStore interface {
 	UpdateCapsuleState(ctx context.Context, capsuleID string, state schema.CapsuleState) error
 	// UpdateCapsuleProjectionID links an executor projection to its capsule.
 	// Called by the orchestrator after CompileExecutor so the runner can load
-	// the projection via capsule.ContextProjectionID.
+	// the projection via capsule.ContextProjectionID. The implementation appends
+	// capsule_projection_linked to the event log before mutating the capsule file.
 	UpdateCapsuleProjectionID(ctx context.Context, capsuleID, projectionID string) error
 
 	// --- Context Projections ---

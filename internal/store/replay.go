@@ -243,6 +243,16 @@ func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.updateCapsuleStateNoLock(p.CapsuleID, p.State)
 
+	case schema.EventCapsuleProjectionLinked:
+		var p schema.CapsuleProjectionPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal capsule_projection_linked payload: %w", err)
+		}
+		if p.CapsuleID == "" || p.ProjectionID == "" {
+			return fmt.Errorf("invalid capsule_projection_linked payload: capsule_id and projection_id are required")
+		}
+		return s.updateCapsuleProjectionIDNoLock(p.CapsuleID, p.ProjectionID)
+
 	case schema.EventPatchAccepted:
 		var p schema.PatchStatusPayload
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
@@ -322,6 +332,18 @@ func (s *FileStore) updateClaimStatusNoLock(claimID string, status schema.ClaimS
 	if invalidatedBy != nil {
 		c.InvalidatedBy = cloneStrings(invalidatedBy)
 	}
+	return s.writeFile(path, c)
+}
+
+// updateCapsuleProjectionIDNoLock reads the capsule file, updates ContextProjectionID, writes back.
+// Caller must hold s.mu.Lock().
+func (s *FileStore) updateCapsuleProjectionIDNoLock(capsuleID, projectionID string) error {
+	path := s.artifactPath(dirCapsules, capsuleID)
+	c, err := readFile[schema.ExecutionCapsule](path)
+	if err != nil {
+		return err
+	}
+	c.ContextProjectionID = projectionID
 	return s.writeFile(path, c)
 }
 

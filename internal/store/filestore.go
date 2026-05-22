@@ -653,8 +653,20 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 	if err != nil {
 		return err
 	}
+	if len(c.ObligationIDs) == 0 {
+		return fmt.Errorf("store: UpdateCapsuleProjectionID: capsule %s has no obligation IDs", capsuleID)
+	}
+	goalID, err := s.goalIDForObligation(c.ObligationIDs[0])
+	if err != nil {
+		return fmt.Errorf("store: UpdateCapsuleProjectionID: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventCapsuleProjectionLinked, goalID, capsuleID,
+		&schema.CapsuleProjectionPayload{CapsuleID: capsuleID, ProjectionID: projectionID})
+	if err != nil {
+		return err
+	}
 	c.ContextProjectionID = projectionID
-	return s.writeFile(s.artifactPath(dirCapsules, capsuleID), c)
+	return materializationError(ev, s.writeFile(s.artifactPath(dirCapsules, capsuleID), c))
 }
 
 // ── Context Projections ──────────────────────────────────────────────────────

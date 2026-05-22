@@ -1835,6 +1835,29 @@ func TestReplay_AppliesCapsuleStarted(t *testing.T) {
 	}
 }
 
+func TestReplay_AppliesCapsuleProjectionLinked(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+
+	if err := e.st.UpdateCapsuleProjectionID(e.ctx, "CAP-1", "PROJ-42"); err != nil {
+		t.Fatalf("UpdateCapsuleProjectionID: %v", err)
+	}
+
+	wipeArtifacts(t, e)
+	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got, err := e.st.LoadCapsule(e.ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadCapsule after replay: %v", err)
+	}
+	if got.ContextProjectionID != "PROJ-42" {
+		t.Errorf("ContextProjectionID = %q, want %q", got.ContextProjectionID, "PROJ-42")
+	}
+}
+
 func TestReplay_RejectsUpdateBeforeCreate(t *testing.T) {
 	e := newEnv(t)
 	if _, err := e.log.Append(e.ctx, schema.Event{

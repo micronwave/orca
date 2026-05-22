@@ -20,6 +20,9 @@ const (
 	EventCapsuleCreated            EventType = "capsule_created"
 	EventCapsuleStarted            EventType = "capsule_started"
 	EventCapsuleCompleted          EventType = "capsule_completed"
+	// EventCapsuleProjectionLinked is emitted by FileStore.UpdateCapsuleProjectionID
+	// before mutating the capsule file, making the projection link replayable.
+	EventCapsuleProjectionLinked EventType = "capsule_projection_linked"
 	EventPatchArtifactCreated      EventType = "patch_artifact_created"
 	EventEvidenceArtifactCreated   EventType = "evidence_artifact_created"
 	EventClaimCreated              EventType = "claim_created"
@@ -92,4 +95,12 @@ type CapsuleTransitionPayload struct {
 // patch_rejected. The event type determines the target status.
 type PatchStatusPayload struct {
 	PatchID string `json:"patch_id"`
+}
+
+// CapsuleProjectionPayload is the event payload for capsule_projection_linked.
+// FileStore.UpdateCapsuleProjectionID appends this event before mutating the
+// capsule file so the projection link survives crash+replay.
+type CapsuleProjectionPayload struct {
+	CapsuleID    string `json:"capsule_id"`
+	ProjectionID string `json:"projection_id"`
 }
