@@ -212,7 +212,15 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 				reject(&result, fmt.Sprintf("blocking obligation %s verdict is %s", obl.ObligationID, verdict.Verdict))
 				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
 			}
-			if len(verdict.EvidenceIDs) == 0 {
+			// A waiver does not require evidence IDs — WaivedBy carries the human
+			// authorization token instead. An empty WaivedBy is not a valid waiver:
+			// no human approved the bypass, so the obligation must be rejected.
+			if verdict.Verdict == schema.VerdictWaived && strings.TrimSpace(verdict.WaivedBy) == "" {
+				reject(&result, fmt.Sprintf("blocking obligation %s waiver has no WaivedBy authorization", obl.ObligationID))
+				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
+				continue
+			}
+			if len(verdict.EvidenceIDs) == 0 && verdict.Verdict != schema.VerdictWaived {
 				reject(&result, fmt.Sprintf("blocking obligation %s has no evidence IDs", obl.ObligationID))
 				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
 				continue
