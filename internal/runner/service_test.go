@@ -57,6 +57,7 @@ func TestRunUsesSidecarPath(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_sidecar.txt"), []byte("updated"), 0o644); err != nil {
 				t.Fatalf("write file in execute: %v", err)
 			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "runner_sidecar.txt")
 			return &schema.AgentSidecarOutput{
 				ObligationsAddressed: []string{"OB-1"},
 				FilesChanged:         []string{"runner_sidecar.txt"},
@@ -123,6 +124,7 @@ func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_walltime.txt"), []byte("updated"), 0o644); err != nil {
 				t.Fatalf("write file in execute: %v", err)
 			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "runner_walltime.txt")
 			time.Sleep(time.Millisecond) // ensure measurable duration for the fallback timer
 			return &schema.AgentSidecarOutput{
 				ObligationsAddressed: []string{"OB-1"},
@@ -164,6 +166,7 @@ func TestRunPreservesClaimDisputeEdgesAndLeavesVerificationToReconciler(t *testi
 			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_claims.txt"), []byte("updated"), 0o644); err != nil {
 				t.Fatalf("write file in execute: %v", err)
 			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "runner_claims.txt")
 			return &schema.AgentSidecarOutput{
 				ObligationsAddressed: []string{"OB-1"},
 				FilesChanged:         []string{"runner_claims.txt"},
@@ -226,6 +229,7 @@ func TestRunFallsBackToTranscript(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runner_fallback.txt"), []byte("updated"), 0o644); err != nil {
 				t.Fatalf("write fallback file: %v", err)
 			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "runner_fallback.txt")
 			return &schema.AgentSidecarOutput{
 				ObligationsAddressed: []string{"OB-1"},
 				FilesChanged:         []string{"runner_fallback.txt"},
