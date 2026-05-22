@@ -27,7 +27,7 @@ func (s *service) CheckCapsuleBudget(ctx context.Context, capsuleID string) (Bud
 	if err != nil {
 		return BudgetCheck{}, err
 	}
-	spend, _, err := s.spendForGoal(ctx, goalID)
+	spend, _, err := s.spendForGoal(ctx, goalID, capsule.CapsuleID)
 	if err != nil {
 		return BudgetCheck{}, err
 	}
@@ -60,7 +60,7 @@ func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 	if goalID == "" {
 		return ROI{}, fmt.Errorf("budget: goalID is required")
 	}
-	spend, records, err := s.spendForGoal(ctx, goalID)
+	spend, records, err := s.spendForGoal(ctx, goalID, "")
 	if err != nil {
 		return ROI{}, err
 	}
@@ -77,10 +77,11 @@ func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 		roi.PatchesAccepted += record.PatchesAccepted
 		roi.PatchesRejected += record.PatchesRejected
 		roi.EvidenceArtifactsReused += record.EvidenceArtifactsReused
+		roi.AvoidedRetries += record.AvoidedRetries
 		roi.HumanInterventions += record.HumanInterventions
 	}
 	if roi.TotalTokensSpent > 0 {
-		value := roi.ObligationsDischarged + roi.PatchesAccepted + roi.EvidenceArtifactsReused
+		value := roi.ObligationsDischarged + roi.PatchesAccepted + roi.EvidenceArtifactsReused + roi.AvoidedRetries
 		roi.VerifiedValuePer1KTokens = float64(value) * 1000 / float64(roi.TotalTokensSpent)
 	}
 	return roi, nil
@@ -116,7 +117,7 @@ func (s *service) loadCapsuleFromLog(ctx context.Context, capsuleID string) (sch
 	return schema.ExecutionCapsule{}, "", fmt.Errorf("budget: capsule %s: %w", capsuleID, errors.New("not found in event log"))
 }
 
-func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[string]schema.BudgetRecord, error) {
+func (s *service) spendForGoal(ctx context.Context, goalID string, capsuleIDFilter string) (Spend, map[string]schema.BudgetRecord, error) {
 	records := make(map[string]schema.BudgetRecord)
 	var seq int64
 	for {
@@ -138,6 +139,9 @@ func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[s
 			if record.BudgetID == "" {
 				return Spend{}, nil, fmt.Errorf("budget: %s event %s missing budget_id", event.Type, event.EventID)
 			}
+			if err := validateBudgetRecord(&record); err != nil {
+				return Spend{}, nil, fmt.Errorf("budget: invalid record %s: %w", record.BudgetID, err)
+			}
 			records[record.BudgetID] = record
 		}
 		seq = events[len(events)-1].SequenceNum
@@ -145,6 +149,9 @@ func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[s
 	var spend Spend
 	for _, record := range records {
 		if record.ObligationID != "" {
+			continue
+		}
+		if capsuleIDFilter != "" && record.CapsuleID != capsuleIDFilter {
 			continue
 		}
 		spend.TokensUsed += record.TokensSpent
@@ -158,4 +165,14 @@ func (s *service) spendForGoal(ctx context.Context, goalID string) (Spend, map[s
 
 func coordinationCost(record schema.BudgetRecord) int {
 	return record.Retries + record.DuplicatedFileReads + record.OverlappingEdits + record.HumanInterventions
+}
+
+func validateBudgetRecord(r *schema.BudgetRecord) error {
+	if r.TokensSpent < 0 || r.WallTimeSeconds < 0 || r.Retries < 0 || r.ToolCalls < 0 ||
+		r.DuplicatedFileReads < 0 || r.OverlappingEdits < 0 || r.HumanInterventions < 0 ||
+		r.ObligationsDischarged < 0 || r.PatchesAccepted < 0 || r.PatchesRejected < 0 ||
+		r.EvidenceArtifactsReused < 0 || r.AvoidedRetries < 0 {
+		return fmt.Errorf("consumption fields must be non-negative")
+	}
+	return nil
 }

@@ -51,7 +51,7 @@ type BudgetCheck struct {
 	// Reason explains why Allowed is false; empty when Allowed is true.
 	Reason string
 
-	// CurrentSpend is the spend accumulated so far for this capsule's goal,
+	// CurrentSpend is the spend accumulated so far for this capsule,
 	// derived from events in the log.
 	CurrentSpend Spend
 
@@ -84,5 +84,6 @@ type ROI struct {
 	PatchesAccepted         int
 	PatchesRejected         int
 	EvidenceArtifactsReused int
+	AvoidedRetries          int
 	HumanInterventions      int
 }
