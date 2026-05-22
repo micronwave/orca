@@ -95,10 +95,8 @@ type ClassifyInput struct {
 	// The following fields may be empty/zero in Phase 1 implementations.
 	// Populate them in Phase 2+ as the data becomes available.
 	ExpectedFileOverlap       bool
-	TestsExist                bool
 	ApprovalPolicy            string
 	BudgetRemaining           int
-	RequiredTools             []string
 	ExpectedFilesByObligation map[string][]string
 	ProtectedPaths            []string
 }
