@@ -325,7 +325,7 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 			return nil, fmt.Errorf("verifier: load obligation %s: %w", obligationID, err)
 		}
 		verdict := schema.VerdictSatisfied
-		note := "all required evidence checks passed"
+		var failureNotes []string
 		obligationEvidence, err := s.collectObligationEvidence(ctx, obligationID, createdEvidence, supplementalEvidenceByID)
 		if err != nil {
 			return nil, err
@@ -335,7 +335,7 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 			relevant := evidenceForType(obligationEvidence, required)
 			if len(relevant) == 0 {
 				verdict = schema.VerdictFailed
-				note = fmt.Sprintf("missing evidence type %s", required)
+				failureNotes = append(failureNotes, fmt.Sprintf("missing evidence type %s", required))
 				continue
 			}
 			for _, evidence := range relevant {
@@ -343,8 +343,12 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 			}
 			if hasFailedEvidence(relevant) {
 				verdict = schema.VerdictFailed
-				note = fmt.Sprintf("evidence type %s contains failing result", required)
+				failureNotes = append(failureNotes, fmt.Sprintf("evidence type %s contains failing result", required))
 			}
+		}
+		note := "all required evidence checks passed"
+		if len(failureNotes) > 0 {
+			note = strings.Join(failureNotes, "; ")
 		}
 		evidenceIDs := mapKeys(usedEvidenceIDs)
 		if obligation.Blocking && verdict == schema.VerdictFailed {
@@ -712,7 +716,12 @@ func (s *service) runOrReuseGate(
 		}
 	}
 	if err := s.commandChecker(command); err != nil {
-		return nil, 1, nil
+		warnSummary := fmt.Sprintf("command not found for gate %q: %v", gate.Name, err)
+		evidence, saveErr := s.saveEvidence(ctx, evidenceType, command, 1, warnSummary, obligationRefs, "", "", "")
+		if saveErr != nil {
+			return nil, 1, saveErr
+		}
+		return []*schema.EvidenceArtifact{evidence}, 1, nil
 	}
 	exitCode, output, runErr := s.runner.Run(ctx, command, workingDir)
 	if runErr != nil {
