@@ -366,6 +366,21 @@ func TestShouldReviewProjection_SingleTopologyAllRisksGate(t *testing.T) {
 	}
 }
 
+func TestRunCancelEOFAbortsWithoutCancelling(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+
+	var out bytes.Buffer
+	if err := runCancel([]string{"--orca-dir", orcaDir}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("run cancel EOF: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cancel aborted.") {
+		t.Fatalf("EOF output = %q, want Cancel aborted", out.String())
+	}
+	if got := loadGoalStatus(t, orcaDir, "G-1"); got != schema.GoalStatusActive {
+		t.Fatalf("goal status after EOF = %s, want active", got)
+	}
+}
+
 var configLoad = config.Load
 
 func writeTestConfig(t *testing.T, path string) {

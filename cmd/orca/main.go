@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -585,11 +586,15 @@ func (rt *runtime) cancelActiveGoal(ctx context.Context, in io.Reader, out io.Wr
 	if len(capsules) > 0 {
 		fmt.Fprintf(out, "Active capsules are still running or pending for goal %s.\n", goal.GoalID)
 		fmt.Fprint(out, "Type 'cancel' to cancel the active goal: ")
-		var response string
-		if _, err := fmt.Fscan(in, &response); err != nil {
-			return fmt.Errorf("orca cancel: read confirmation: %w", err)
+		scanner := bufio.NewScanner(in)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("orca cancel: read confirmation: %w", err)
+			}
+			fmt.Fprintln(out, "Cancel aborted.")
+			return nil
 		}
-		if !strings.EqualFold(response, "cancel") {
+		if !strings.EqualFold(strings.TrimSpace(scanner.Text()), "cancel") {
 			fmt.Fprintln(out, "Cancel aborted.")
 			return nil
 		}
