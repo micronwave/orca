@@ -13,6 +13,10 @@ const (
 	EvidenceLintResult      EvidenceType = "lint_result"
 	EvidenceTypecheckResult EvidenceType = "typecheck_result"
 	EvidenceDiffRiskReport  EvidenceType = "diff_risk_report"
+	// EvidenceAgentOutput is a raw agent transcript or log file. It does not
+	// assert any command exit code and must not satisfy gate checks that require
+	// test_result, lint_result, or typecheck_result evidence.
+	EvidenceAgentOutput EvidenceType = "agent_output"
 )
 
 // EvidenceArtifact proves, weakens, or contextualizes a claim or patch.
