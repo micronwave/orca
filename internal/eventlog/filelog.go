@@ -41,6 +41,10 @@ var (
 // Returns an error if any completed line cannot be parsed (corrupt log). A
 // malformed unterminated final line is treated as a crash-partial append and
 // truncated before opening for append.
+//
+// Only one OS process may write to the same path at a time. Open does not
+// acquire an inter-process lock; two concurrent writers would produce
+// duplicate SequenceNum values, corrupting the authoritative history.
 func Open(path string) (*FileLog, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("eventlog: mkdir %s: %w", filepath.Dir(path), err)
@@ -112,9 +116,16 @@ func scanMaxSeq(path string) (maxSeq int64, repairAt int64, err error) {
 			}
 			return 0, -1, fmt.Errorf("eventlog: corrupt line %d: %w", lineNum, err)
 		}
-		if e.SequenceNum > maxSeq {
-			maxSeq = e.SequenceNum
+		// A valid-JSON record that is not newline-terminated is an incomplete
+		// append (e.g. crash after write, before the '\n' was flushed). The next
+		// Append would concatenate JSON directly onto it, corrupting the log.
+		if !terminated && errors.Is(readErr, io.EOF) {
+			return maxSeq, lineStart, nil
 		}
+		if e.SequenceNum != maxSeq+1 {
+			return 0, -1, fmt.Errorf("eventlog: ordering violation at line %d: got seq %d, want %d", lineNum, e.SequenceNum, maxSeq+1)
+		}
+		maxSeq = e.SequenceNum
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				break
@@ -185,7 +196,13 @@ func (l *FileLog) Append(_ context.Context, e schema.Event) (schema.Event, error
 
 	n, err := l.f.Write(line)
 	if err != nil {
-		l.seq-- // write failed; the line is not on disk
+		if n > 0 {
+			// Partial write: bytes may be on disk. Cannot reuse seq safely;
+			// poison the log so callers do not continue on corrupt state.
+			l.err = fmt.Errorf("%w: partial write (%d/%d bytes): %v", ErrUncertainCommit, n, len(line), err)
+			return schema.Event{}, l.err
+		}
+		l.seq-- // zero bytes written; seq is safe to reuse
 		return schema.Event{}, fmt.Errorf("eventlog: write: %w", err)
 	}
 	if n != len(line) {
@@ -209,6 +226,9 @@ func (l *FileLog) ReadAfter(_ context.Context, afterSeq int64, limit int) ([]sch
 	if l.done {
 		return nil, ErrClosed
 	}
+	if l.err != nil {
+		return nil, l.err
+	}
 	return l.scan(afterSeq, limit, func(_ schema.Event) bool { return true })
 }
 
@@ -219,6 +239,9 @@ func (l *FileLog) ReadByType(_ context.Context, eventType schema.EventType, afte
 	if l.done {
 		return nil, ErrClosed
 	}
+	if l.err != nil {
+		return nil, l.err
+	}
 	return l.scan(afterSeq, limit, func(e schema.Event) bool { return e.Type == eventType })
 }
 
@@ -228,6 +251,9 @@ func (l *FileLog) ReadForGoal(_ context.Context, goalID string, afterSeq int64, 
 	defer l.mu.RUnlock()
 	if l.done {
 		return nil, ErrClosed
+	}
+	if l.err != nil {
+		return nil, l.err
 	}
 	return l.scan(afterSeq, limit, func(e schema.Event) bool { return e.GoalID == goalID })
 }
