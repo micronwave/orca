@@ -282,8 +282,13 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 		return ReconcileResult{}, fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)
 	}
 
-	if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
-		return ReconcileResult{}, err
+	// verifyClaims must only run for accepted patches. Promoting proposed claims
+	// to verified on a rejected patch makes failed work appear factual and
+	// eligible for downstream projection.
+	if result.PatchAccepted {
+		if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
+			return ReconcileResult{}, err
+		}
 	}
 	if err := s.detectClaimDisputes(ctx, goal.GoalID, vr); err != nil {
 		return ReconcileResult{}, err
