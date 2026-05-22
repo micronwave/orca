@@ -70,3 +70,89 @@ verifier:
 		t.Fatal("Load succeeded without verifier gates")
 	}
 }
+
+func TestLoadGateBlockingDefaultsTrue(t *testing.T) {
+	// A gate without an explicit blocking field must default to true so that
+	// a config omission cannot silently downgrade a blocking gate to warning-only.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Verifier.Gates[0].Blocking {
+		t.Fatal("gate without explicit blocking: field defaulted to false, want true")
+	}
+}
+
+func TestLoadRejectsZeroBudgetFields(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "zero_max_tokens",
+			yaml: `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+budget:
+  default_max_tokens: 0
+  default_max_wall_time_seconds: 300
+`,
+		},
+		{
+			name: "zero_wall_time",
+			yaml: `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 0
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load succeeded with zero budget field, want error")
+			}
+		})
+	}
+}
+
+func TestStripCommentQuoteAware(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{`command: "go test -run Test#Helper"`, `command: "go test -run Test#Helper"`},
+		{`command: 'go test ./...' # a comment`, `command: 'go test ./...' `},
+		{`key: value # comment`, `key: value `},
+		{`key: value`, `key: value`},
+	}
+	for _, tc := range cases {
+		got := stripComment(tc.input)
+		if got != tc.want {
+			t.Errorf("stripComment(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

@@ -121,7 +121,7 @@ func Load(path string) (*Config, error) {
 			}
 			if inVerifierGates && indent > 2 {
 				if strings.HasPrefix(line, "- ") {
-					cfg.Verifier.Gates = append(cfg.Verifier.Gates, VerifierGate{})
+					cfg.Verifier.Gates = append(cfg.Verifier.Gates, VerifierGate{Blocking: true})
 					currentGate = &cfg.Verifier.Gates[len(cfg.Verifier.Gates)-1]
 					line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
 					if line == "" {
@@ -212,12 +212,26 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: verifier.gates[%d].command is required", i)
 		}
 	}
+	if cfg.Budget.DefaultMaxTokens == 0 {
+		return nil, fmt.Errorf("config: budget.default_max_tokens must be greater than 0")
+	}
+	if cfg.Budget.DefaultMaxWallTimeSeconds == 0 {
+		return nil, fmt.Errorf("config: budget.default_max_wall_time_seconds must be greater than 0")
+	}
 	return cfg, nil
 }
 
 func stripComment(line string) string {
-	if idx := strings.IndexByte(line, '#'); idx >= 0 {
-		return line[:idx]
+	inSingle, inDouble := false, false
+	for i, r := range line {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == '#' && !inSingle && !inDouble:
+			return line[:i]
+		}
 	}
 	return line
 }
