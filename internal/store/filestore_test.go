@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +62,33 @@ func (e *testEnv) seedGoal(t *testing.T, goalID string, conditionIDs ...string) 
 	}
 	if err := e.st.SaveGoal(e.ctx, g); err != nil {
 		t.Fatalf("seedGoal %s: %v", goalID, err)
+	}
+	return g
+}
+
+// seedCompletedGoal seeds a goal with GoalStatusComplete. Use this when a test
+// needs a second (or later) goal to exist alongside an active goal.
+func (e *testEnv) seedCompletedGoal(t *testing.T, goalID string, conditionIDs ...string) *schema.GoalIR {
+	t.Helper()
+	var conditions []schema.GoalCondition
+	for _, cid := range conditionIDs {
+		conditions = append(conditions, schema.GoalCondition{
+			ID:                   cid,
+			Description:          "condition " + cid,
+			EffectiveDescription: "condition " + cid,
+			Status:               schema.GoalConditionUnmet,
+		})
+	}
+	g := &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test goal",
+		GoalConditions: conditions,
+		RiskLevel:      schema.RiskLow,
+		CreatedAt:      time.Now().UTC(),
+		Status:         schema.GoalStatusComplete,
+	}
+	if err := e.st.SaveGoal(e.ctx, g); err != nil {
+		t.Fatalf("seedCompletedGoal %s: %v", goalID, err)
 	}
 	return g
 }
@@ -328,7 +356,7 @@ func TestObligation_UpdateStatus(t *testing.T) {
 func TestObligation_LoadOpenObligations(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-2", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-3", "GC-1", schema.ObligationSatisfied)
@@ -950,7 +978,7 @@ func TestClaim_LoadVerifiedForFiles_NormalizesWindowsPaths(t *testing.T) {
 func TestClaim_LoadClaimsForGoal(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
@@ -978,7 +1006,7 @@ func TestClaim_LoadClaimsForGoal(t *testing.T) {
 func TestClaim_LoadClaimsByStatus(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
@@ -1067,6 +1095,29 @@ func TestGoal_LoadActiveGoal(t *testing.T) {
 	}
 	if active != nil {
 		t.Errorf("expected nil after completion, got %+v", active)
+	}
+}
+
+func TestGoal_SaveGoal_rejectsSecondActiveGoal(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1") // first active goal — must succeed
+
+	err := e.st.SaveGoal(e.ctx, &schema.GoalIR{
+		GoalID:         "G-2",
+		OriginalIntent: "second goal",
+		GoalConditions: []schema.GoalCondition{{
+			ID: "GC-2", Description: "c", EffectiveDescription: "c",
+			Status: schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	})
+	if err == nil {
+		t.Fatal("SaveGoal: expected error for second active goal, got nil")
+	}
+	if !strings.Contains(err.Error(), "active goal G-1 already exists") {
+		t.Fatalf("SaveGoal error = %q, want it to mention G-1", err.Error())
 	}
 }
 
@@ -1184,7 +1235,7 @@ func TestFailure_LoadForCapsule(t *testing.T) {
 func TestFailure_LoadAllFailuresScopesByGoal(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
@@ -1213,7 +1264,7 @@ func TestFailure_LoadAllFailuresScopesByGoal(t *testing.T) {
 func TestFailure_LoadBySignatureReturnsOccurrencesOldestFirst(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedObligation(t, "OB-2", "GC-2", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
@@ -1424,7 +1475,7 @@ func TestBudget_SaveEmitsEvent(t *testing.T) {
 func TestBudget_LoadForGoal(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	for _, b := range []*schema.BudgetRecord{
 		{BudgetID: "BUD-1", GoalID: "G-1", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
 		{BudgetID: "BUD-2", GoalID: "G-1", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
@@ -1482,7 +1533,7 @@ func TestBudget_UpdateMissingReturnsNotFound(t *testing.T) {
 func TestSnapshot_LoadLatest(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
-	e.seedGoal(t, "G-2", "GC-2")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
 	for _, s := range []*schema.StateSnapshot{
 		{SnapshotID: "SNAP-1", GoalID: "G-1", SequenceNum: 5, CreatedAt: time.Now().UTC()},
 		{SnapshotID: "SNAP-2", GoalID: "G-1", SequenceNum: 10, CreatedAt: time.Now().UTC()},

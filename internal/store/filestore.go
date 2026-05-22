@@ -437,6 +437,19 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Enforce one-active-goal invariant atomically under the write lock,
+	// closing the TOCTOU window between LoadActiveGoal and SaveGoal.
+	if g.Status == schema.GoalStatusActive {
+		goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+		if err != nil {
+			return fmt.Errorf("store: check active goal: %w", err)
+		}
+		for _, ex := range goals {
+			if ex.Status == schema.GoalStatusActive {
+				return fmt.Errorf("store: active goal %s already exists", ex.GoalID)
+			}
+		}
+	}
 	if err := ensureArtifactAbsent("goal", s.artifactPath(dirGoals, g.GoalID), g.GoalID); err != nil {
 		return err
 	}

@@ -21,6 +21,7 @@ package intent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -72,26 +73,33 @@ func (s *service) Compile(ctx context.Context, rawIntent string) (*schema.GoalIR
 		)
 	}
 
+	primaryParts := splitPrimaryConditions(intentText)
+	conditions := make([]schema.GoalCondition, 0, len(primaryParts)+1)
+	for _, part := range primaryParts {
+		if isScopeOnlyClause(part) {
+			continue
+		}
+		conditions = append(conditions, schema.GoalCondition{
+			ID:                   idgen.New("GC"),
+			Description:          part,
+			EffectiveDescription: part,
+			Status:               schema.GoalConditionUnmet,
+		})
+	}
+	conditions = append(conditions, schema.GoalCondition{
+		ID:                   idgen.New("GC"),
+		Description:          "All existing tests continue to pass",
+		EffectiveDescription: "All existing tests continue to pass",
+		Status:               schema.GoalConditionUnmet,
+	})
 	goal := schema.GoalIR{
-		GoalID:         idgen.New("G"),
-		OriginalIntent: intentText,
-		GoalConditions: []schema.GoalCondition{
-			{
-				ID:                   idgen.New("GC"),
-				Description:          intentText,
-				EffectiveDescription: intentText,
-				Status:               schema.GoalConditionUnmet,
-			},
-			{
-				ID:                   idgen.New("GC"),
-				Description:          "All existing tests continue to pass",
-				EffectiveDescription: "All existing tests continue to pass",
-				Status:               schema.GoalConditionUnmet,
-			},
-		},
-		RiskLevel: inferRiskLevel(intentText),
-		CreatedAt: time.Now().UTC(),
-		Status:    schema.GoalStatusActive,
+		GoalID:           idgen.New("G"),
+		OriginalIntent:   intentText,
+		GoalConditions:   conditions,
+		ScopeConstraints: parseScopeConstraints(intentText),
+		RiskLevel:        inferRiskLevel(intentText),
+		CreatedAt:        time.Now().UTC(),
+		Status:           schema.GoalStatusActive,
 	}
 	if err := s.store.SaveGoal(ctx, &goal); err != nil {
 		return nil, fmt.Errorf("intent: save goal %s: %w", goal.GoalID, err)
@@ -111,4 +119,83 @@ func inferRiskLevel(intentText string) schema.RiskLevel {
 		}
 	}
 	return schema.RiskMedium
+}
+
+// splitPrimaryConditions splits intentText on newlines and semicolons to
+// produce one GoalCondition per distinct sub-goal. Single-line intents
+// without separators return a one-element slice.
+func splitPrimaryConditions(intentText string) []string {
+	var parts []string
+	for _, raw := range strings.FieldsFunc(intentText, func(r rune) bool {
+		return r == '\n' || r == ';'
+	}) {
+		p := strings.TrimSpace(raw)
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) == 0 {
+		return []string{intentText}
+	}
+	return parts
+}
+
+const scopeVerbAlts = "touch|edit|modify|change|update"
+
+var (
+	// reAllowedTail captures the path list after "only <verb>", stopping at
+	// clause boundaries (semicolon, period, newline, or sentence-end punctuation).
+	reAllowedTail = regexp.MustCompile(
+		"(?i)\\bonly\\s+(?:" + scopeVerbAlts + ")\\s+([^;.\\n!?]+)")
+	// reForbiddenTail captures the path list after "do not/don't <verb>".
+	reForbiddenTail = regexp.MustCompile(
+		"(?i)\\b(?:do\\s+not|don'?t)\\s+(?:" + scopeVerbAlts + ")\\s+([^;.\\n!?]+)")
+	// reSplitPathList splits a captured tail on commas and "and".
+	reSplitPathList = regexp.MustCompile(`\s*,\s*|\s+and\s+`)
+	// rePureScopeClause matches a clause that begins with a scope directive.
+	rePureScopeClause = regexp.MustCompile(
+		"(?i)^\\s*(?:only\\s+(?:" + scopeVerbAlts + ")|(?:do\\s+not|don'?t)\\s+(?:" + scopeVerbAlts + "))\\b")
+)
+
+// parseScopeConstraints extracts AllowedFiles and ForbiddenFiles from
+// structured scope phrases in the intent text. Only slash-containing tokens
+// are extracted to avoid false positives on natural language words.
+func parseScopeConstraints(intentText string) schema.ScopeConstraints {
+	var sc schema.ScopeConstraints
+	for _, m := range reAllowedTail.FindAllStringSubmatch(intentText, -1) {
+		if len(m) > 1 {
+			sc.AllowedFiles = append(sc.AllowedFiles, extractPathsFromTail(m[1])...)
+		}
+	}
+	for _, m := range reForbiddenTail.FindAllStringSubmatch(intentText, -1) {
+		if len(m) > 1 {
+			sc.ForbiddenFiles = append(sc.ForbiddenFiles, extractPathsFromTail(m[1])...)
+		}
+	}
+	return sc
+}
+
+// extractPathsFromTail splits a captured tail on commas and "and", strips
+// surrounding punctuation and whitespace, and returns slash-containing tokens.
+func extractPathsFromTail(tail string) []string {
+	parts := reSplitPathList.Split(tail, -1)
+	var paths []string
+	for _, p := range parts {
+		p = strings.Trim(p, " \t.,;!?`'\"")
+		if strings.ContainsRune(p, '/') {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// isScopeOnlyClause reports whether s is a pure scope directive with no
+// substantive work objective. It returns true when the clause starts with a
+// scope directive verb phrase AND that directive resolves at least one path.
+func isScopeOnlyClause(s string) bool {
+	if !rePureScopeClause.MatchString(s) {
+		return false
+	}
+	sc := parseScopeConstraints(s)
+	return len(sc.AllowedFiles) > 0 || len(sc.ForbiddenFiles) > 0
 }

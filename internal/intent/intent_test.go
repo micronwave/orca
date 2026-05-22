@@ -64,6 +64,105 @@ func TestCompile_createsGoalAndSingleCreationEvent(t *testing.T) {
 	}
 }
 
+func TestCompile_multiLineGoalCreatesMultipleConditions(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	compiler := New(st)
+	goal, err := compiler.Compile(context.Background(), "Add String() method to RiskLevel\nFix the existing unit tests")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	// 2 primary conditions + 1 regression condition
+	if len(goal.GoalConditions) != 3 {
+		t.Fatalf("goal conditions len = %d, want 3", len(goal.GoalConditions))
+	}
+	if goal.GoalConditions[0].Description != "Add String() method to RiskLevel" {
+		t.Fatalf("condition[0] = %q", goal.GoalConditions[0].Description)
+	}
+	if goal.GoalConditions[1].Description != "Fix the existing unit tests" {
+		t.Fatalf("condition[1] = %q", goal.GoalConditions[1].Description)
+	}
+	if goal.GoalConditions[2].Description != "All existing tests continue to pass" {
+		t.Fatalf("condition[2] = %q", goal.GoalConditions[2].Description)
+	}
+}
+
+func TestCompile_scopeConstraintsParsed(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	compiler := New(st)
+	goal, err := compiler.Compile(context.Background(),
+		"Refactor the parser: only touch internal/intent; do not edit cmd/orca")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(goal.ScopeConstraints.AllowedFiles) != 1 || goal.ScopeConstraints.AllowedFiles[0] != "internal/intent" {
+		t.Fatalf("AllowedFiles = %v, want [internal/intent]", goal.ScopeConstraints.AllowedFiles)
+	}
+	if len(goal.ScopeConstraints.ForbiddenFiles) != 1 || goal.ScopeConstraints.ForbiddenFiles[0] != "cmd/orca" {
+		t.Fatalf("ForbiddenFiles = %v, want [cmd/orca]", goal.ScopeConstraints.ForbiddenFiles)
+	}
+	// Pure scope clauses must not appear as GoalConditions.
+	for _, c := range goal.GoalConditions {
+		if strings.Contains(c.Description, "do not edit") {
+			t.Fatalf("scope clause appeared as GoalCondition: %q", c.Description)
+		}
+	}
+}
+
+func TestCompile_scopeConstraintsMultiPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	log, err := eventlog.Open(root+`\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	compiler := New(st)
+	goal, err := compiler.Compile(context.Background(),
+		"Fix the parser; only touch internal/intent and internal/store")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(goal.ScopeConstraints.AllowedFiles) != 2 {
+		t.Fatalf("AllowedFiles = %v, want [internal/intent internal/store]", goal.ScopeConstraints.AllowedFiles)
+	}
+	// The pure scope clause must not appear as a GoalCondition.
+	for _, c := range goal.GoalConditions {
+		if strings.Contains(c.Description, "only touch") {
+			t.Fatalf("scope clause appeared as GoalCondition: %q", c.Description)
+		}
+	}
+}
+
 func TestCompile_rejectsWhenActiveGoalExists(t *testing.T) {
 	t.Parallel()
 

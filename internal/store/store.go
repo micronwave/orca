@@ -35,7 +35,8 @@ type ArtifactStore interface {
 
 	// LoadActiveGoal returns the GoalIR with status "active", or (nil, nil) when
 	// no active goal exists. The MVP constraint is one active goal per repo;
-	// IntentCompiler calls this before creating a new goal to enforce that constraint.
+	// SaveGoal enforces this atomically — IntentCompiler also calls this first
+	// for a fast-fail path before acquiring the write lock.
 	LoadActiveGoal(ctx context.Context) (*schema.GoalIR, error)
 
 	// LoadGoalCondition finds a single GoalCondition by its ID within the stored GoalIR.
