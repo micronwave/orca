@@ -238,10 +238,11 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		if len(plan.CapsuleIDs) == 0 {
 			return fmt.Errorf("orca: planner returned no capsules for goal %s", goal.GoalID)
 		}
-		if err := rt.emitTopologySelected(ctx, goal.GoalID, plan); err != nil {
+		topologyEvent, err := rt.emitTopologySelected(ctx, goal.GoalID, plan)
+		if err != nil {
 			return err
 		}
-		if err := rt.emitCycleStartSnapshot(ctx, goal.GoalID); err != nil {
+		if err := rt.emitCycleStartSnapshot(ctx, goal.GoalID, topologyEvent); err != nil {
 			return err
 		}
 
@@ -315,6 +316,10 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		var acceptedPatchIDs []string
 		var followUpIDs []string
 		var blockingReason string
+		// reconcilerMergeEmitted tracks patches for which the reconciler already
+		// emitted merge_applied (MergeReady=true && !HumanGateRequired). The
+		// orchestrator must not re-emit for these when backfilling earlier accepted patches.
+		reconcilerMergeEmitted := make(map[string]bool)
 		for _, patchID := range patchIDs {
 			verifyResult, err := rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
 			if err != nil {
@@ -330,6 +335,9 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if result.MergeReady {
 				readyPatchID = verifyResult.PatchID
 				readyResult = result
+				if !result.HumanGateRequired {
+					reconcilerMergeEmitted[verifyResult.PatchID] = true
+				}
 			}
 			if len(result.FollowUpObligationIDs) > 0 {
 				followUpIDs = append(followUpIDs, result.FollowUpObligationIDs...)
@@ -358,11 +366,11 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 					}
 				}
 			} else {
-				// The reconciler already emitted merge_applied for readyPatchID when it
-				// returned MergeReady=true. Emit for earlier accepted patches that were
-				// reconciled before all obligations cleared.
+				// The reconciler already emitted merge_applied for every patch where
+				// MergeReady=true && !HumanGateRequired. Emit only for earlier accepted
+				// patches that did not receive a reconciler merge_applied.
 				for _, pid := range acceptedPatchIDs {
-					if pid == readyPatchID {
+					if reconcilerMergeEmitted[pid] {
 						continue
 					}
 					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
@@ -379,15 +387,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 	}
 }
 
-func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string) error {
-	events, err := rt.eventLog.ReadForGoal(ctx, goalID, 0, 0)
-	if err != nil {
-		return fmt.Errorf("orca: read events for cycle snapshot goal %s: %w", goalID, err)
-	}
-	if len(events) == 0 {
-		return fmt.Errorf("orca: goal %s has no events for cycle snapshot", goalID)
-	}
-	lastEvent := events[len(events)-1]
+func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string, lastEvent schema.Event) error {
 	now := time.Now().UTC()
 	snapshot := &schema.StateSnapshot{
 		SnapshotID:  idgen.New("SNAP-CYCLE"),
@@ -929,21 +929,20 @@ type topologySelectedPayload struct {
 	DecisionID string          `json:"decision_id"`
 }
 
-func (rt *runtime) emitTopologySelected(ctx context.Context, goalID string, plan planner.PlanResult) error {
+func (rt *runtime) emitTopologySelected(ctx context.Context, goalID string, plan planner.PlanResult) (schema.Event, error) {
 	payload, err := json.Marshal(topologySelectedPayload{
 		Topology:   plan.Topology,
 		DecisionID: plan.DecisionID,
 	})
 	if err != nil {
-		return fmt.Errorf("orca: marshal topology_selected payload: %w", err)
+		return schema.Event{}, fmt.Errorf("orca: marshal topology_selected payload: %w", err)
 	}
-	_, err = rt.eventLog.Append(ctx, schema.Event{
+	return rt.eventLog.Append(ctx, schema.Event{
 		Type:       schema.EventTopologySelected,
 		GoalID:     goalID,
 		ArtifactID: plan.DecisionID,
 		Payload:    payload,
 	})
-	return err
 }
 
 func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) bool {

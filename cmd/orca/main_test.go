@@ -250,7 +250,7 @@ func TestEmitCycleStartSnapshotPersistsLatestGoalEvent(t *testing.T) {
 	}
 	lastBefore := before[len(before)-1]
 
-	if err := rt.emitCycleStartSnapshot(context.Background(), "G-1"); err != nil {
+	if err := rt.emitCycleStartSnapshot(context.Background(), "G-1", lastBefore); err != nil {
 		t.Fatalf("emitCycleStartSnapshot: %v", err)
 	}
 
