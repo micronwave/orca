@@ -371,7 +371,7 @@ func (s *service) saveClaims(
 	for _, c := range output.Claims {
 		ids := []string(nil)
 		if c.Type == schema.SidecarClaimVerified && len(evidenceIDs) > 0 {
-			ids = []string{evidenceIDs[0]}
+			ids = append([]string(nil), evidenceIDs...)
 		}
 		if err := addClaim(c.Claim, schema.ClaimInvariant, schema.ClaimProposed, ids, c.Contradicts, c.Invalidates); err != nil {
 			return nil, err

@@ -202,6 +202,9 @@ func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in 
 	if s.runner == nil {
 		return nil, fmt.Errorf("verifier: gate runner is required")
 	}
+	if strings.TrimSpace(patchID) == "" {
+		return nil, fmt.Errorf("verifier: patch ID is required")
+	}
 
 	patch, err := s.store.LoadPatch(ctx, patchID)
 	if err != nil {
