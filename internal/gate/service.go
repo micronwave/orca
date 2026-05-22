@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/micronwave/orca/internal/idgen"
@@ -15,8 +16,9 @@ import (
 )
 
 type lineResult struct {
-	line string
-	err  error
+	line  string
+	err   error
+	epoch uint64
 }
 
 type service struct {
@@ -27,6 +29,10 @@ type service struct {
 	// lets the reader goroutine park one result while a gate is busy.
 	lines chan lineResult
 	out   io.Writer
+	// epoch is incremented whenever a timed gate auto-proceeds. Lines tagged with
+	// an older epoch are stale (typed during a window that already timed out) and
+	// must be discarded by the next gate.
+	epoch atomic.Uint64
 }
 
 // New returns a terminal-backed human gatekeeper.
@@ -43,25 +49,31 @@ func NewWithIO(st store.ArtifactStore, in io.Reader, out io.Writer) HumanGatekee
 		out = os.Stdout
 	}
 	lines := make(chan lineResult, 1)
+	svc := &service{store: st, lines: lines, out: out}
 	go func() {
 		r := bufio.NewReader(in)
 		for {
+			// Snapshot the epoch BEFORE blocking on ReadString. If the timer fires
+			// while the read is in progress, the epoch will increment after this
+			// snapshot, so the result is tagged with the pre-timeout epoch and the
+			// next gate correctly discards it as stale.
+			epoch := svc.epoch.Load()
 			line, err := r.ReadString('\n')
 			if err == io.EOF && line == "" {
-				lines <- lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF)}
+				lines <- lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF), epoch: epoch}
 				return
 			}
 			if err != nil && err != io.EOF {
-				lines <- lineResult{err: err}
+				lines <- lineResult{err: err, epoch: epoch}
 				return
 			}
-			lines <- lineResult{line: line}
+			lines <- lineResult{line: line, epoch: epoch}
 			if err == io.EOF {
 				return
 			}
 		}
 	}()
-	return &service{store: st, lines: lines, out: out}
+	return svc
 }
 
 func (s *service) ReviewProjection(ctx context.Context, capsuleID string, reviewWindow time.Duration) (GateDecision, error) {
@@ -108,6 +120,7 @@ func (s *service) ReviewWaiver(ctx context.Context, obligationID string, reason 
 }
 
 func (s *service) review(ctx context.Context, display string, reviewWindow time.Duration, allowTimeout bool) (bool, bool, string, error) {
+	currentEpoch := s.epoch.Load()
 	if _, err := fmt.Fprint(s.out, display); err != nil {
 		return false, false, "", err
 	}
@@ -115,15 +128,21 @@ func (s *service) review(ctx context.Context, display string, reviewWindow time.
 		if _, err := fmt.Fprint(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject.]\n"); err != nil {
 			return false, false, "", err
 		}
-		select {
-		case result := <-s.lines:
-			if result.err != nil {
-				return false, false, "", result.err
+		for {
+			select {
+			case result := <-s.lines:
+				if result.err != nil {
+					return false, false, "", result.err
+				}
+				if result.epoch < currentEpoch {
+					// Stale line tagged before a previous auto-proceed; discard.
+					continue
+				}
+				approved, proceeded, notes := parseApproval(result.line)
+				return approved, proceeded, notes, nil
+			case <-ctx.Done():
+				return false, false, "", ctx.Err()
 			}
-			approved, proceeded, notes := parseApproval(result.line)
-			return approved, proceeded, notes, nil
-		case <-ctx.Done():
-			return false, false, "", ctx.Err()
 		}
 	}
 	if !allowTimeout {
@@ -134,23 +153,32 @@ func (s *service) review(ctx context.Context, display string, reviewWindow time.
 	}
 	timer := time.NewTimer(reviewWindow)
 	defer timer.Stop()
-	select {
-	case result := <-s.lines:
-		if result.err != nil {
-			return false, false, "", result.err
-		}
-		approved, _, notes := parseApproval(result.line)
-		return approved, false, notes, nil
-	case <-timer.C:
-		// Discard any line buffered during this window so the next gate
-		// starts clean — do not carry stale input forward.
+	for {
 		select {
-		case <-s.lines:
-		default:
+		case result := <-s.lines:
+			if result.err != nil {
+				return false, false, "", result.err
+			}
+			if result.epoch < currentEpoch {
+				// Stale line tagged before a previous auto-proceed; discard.
+				continue
+			}
+			approved, _, notes := parseApproval(result.line)
+			return approved, false, notes, nil
+		case <-timer.C:
+			// Increment epoch so any line the goroutine sends after this point
+			// (typed during the window but not yet in the channel) is tagged stale
+			// and discarded by the next gate.
+			s.epoch.Add(1)
+			// Also drain any line already buffered in the channel.
+			select {
+			case <-s.lines:
+			default:
+			}
+			return true, true, "", nil
+		case <-ctx.Done():
+			return false, false, "", ctx.Err()
 		}
-		return true, true, "", nil
-	case <-ctx.Done():
-		return false, false, "", ctx.Err()
 	}
 }
 
