@@ -134,8 +134,49 @@ func TestCompileExecutorLabelsReusedPriorEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileExecutor: %v", err)
 	}
-	if !projectionIncludes(projection, "EV-proj-reused [reused from EV-proj-source]") {
+	if !projectionIncludes(projection, "EV-proj-reused(type=test_result exit=0 reused=EV-proj-source)") {
 		t.Fatalf("projection missing reused evidence label: %+v", projection.IncludedSections)
+	}
+}
+
+func TestCompileExecutorDotScopeMatchesAllClaims(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-dotscope"
+		conditionID = "GC-proj-dotscope"
+		obligation  = "OB-proj-dotscope"
+		capsuleID   = "CAP-proj-dotscope"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"."},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-proj-dotscope",
+		Text:            "repo-wide claim",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/projector/service.go"},
+		Status:          schema.ClaimProposed,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	projection, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "CL-proj-dotscope") {
+		t.Fatalf("dot-scope capsule projection missing claim from any file: %+v", projection.IncludedSections)
 	}
 }
 
