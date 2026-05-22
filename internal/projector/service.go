@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -138,6 +139,7 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 	if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
 		return nil, fmt.Errorf("projector: capsule %s topology_decision_id is required", capsule.CapsuleID)
 	}
+	sourceArtifactIDs = append(sourceArtifactIDs, capsule.TopologyDecisionID)
 	decision, err := s.store.LoadDecision(ctx, capsule.TopologyDecisionID)
 	if err != nil {
 		return nil, fmt.Errorf("projector: load topology decision %s: %w", capsule.TopologyDecisionID, err)
@@ -180,7 +182,7 @@ func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*s
 		ImplementationApproach: implementationApproach(obligations),
 		ExpectedFileScope: schema.ExpectedFileScope{
 			ToRead:   append([]string(nil), capsule.AllowedPaths...),
-			ToWrite:  append([]string(nil), capsule.AllowedPaths...),
+			ToWrite:  nil,
 			ToCreate: nil,
 		},
 		ExplicitExclusions: append([]string(nil), capsule.ForbiddenPaths...),
@@ -382,19 +384,48 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 	}
 	parts := make([]string, 0, len(evidenceByObligation))
 	for obligationID, evidence := range evidenceByObligation {
-		labels := make([]string, 0, len(evidence))
+		var supports, weakens []string
 		for _, item := range evidence {
-			label := item.EvidenceID
+			label := fmt.Sprintf("%s(type=%s exit=%d", item.EvidenceID, item.Type, item.ExitCode)
 			if strings.TrimSpace(item.ReusedFromID) != "" {
-				label += " [reused from " + item.ReusedFromID + "]"
+				label += " reused=" + item.ReusedFromID
 			}
-			labels = append(labels, label)
+			label += ")"
+			if evidenceWeakens(item, obligationID) {
+				weakens = append(weakens, label)
+			} else {
+				supports = append(supports, label)
+			}
 		}
-		sort.Strings(labels)
-		parts = append(parts, fmt.Sprintf("%s=%d artifacts (%s)", obligationID, len(evidence), strings.Join(labels, ", ")))
+		sort.Strings(supports)
+		sort.Strings(weakens)
+		var sb strings.Builder
+		sb.WriteString(obligationID)
+		sb.WriteString("=")
+		if len(supports) > 0 {
+			sb.WriteString("supports=[")
+			sb.WriteString(strings.Join(supports, ", "))
+			sb.WriteString("]")
+		}
+		if len(weakens) > 0 {
+			if len(supports) > 0 {
+				sb.WriteString(" ")
+			}
+			sb.WriteString("weakens=[")
+			sb.WriteString(strings.Join(weakens, ", "))
+			sb.WriteString("]")
+		}
+		if len(supports) == 0 && len(weakens) == 0 {
+			sb.WriteString("none")
+		}
+		parts = append(parts, sb.String())
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "; ")
+}
+
+func evidenceWeakens(item *schema.EvidenceArtifact, obligationID string) bool {
+	return slices.Contains(item.Weakens, obligationID)
 }
 
 func summarizePatches(patches []*schema.PatchArtifact) string {
@@ -438,7 +469,7 @@ func summarizeClaims(claims []*schema.ClaimArtifact, freshnessBase string) strin
 func claimLabel(claim *schema.ClaimArtifact, freshnessBase string) string {
 	switch claim.Status {
 	case schema.ClaimVerified:
-		if strings.TrimSpace(claim.LastValidatedAgainst) == "" || claim.LastValidatedAgainst != freshnessBase {
+		if freshnessBase != "" && (strings.TrimSpace(claim.LastValidatedAgainst) == "" || claim.LastValidatedAgainst != freshnessBase) {
 			return claim.ClaimID + " [stale - freshness unverified]"
 		}
 		return claim.ClaimID
@@ -582,6 +613,7 @@ func (s *service) loadCapsuleBundle(
 	obligations := make([]*schema.Obligation, 0, len(capsule.ObligationIDs))
 	sourceArtifactIDs := make([]string, 0, len(capsule.ObligationIDs)+1)
 	sourceArtifactIDs = append(sourceArtifactIDs, capsule.CapsuleID)
+	seenConditions := make(map[string]bool)
 	for _, obligationID := range capsule.ObligationIDs {
 		obligation, err := s.store.LoadObligation(ctx, obligationID)
 		if err != nil {
@@ -589,6 +621,10 @@ func (s *service) loadCapsuleBundle(
 		}
 		obligations = append(obligations, obligation)
 		sourceArtifactIDs = append(sourceArtifactIDs, obligationID)
+		if obligation.GoalConditionID != "" && !seenConditions[obligation.GoalConditionID] {
+			seenConditions[obligation.GoalConditionID] = true
+			sourceArtifactIDs = append(sourceArtifactIDs, obligation.GoalConditionID)
+		}
 	}
 	goal, err := s.store.LoadActiveGoal(ctx)
 	if err != nil {
@@ -597,6 +633,7 @@ func (s *service) loadCapsuleBundle(
 	if goal == nil {
 		return nil, nil, nil, nil, fmt.Errorf("projector: active goal not found")
 	}
+	sourceArtifactIDs = append(sourceArtifactIDs, goal.GoalID)
 	return capsule, goal, obligations, sourceArtifactIDs, nil
 }
 
@@ -733,7 +770,7 @@ func normalizedProjectionFiles(files []string) map[string]bool {
 }
 
 func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) bool {
-	if len(fileSet) == 0 {
+	if len(fileSet) == 0 || fileSet["."] {
 		return true
 	}
 	for _, file := range claim.AffectedFiles {
@@ -744,6 +781,11 @@ func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) boo
 		normalized = strings.ToLower(normalized)
 		if fileSet[normalized] {
 			return true
+		}
+		for scope := range fileSet {
+			if strings.HasPrefix(normalized, scope+"/") || strings.HasPrefix(scope, normalized+"/") {
+				return true
+			}
 		}
 	}
 	return false
