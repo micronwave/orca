@@ -675,12 +675,12 @@ func (s *service) claimTouchedSince(ctx context.Context, goalID string, claim *s
 	if len(claimFiles) == 0 {
 		return false, nil
 	}
-	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
+	events, err := s.log.ReadForGoal(ctx, goalID, afterSeq, 0)
 	if err != nil {
 		return false, fmt.Errorf("reconciler: read events for goal %s: %w", goalID, err)
 	}
 	for _, event := range events {
-		if event.SequenceNum <= afterSeq || event.SequenceNum > throughSeq {
+		if event.SequenceNum > throughSeq {
 			continue
 		}
 		if event.Type != schema.EventPatchAccepted && event.Type != schema.EventMergeApplied {
@@ -792,8 +792,16 @@ func (s *service) createFollowUpObligations(ctx context.Context, capsuleID strin
 	if len(failures) == 0 || len(source) == 0 {
 		return nil, nil
 	}
+	// Inherit condition and risk from the highest-risk source obligation so
+	// follow-ups are not silently downgraded when the capsule covered mixed-risk obligations.
 	conditionID := source[0].GoalConditionID
 	risk := source[0].RiskLevel
+	for _, obl := range source[1:] {
+		if riskOrdinal(obl.RiskLevel) > riskOrdinal(risk) {
+			risk = obl.RiskLevel
+			conditionID = obl.GoalConditionID
+		}
+	}
 	var ids []string
 	seenSignatures := make(map[string]bool, len(failures))
 	for _, failure := range failures {
@@ -1215,6 +1223,17 @@ func (s *service) saveTopologyOutcome(
 		return fmt.Errorf("reconciler: save topology outcome %s: %w", outcomeID, err)
 	}
 	return nil
+}
+
+func riskOrdinal(r schema.RiskLevel) int {
+	switch r {
+	case schema.RiskHigh:
+		return 2
+	case schema.RiskMedium:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func normalizedSet(values []string) map[string]bool {
