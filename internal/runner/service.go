@@ -147,15 +147,12 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	if err != nil {
 		return result, fmt.Errorf("runner: build patch diff for capsule %s: %w", capsule.CapsuleID, err)
 	}
-	if len(output.FilesChanged) > 0 {
-		changedFiles = append([]string(nil), output.FilesChanged...)
-	}
 	evidenceOnly := capsule.Role == schema.RoleReviewer || capsule.Role == schema.RoleTester
 	if len(changedFiles) == 0 && !evidenceOnly {
 		return result, fmt.Errorf("runner: capsule %s produced no changed files", capsule.CapsuleID)
 	}
 
-	obligationsClaimed := output.ObligationsAddressed
+	obligationsClaimed := filterObligations(output.ObligationsAddressed, capsule.ObligationIDs)
 	if len(obligationsClaimed) == 0 {
 		obligationsClaimed = append([]string(nil), capsule.ObligationIDs...)
 	}
@@ -191,7 +188,7 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	}
 	result.EvidenceIDs = evidenceIDs
 
-	claimIDs, err := s.saveClaims(ctx, capsule, output, evidenceIDs)
+	claimIDs, err := s.saveClaims(ctx, capsule, output, evidenceIDs, changedFiles)
 	if err != nil {
 		return result, err
 	}
@@ -215,6 +212,9 @@ func (s *service) runAdapter(
 	start := time.Now()
 	output, err := adapter.Execute(ctx, capsule, projection)
 	if err == nil {
+		if output == nil {
+			return nil, false, fmt.Errorf("runner: execute capsule %s: adapter returned nil output with no error", capsule.CapsuleID)
+		}
 		if output.WallTimeSeconds <= 0 {
 			output.WallTimeSeconds = time.Since(start).Seconds()
 		}
@@ -227,6 +227,9 @@ func (s *service) runAdapter(
 	output, extractErr := adapter.ExtractFromTranscript(ctx, capsule, transcriptPath)
 	if extractErr != nil {
 		return nil, false, fmt.Errorf("runner: transcript extraction for capsule %s after %v: %w", capsule.CapsuleID, err, extractErr)
+	}
+	if output == nil {
+		return nil, false, fmt.Errorf("runner: transcript extraction for capsule %s: adapter returned nil output", capsule.CapsuleID)
 	}
 	if output.WallTimeSeconds <= 0 {
 		output.WallTimeSeconds = time.Since(start).Seconds()
@@ -315,11 +318,10 @@ func (s *service) saveEvidence(
 		}
 		ev := &schema.EvidenceArtifact{
 			EvidenceID: idgen.New("EV"),
-			Type:       schema.EvidenceTestResult,
+			Type:       schema.EvidenceAgentOutput,
 			Source:     string(capsule.Agent),
 			Command:    strings.Join(output.CommandsRun, " && "),
-			ExitCode:   0,
-			Summary:    "agent-provided evidence artifact",
+			Summary:    "agent-provided output artifact",
 			RawLogPath: trimmed,
 			Supports:   append([]string(nil), obligations...),
 			CreatedAt:  time.Now().UTC(),
@@ -340,6 +342,7 @@ func (s *service) saveClaims(
 	capsule *schema.ExecutionCapsule,
 	output *schema.AgentSidecarOutput,
 	evidenceIDs []string,
+	changedFiles []string,
 ) ([]string, error) {
 	claimIDs := make([]string, 0, len(output.Claims)+len(output.Assumptions)+len(output.Risks)+len(output.FollowUpNeeded))
 	addClaim := func(text string, claimType schema.ClaimType, status schema.ClaimStatus, ids []string, contradicts, invalidates []string) error {
@@ -352,7 +355,7 @@ func (s *service) saveClaims(
 			Text:            trimmed,
 			ClaimType:       claimType,
 			SourceCapsuleID: capsule.CapsuleID,
-			AffectedFiles:   append([]string(nil), output.FilesChanged...),
+			AffectedFiles:   append([]string(nil), changedFiles...),
 			Status:          status,
 			EvidenceIDs:     append([]string(nil), ids...),
 			Contradicts:     append([]string(nil), contradicts...),
@@ -420,7 +423,9 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 	if err := os.MkdirAll(filepath.Dir(diffPath), 0o755); err != nil {
 		return "", nil, fmt.Errorf("runner: create patch dir: %w", err)
 	}
-	diffCmd := exec.CommandContext(ctx, "git", "diff", "--no-color", "--binary")
+	// git diff HEAD covers both staged and unstaged changes relative to the last
+	// commit, so new files added to the index are included in the patch diff.
+	diffCmd := exec.CommandContext(ctx, "git", "diff", "--no-color", "--binary", "HEAD")
 	diffCmd.Dir = worktreePath
 	diff, err := diffCmd.Output()
 	if err != nil {
@@ -430,21 +435,23 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 		return "", nil, fmt.Errorf("runner: write patch diff %s: %w", diffPath, err)
 	}
 
-	nameCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--relative")
+	nameCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--relative", "HEAD")
 	nameCmd.Dir = worktreePath
 	namesRaw, err := nameCmd.Output()
 	if err != nil {
 		return "", nil, fmt.Errorf("runner: git diff --name-only in %s: %w", worktreePath, err)
 	}
-	names := strings.Split(strings.TrimSpace(string(namesRaw)), "\n")
-	changed := make([]string, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	seen := make(map[string]bool)
+	changed := make([]string, 0)
+	for _, name := range strings.Split(strings.TrimSpace(string(namesRaw)), "\n") {
+		name = filepath.Clean(strings.TrimSpace(name))
+		if name == "" || name == "." || seen[name] {
 			continue
 		}
-		changed = append(changed, filepath.Clean(name))
+		seen[name] = true
+		changed = append(changed, name)
 	}
+
 	return diffPath, changed, nil
 }
 
@@ -504,6 +511,23 @@ func isForbidden(file string, forbidden []string) bool {
 		}
 	}
 	return false
+}
+
+func filterObligations(claimed, allowed []string) []string {
+	if len(allowed) == 0 {
+		return append([]string(nil), claimed...)
+	}
+	set := make(map[string]bool, len(allowed))
+	for _, id := range allowed {
+		set[id] = true
+	}
+	out := make([]string, 0, len(claimed))
+	for _, id := range claimed {
+		if set[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func errorSignature(err error) string {
