@@ -101,6 +101,44 @@ func TestOpen_RepairsTruncatedFinalLine(t *testing.T) {
 	}
 }
 
+func TestOpen_RepairsValidUntermunatedFinalLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	first, _ := json.Marshal(schema.Event{
+		EventID:     "EV-1",
+		Type:        schema.EventGoalCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 1,
+	})
+	second, _ := json.Marshal(schema.Event{
+		EventID:     "EV-2",
+		Type:        schema.EventObligationCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 2,
+	})
+	// second is valid JSON but has no trailing '\n'
+	data := append(append(first, '\n'), second...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+
+	l := openLogAt(t, path)
+	defer l.Close()
+	events, err := l.ReadAfter(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ReadAfter: %v", err)
+	}
+	if len(events) != 1 || events[0].SequenceNum != 1 {
+		t.Fatalf("events after repair = %+v, want only seq=1", events)
+	}
+	next := append1(t, l, schema.EventCapsuleCreated, "G-1")
+	if next.SequenceNum != 2 {
+		t.Fatalf("next SequenceNum = %d, want 2", next.SequenceNum)
+	}
+}
+
 func TestOpen_RejectsCorruptCompletedLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.log")
@@ -117,6 +155,33 @@ func TestOpen_RejectsCorruptCompletedLine(t *testing.T) {
 	}
 	if _, err := eventlog.Open(path); err == nil {
 		t.Fatal("Open succeeded on corrupt completed line, want error")
+	}
+}
+
+func TestOpen_RejectsOutOfOrderSequenceNumbers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	first, _ := json.Marshal(schema.Event{
+		EventID:     "EV-1",
+		Type:        schema.EventGoalCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 1,
+	})
+	// seq=3 directly after seq=1 — gap/ordering violation
+	third, _ := json.Marshal(schema.Event{
+		EventID:     "EV-3",
+		Type:        schema.EventObligationCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 3,
+	})
+	data := append(append(first, '\n'), append(third, '\n')...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("seed log: %v", err)
+	}
+	if _, err := eventlog.Open(path); err == nil {
+		t.Fatal("Open succeeded on out-of-order sequence numbers, want error")
 	}
 }
 
