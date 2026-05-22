@@ -180,6 +180,13 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 	case schema.ActionHumanReview:
 		recommendationRequiresHumanReview = true
 	}
+	// BlockingFailures must independently block acceptance regardless of
+	// RecommendedAction. A malformed or stale VerifierResult could carry
+	// RecommendedAction=accept while still listing blocking failures.
+	if len(vr.BlockingFailures) > 0 {
+		reject(&result, fmt.Sprintf("verifier reported %d blocking failure(s): %s",
+			len(vr.BlockingFailures), strings.Join(vr.BlockingFailures, "; ")))
+	}
 	loadedObligations := make([]*schema.Obligation, 0, len(vr.ObligationResults))
 	updatedStatuses := make(map[string]schema.ObligationStatus, len(vr.ObligationResults))
 	satisfiedBy := make(map[string][]string, len(vr.ObligationResults))
