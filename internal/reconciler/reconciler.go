@@ -380,7 +380,27 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 			result.MergeReady = true
 		}
 	}
-	result.HumanGateRequired = result.MergeReady && (highRisk || recommendationRequiresHumanReview)
+	// Scope violations require human approval regardless of risk level; they are
+	// not cleared by passing other gates.
+	scopeViolated := len(patch.ScopeViolations) > 0
+
+	// highRisk is computed only from the current patch's obligations. In a
+	// multi-patch run the final patch may be low-risk while an earlier accepted
+	// patch satisfied high-risk obligations. Re-examine all goal obligations to
+	// ensure the human gate is not skipped across reconcile rounds.
+	if result.MergeReady && !highRisk {
+		var err error
+		highRisk, err = s.goalHasHighRiskObligations(ctx, goal)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+	}
+
+	result.HumanGateRequired = result.MergeReady && (highRisk || recommendationRequiresHumanReview || scopeViolated)
+	if scopeViolated && result.MergeReady && result.BlockingReason == "" {
+		result.BlockingReason = fmt.Sprintf("patch has %d scope violation(s) requiring human approval: %s",
+			len(patch.ScopeViolations), strings.Join(patch.ScopeViolations, ", "))
+	}
 
 	if result.MergeReady && !result.HumanGateRequired {
 		if _, err := s.appendEvent(ctx, schema.EventMergeApplied, goal.GoalID, patch.PatchID, schema.PatchStatusPayload{
@@ -391,6 +411,25 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 	}
 
 	return result, nil
+}
+
+// goalHasHighRiskObligations returns true when any blocking high-risk obligation
+// exists for any condition in the goal, regardless of which reconcile round
+// created or satisfied it. Used to enforce the human-gate invariant across
+// multi-patch runs where the final low-risk patch triggers merge readiness.
+func (s *service) goalHasHighRiskObligations(ctx context.Context, goal *schema.GoalIR) (bool, error) {
+	for _, cond := range goal.GoalConditions {
+		obligations, err := s.store.LoadObligationsForCondition(ctx, cond.ID)
+		if err != nil {
+			return false, fmt.Errorf("reconciler: load obligations for condition %s: %w", cond.ID, err)
+		}
+		for _, obl := range obligations {
+			if obl.Blocking && obl.RiskLevel == schema.RiskHigh {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func statusForVerdict(verdict schema.VerifierVerdict) schema.ObligationStatus {
