@@ -170,7 +170,12 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func(), error) {
 		_ = log.Close()
 		return nil, nil, err
 	}
-	return rt, func() { _ = log.Close() }, nil
+	return rt, func() {
+		if gk, ok := rt.gatekeeper.(io.Closer); ok {
+			_ = gk.Close()
+		}
+		_ = log.Close()
+	}, nil
 }
 
 type runtime struct {

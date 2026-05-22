@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,16 +24,21 @@ type lineResult struct {
 
 type service struct {
 	store store.ArtifactStore
-	// lines is fed by a single goroutine started in NewWithIO. All gate calls
-	// receive from this channel, so only one goroutine ever reads from stdin at
-	// a time (no data races, no buffering loss across calls). Channel capacity 1
-	// lets the reader goroutine park one result while a gate is busy.
-	lines chan lineResult
-	out   io.Writer
+	// lines is fed by a single goroutine, started lazily on the first Review call.
+	// All gate calls receive from this channel, so only one goroutine ever reads
+	// from the input at a time (no data races, no buffering loss across calls).
+	// Channel capacity 1 lets the reader goroutine park one result while a gate
+	// is busy.
+	lines     chan lineResult
+	in        io.Reader
+	out       io.Writer
+	startOnce sync.Once
 	// epoch is incremented whenever a timed gate auto-proceeds. Lines tagged with
 	// an older epoch are stale (typed during a window that already timed out) and
 	// must be discarded by the next gate.
-	epoch atomic.Uint64
+	epoch    atomic.Uint64
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // New returns a terminal-backed human gatekeeper.
@@ -49,31 +55,53 @@ func NewWithIO(st store.ArtifactStore, in io.Reader, out io.Writer) HumanGatekee
 		out = os.Stdout
 	}
 	lines := make(chan lineResult, 1)
-	svc := &service{store: st, lines: lines, out: out}
+	return &service{store: st, lines: lines, in: in, out: out, stop: make(chan struct{})}
+}
+
+// Close stops the background reader goroutine if it was started. After Close,
+// no new gate calls should be made. Safe to call multiple times.
+func (s *service) Close() {
+	s.stopOnce.Do(func() { close(s.stop) })
+}
+
+// startReader launches the background goroutine that feeds s.lines. It is
+// called lazily on the first Review call so that runtimes that never invoke a
+// gate (e.g. orca cancel, orca status) do not start a goroutine that would
+// race on stdin.
+func (s *service) startReader() {
+	r := bufio.NewReader(s.in)
+	send := func(res lineResult) bool {
+		select {
+		case s.lines <- res:
+			return true
+		case <-s.stop:
+			return false
+		}
+	}
 	go func() {
-		r := bufio.NewReader(in)
 		for {
 			// Snapshot the epoch BEFORE blocking on ReadString. If the timer fires
 			// while the read is in progress, the epoch will increment after this
 			// snapshot, so the result is tagged with the pre-timeout epoch and the
 			// next gate correctly discards it as stale.
-			epoch := svc.epoch.Load()
+			epoch := s.epoch.Load()
 			line, err := r.ReadString('\n')
 			if err == io.EOF && line == "" {
-				lines <- lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF), epoch: epoch}
+				send(lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF), epoch: epoch})
 				return
 			}
 			if err != nil && err != io.EOF {
-				lines <- lineResult{err: err, epoch: epoch}
+				send(lineResult{err: err, epoch: epoch})
 				return
 			}
-			lines <- lineResult{line: line, epoch: epoch}
+			if !send(lineResult{line: line, epoch: epoch}) {
+				return
+			}
 			if err == io.EOF {
 				return
 			}
 		}
 	}()
-	return svc
 }
 
 func (s *service) ReviewProjection(ctx context.Context, capsuleID string, reviewWindow time.Duration) (GateDecision, error) {
@@ -120,6 +148,7 @@ func (s *service) ReviewWaiver(ctx context.Context, obligationID string, reason 
 }
 
 func (s *service) review(ctx context.Context, display string, reviewWindow time.Duration, allowTimeout bool) (bool, bool, string, error) {
+	s.startOnce.Do(s.startReader)
 	currentEpoch := s.epoch.Load()
 	if _, err := fmt.Fprint(s.out, display); err != nil {
 		return false, false, "", err
