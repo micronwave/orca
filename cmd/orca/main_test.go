@@ -345,6 +345,8 @@ func TestReviewWindowForGateRules(t *testing.T) {
 		{name: "human gated blocks", topology: schema.TopologyHumanGated, risk: schema.RiskLow, want: 0},
 		{name: "implementer reviewer medium blocks", topology: schema.TopologyImplementerReviewer, risk: schema.RiskMedium, want: 0},
 		{name: "single low uses default", topology: schema.TopologySingle, risk: schema.RiskLow, want: 30 * time.Second},
+		{name: "single medium blocks", topology: schema.TopologySingle, risk: schema.RiskMedium, want: 0},
+		{name: "single high blocks", topology: schema.TopologySingle, risk: schema.RiskHigh, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -353,6 +355,14 @@ func TestReviewWindowForGateRules(t *testing.T) {
 				t.Fatalf("reviewWindowFor() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestShouldReviewProjection_SingleTopologyAllRisksGate(t *testing.T) {
+	for _, risk := range []schema.RiskLevel{schema.RiskLow, schema.RiskMedium, schema.RiskHigh} {
+		if !shouldReviewProjection(schema.TopologySingle, risk) {
+			t.Fatalf("single + %s must require review gate", risk)
+		}
 	}
 }
 

@@ -953,18 +953,18 @@ func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) boo
 	case schema.TopologyImplementerReviewer:
 		return risk == schema.RiskMedium || risk == schema.RiskHigh
 	case schema.TopologySingle, schema.TopologyParallel, schema.TopologyTestFirst, schema.TopologyInvestigateThenImpl:
-		return risk == schema.RiskLow
+		return true // gate all risk levels; window varies by risk in reviewWindowFor
 	default:
 		return false
 	}
 }
 
-func reviewWindowFor(topology schema.Topology, _ schema.RiskLevel, defaultWindow time.Duration) time.Duration {
-	if topology == schema.TopologyHumanGated {
+func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWindow time.Duration) time.Duration {
+	if topology == schema.TopologyHumanGated || topology == schema.TopologyImplementerReviewer {
 		return 0
 	}
-	// IR topology implies medium risk by classifier invariant; block indefinitely.
-	if topology == schema.TopologyImplementerReviewer {
+	// Single and Phase 2 topologies: medium/high risk blocks indefinitely; low-risk gets the auto-proceed window.
+	if risk == schema.RiskMedium || risk == schema.RiskHigh {
 		return 0
 	}
 	return defaultWindow
