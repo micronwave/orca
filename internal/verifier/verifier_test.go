@@ -773,3 +773,281 @@ func TestVerify_ProposedRiskClaimForcesHumanReview(t *testing.T) {
 		t.Fatalf("RecommendationRationale = %q, want claim id", result.RecommendationRationale)
 	}
 }
+
+func TestMAVEN_FactualProbe_MissingEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-maven-factual",
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport), string(schema.EvidenceStaticAnalysis)},
+		blocking:         false,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          "PATCH-maven-factual",
+		changedFiles:     []string{"internal/verifier/verifier.go"},
+	})
+	engine := newMAVENEngine(st, config.AdvancedConfig{Enabled: true, Maven: true})
+
+	result, err := engine.Verify(ctx, "PATCH-maven-factual", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "[maven] factual")
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
+	}
+}
+
+func TestMAVEN_LogicalProbe_SatisfiedWithFailedEvidence(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{}
+	findings := engine.runMAVEN(
+		&schema.PatchArtifact{PatchID: "PATCH-maven-logical", ChangedFiles: []string{"internal/verifier/verifier.go"}},
+		[]*schema.Obligation{{
+			ObligationID:     "OB-maven-logical",
+			EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+			ExpectedFiles:    []string{"internal/verifier/verifier.go"},
+		}},
+		[]schema.ObligationVerdict{{
+			ObligationID: "OB-maven-logical",
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{"EV-maven-failed"},
+		}},
+		map[string]*schema.EvidenceArtifact{
+			"EV-maven-failed": {
+				EvidenceID: "EV-maven-failed",
+				Type:       schema.EvidenceTestResult,
+				ExitCode:   1,
+				Supports:   []string{"OB-maven-logical"},
+			},
+		},
+		nil,
+	)
+	assertWarningContains(t, findings.warnings, "[maven] logical")
+	if !findings.requiresHumanReview {
+		t.Fatal("requiresHumanReview = false, want true")
+	}
+}
+
+func TestMAVEN_CausalProbe_OutOfScopeFiles(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-maven-causal",
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		blocking:         true,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          "PATCH-maven-causal",
+		changedFiles:     []string{"README.md"},
+	})
+	engine := newMAVENEngine(st, config.AdvancedConfig{Enabled: true, Maven: true})
+
+	result, err := engine.Verify(ctx, "PATCH-maven-causal", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "[maven] causal")
+	if result.RecommendedAction == schema.ActionRetry {
+		t.Fatalf("RecommendedAction = %s, want no rejection from causal warning", result.RecommendedAction)
+	}
+}
+
+func TestMAVEN_AssumptionProbe_UnverifiedRiskClaim(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-maven-assumption",
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		blocking:         true,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          "PATCH-maven-assumption",
+		changedFiles:     []string{"internal/verifier/verifier.go"},
+		claim: &schema.ClaimArtifact{
+			ClaimID:         "CLM-maven-risk",
+			Text:            "unresolved risk",
+			ClaimType:       schema.ClaimRisk,
+			SourceCapsuleID: "CAP-maven-reviewer",
+			Status:          schema.ClaimProposed,
+		},
+	})
+	engine := newMAVENEngine(st, config.AdvancedConfig{Enabled: true, Maven: true})
+
+	result, err := engine.Verify(ctx, "PATCH-maven-assumption", VerifyInput{
+		SupplementalClaimIDs: []string{"CLM-maven-risk"},
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "[maven] assumption")
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
+	}
+}
+
+func TestMAVEN_DisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-maven-disabled",
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport), string(schema.EvidenceStaticAnalysis)},
+		blocking:         false,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          "PATCH-maven-disabled",
+		changedFiles:     []string{"internal/verifier/verifier.go"},
+	})
+	engine := newMAVENEngine(st, config.AdvancedConfig{})
+
+	result, err := engine.Verify(ctx, "PATCH-maven-disabled", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertNoMAVENWarnings(t, result.Warnings)
+	if result.RecommendedAction == schema.ActionHumanReview && strings.Contains(result.RecommendationRationale, "[maven]") {
+		t.Fatalf("MAVEN affected disabled recommendation: %+v", result)
+	}
+}
+
+func TestMAVEN_FalsePositiveRepresentable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-maven-fp",
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		blocking:         true,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          "PATCH-maven-fp",
+		changedFiles:     []string{"internal/verifier/verifier.go"},
+		claim: &schema.ClaimArtifact{
+			ClaimID:         "CLM-maven-assumption",
+			Text:            "possibly stale assumption",
+			ClaimType:       schema.ClaimAssumption,
+			SourceCapsuleID: "CAP-maven-reviewer",
+			Status:          schema.ClaimProposed,
+		},
+	})
+	engine := newMAVENEngine(st, config.AdvancedConfig{Enabled: true, Maven: true})
+
+	result, err := engine.Verify(ctx, "PATCH-maven-fp", VerifyInput{
+		SupplementalClaimIDs: []string{"CLM-maven-assumption"},
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
+	}
+	if !strings.Contains(result.RecommendationRationale, "[maven]") {
+		t.Fatalf("RecommendationRationale = %q, want [maven]", result.RecommendationRationale)
+	}
+	if len(result.ObligationResults) != 1 || result.ObligationResults[0].Verdict != schema.VerdictSatisfied {
+		t.Fatalf("ObligationResults = %+v, want intact satisfied verdict", result.ObligationResults)
+	}
+	if len(result.BlockingFailures) != 0 {
+		t.Fatalf("BlockingFailures = %v, want unchanged empty gate failures", result.BlockingFailures)
+	}
+}
+
+type mavenScenario struct {
+	obligationID     string
+	evidenceRequired []string
+	blocking         bool
+	expectedFiles    []string
+	patchID          string
+	changedFiles     []string
+	claim            *schema.ClaimArtifact
+}
+
+func newMAVENStore(t *testing.T, ctx context.Context, scenario mavenScenario) *store.FileStore {
+	t.Helper()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID: "G-maven",
+		GoalConditions: []schema.GoalCondition{{
+			ID:     "GC-maven",
+			Status: schema.GoalConditionUnmet,
+		}},
+		Status: schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     scenario.obligationID,
+		GoalConditionID:  "GC-maven",
+		EvidenceRequired: scenario.evidenceRequired,
+		Blocking:         scenario.blocking,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+		ExpectedFiles:    scenario.expectedFiles,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-" + scenario.patchID,
+		ObligationIDs: []string{scenario.obligationID},
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              scenario.patchID,
+		CapsuleID:            "CAP-" + scenario.patchID,
+		BaseCommit:           "abc123",
+		ChangedFiles:         scenario.changedFiles,
+		ObligationIDsClaimed: []string{scenario.obligationID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if scenario.claim != nil {
+		if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+			CapsuleID:     "CAP-maven-reviewer",
+			ObligationIDs: []string{scenario.obligationID},
+			Role:          schema.RoleReviewer,
+		}); err != nil {
+			t.Fatalf("SaveCapsule reviewer: %v", err)
+		}
+		if err := st.SaveClaim(ctx, scenario.claim); err != nil {
+			t.Fatalf("SaveClaim: %v", err)
+		}
+	}
+	return st
+}
+
+func newMAVENEngine(st *store.FileStore, advanced config.AdvancedConfig) *Engine {
+	engine := NewWithConfig(st, Config{Advanced: advanced}, fakeGateRunner{})
+	engine.commandChecker = func(string) error { return nil }
+	return engine
+}
+
+func assertWarningContains(t *testing.T, warnings []string, want string) {
+	t.Helper()
+	for _, warning := range warnings {
+		if strings.Contains(warning, want) {
+			return
+		}
+	}
+	t.Fatalf("warnings = %v, want substring %q", warnings, want)
+}
+
+func assertNoMAVENWarnings(t *testing.T, warnings []string) {
+	t.Helper()
+	for _, warning := range warnings {
+		if strings.Contains(warning, "[maven]") {
+			t.Fatalf("warnings = %v, want no MAVEN warnings", warnings)
+		}
+	}
+}
