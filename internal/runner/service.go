@@ -84,6 +84,9 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runner: load capsule %s: %w", capsuleID, err)
 	}
+	if capsule.CapsuleID != capsuleID {
+		return RunResult{}, fmt.Errorf("runner: capsule file %s contains mismatched capsule_id %q", capsuleID, capsule.CapsuleID)
+	}
 	projection, err := s.store.LoadProjection(ctx, capsule.ContextProjectionID)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runner: load projection %s: %w", capsule.ContextProjectionID, err)

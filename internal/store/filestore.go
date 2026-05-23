@@ -275,6 +275,9 @@ func (s *FileStore) requireExistingGoal(goalID string) error {
 }
 
 func (s *FileStore) goalIDForObligation(ctx context.Context, obligationID string) (string, error) {
+	if err := validateArtifactID("obligation", obligationID); err != nil {
+		return "", err
+	}
 	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
 	if err != nil {
 		return "", fmt.Errorf("store: load obligation %s: %w", obligationID, err)
@@ -284,6 +287,9 @@ func (s *FileStore) goalIDForObligation(ctx context.Context, obligationID string
 
 // goalIDForCapsule follows capsule → obligation → condition → goal.
 func (s *FileStore) goalIDForCapsule(ctx context.Context, capsuleID string) (string, error) {
+	if err := validateArtifactID("capsule", capsuleID); err != nil {
+		return "", err
+	}
 	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
 	if err != nil {
 		return "", fmt.Errorf("store: load capsule %s: %w", capsuleID, err)
@@ -469,6 +475,9 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 }
 
 func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR, error) {
+	if err := validateArtifactID("goal", goalID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
@@ -550,12 +559,18 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 }
 
 func (s *FileStore) LoadObligation(ctx context.Context, obligationID string) (*schema.Obligation, error) {
+	if err := validateArtifactID("obligation", obligationID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
 }
 
 func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*schema.Obligation, error) {
+	if err := validateArtifactID("goal", goalID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	// Build the set of condition IDs that belong to this goal.
@@ -648,6 +663,9 @@ func (s *FileStore) goalIDForCapsuleFromObligation(ctx context.Context, c *schem
 }
 
 func (s *FileStore) LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error) {
+	if err := validateArtifactID("capsule", capsuleID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
@@ -752,6 +770,9 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 }
 
 func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*schema.ContextProjection, error) {
+	if err := validateArtifactID("projection", projectionID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, dir := range []string{dirProjExecutor, dirProjReviewer, dirProjTester} {
@@ -767,6 +788,9 @@ func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*s
 }
 
 func (s *FileStore) LoadHumanSummaryProjection(ctx context.Context, projectionID string) (*schema.HumanSummaryProjection, error) {
+	if err := validateArtifactID("projection", projectionID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.HumanSummaryProjection](s.artifactPath(dirProjHuman, projectionID))
@@ -818,6 +842,9 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 }
 
 func (s *FileStore) LoadPatch(ctx context.Context, patchID string) (*schema.PatchArtifact, error) {
+	if err := validateArtifactID("patch", patchID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.PatchArtifact](s.artifactPath(dirPatches, patchID))
@@ -898,6 +925,9 @@ func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact
 }
 
 func (s *FileStore) LoadEvidence(ctx context.Context, evidenceID string) (*schema.EvidenceArtifact, error) {
+	if err := validateArtifactID("evidence", evidenceID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.EvidenceArtifact](s.artifactPath(dirEvidence, evidenceID))
@@ -971,6 +1001,9 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 }
 
 func (s *FileStore) LoadClaim(ctx context.Context, claimID string) (*schema.ClaimArtifact, error) {
+	if err := validateArtifactID("claim", claimID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, claimID))
@@ -1150,6 +1183,9 @@ func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprin
 }
 
 func (s *FileStore) LoadFailure(ctx context.Context, failureID string) (*schema.FailureFingerprint, error) {
+	if err := validateArtifactID("failure", failureID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, failureID))
@@ -1327,6 +1363,9 @@ func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierRe
 }
 
 func (s *FileStore) LoadVerifierResult(ctx context.Context, resultID string) (*schema.VerifierResult, error) {
+	if err := validateArtifactID("verifier result", resultID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.VerifierResult](s.artifactPath(dirVerifierResults, resultID))
@@ -1373,6 +1412,9 @@ func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) 
 }
 
 func (s *FileStore) LoadDecision(ctx context.Context, decisionID string) (*schema.DecisionRecord, error) {
+	if err := validateArtifactID("decision", decisionID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.DecisionRecord](s.artifactPath(dirDecisions, decisionID))
@@ -1448,6 +1490,9 @@ func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord
 	if err := validateArtifactID("budget", b.BudgetID); err != nil {
 		return err
 	}
+	if err := validateBudgetConsumption(b); err != nil {
+		return fmt.Errorf("store: budget %s: %w", b.BudgetID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ensureArtifactAbsent("budget", s.artifactPath(dirBudgets, b.BudgetID), b.BudgetID); err != nil {
@@ -1464,6 +1509,9 @@ func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord
 }
 
 func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*schema.BudgetRecord, error) {
+	if err := validateArtifactID("budget", budgetID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.BudgetRecord](s.artifactPath(dirBudgets, budgetID))
@@ -1485,6 +1533,18 @@ func (s *FileStore) LoadBudgetForGoal(ctx context.Context, goalID string) ([]*sc
 	return out, nil
 }
 
+// validateBudgetConsumption rejects negative consumption counters before they
+// reach the event log.
+func validateBudgetConsumption(b *schema.BudgetRecord) error {
+	if b.TokensSpent < 0 || b.WallTimeSeconds < 0 || b.Retries < 0 || b.ToolCalls < 0 ||
+		b.DuplicatedFileReads < 0 || b.OverlappingEdits < 0 || b.HumanInterventions < 0 ||
+		b.ObligationsDischarged < 0 || b.PatchesAccepted < 0 || b.PatchesRejected < 0 ||
+		b.EvidenceArtifactsReused < 0 || b.AvoidedRetries < 0 {
+		return fmt.Errorf("consumption fields must be non-negative")
+	}
+	return nil
+}
+
 // UpdateBudgetRecord overwrites the stored BudgetRecord with b after appending
 // a replayable budget_record_updated event.
 func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetRecord) error {
@@ -1493,6 +1553,9 @@ func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetReco
 	}
 	if err := validateArtifactID("budget", b.BudgetID); err != nil {
 		return err
+	}
+	if err := validateBudgetConsumption(b); err != nil {
+		return fmt.Errorf("store: budget %s: %w", b.BudgetID, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1562,6 +1625,9 @@ func (s *FileStore) LoadLatestSnapshot(ctx context.Context, goalID string) (*sch
 }
 
 func (s *FileStore) LoadSnapshot(ctx context.Context, snapshotID string) (*schema.StateSnapshot, error) {
+	if err := validateArtifactID("snapshot", snapshotID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return readFile[schema.StateSnapshot](s.artifactPath(dirSnapshots, snapshotID))

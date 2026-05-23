@@ -220,6 +220,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if p.GoalID == "" || p.Status == "" {
 			return fmt.Errorf("invalid goal_status_updated payload: goal_id and status are required")
 		}
+		if err := validateArtifactID("goal", p.GoalID); err != nil {
+			return err
+		}
 		return s.updateGoalStatusNoLock(p.GoalID, p.Status)
 
 	case schema.EventObligationStatusUpdated:
@@ -229,6 +232,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		if p.ObligationID == "" || p.Status == "" {
 			return fmt.Errorf("invalid obligation_status_updated payload: obligation_id and status are required")
+		}
+		if err := validateArtifactID("obligation", p.ObligationID); err != nil {
+			return err
 		}
 		return s.updateObligationStatusNoLock(p.ObligationID, p.Status, p.SatisfiedBy)
 
@@ -240,6 +246,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if p.ClaimID == "" || p.Status == "" {
 			return fmt.Errorf("invalid claim_status_updated payload: claim_id and status are required")
 		}
+		if err := validateArtifactID("claim", p.ClaimID); err != nil {
+			return err
+		}
 		return s.updateClaimStatusNoLock(p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
 
 	case schema.EventCapsuleStarted, schema.EventCapsuleCompleted:
@@ -249,6 +258,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		if p.CapsuleID == "" || p.State == "" {
 			return fmt.Errorf("invalid capsule transition payload: capsule_id and state are required")
+		}
+		if err := validateArtifactID("capsule", p.CapsuleID); err != nil {
+			return err
 		}
 		return s.updateCapsuleStateNoLock(p.CapsuleID, p.State)
 
@@ -260,6 +272,12 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if p.CapsuleID == "" || p.ProjectionID == "" {
 			return fmt.Errorf("invalid capsule_projection_linked payload: capsule_id and projection_id are required")
 		}
+		if err := validateArtifactID("capsule", p.CapsuleID); err != nil {
+			return err
+		}
+		if err := validateArtifactID("projection", p.ProjectionID); err != nil {
+			return err
+		}
 		return s.updateCapsuleProjectionIDNoLock(p.CapsuleID, p.ProjectionID)
 
 	case schema.EventPatchAccepted:
@@ -270,6 +288,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if p.PatchID == "" {
 			return fmt.Errorf("invalid patch_accepted payload: patch_id is required")
 		}
+		if err := validateArtifactID("patch", p.PatchID); err != nil {
+			return err
+		}
 		return s.updatePatchStatusNoLock(p.PatchID, schema.PatchAccepted)
 
 	case schema.EventPatchRejected:
@@ -279,6 +300,9 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		if p.PatchID == "" {
 			return fmt.Errorf("invalid patch_rejected payload: patch_id is required")
+		}
+		if err := validateArtifactID("patch", p.PatchID); err != nil {
+			return err
 		}
 		return s.updatePatchStatusNoLock(p.PatchID, schema.PatchRejected)
 
