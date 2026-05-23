@@ -168,9 +168,15 @@ func (l *FileLog) Close() error {
 // Append implements EventLog. SequenceNum is assigned monotonically by the
 // log; callers must leave it zero. EventID is generated if empty. CreatedAt
 // is set to UTC now if zero. The file is fsynced before returning.
-func (l *FileLog) Append(_ context.Context, e schema.Event) (schema.Event, error) {
+func (l *FileLog) Append(ctx context.Context, e schema.Event) (schema.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return schema.Event{}, err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return schema.Event{}, err
+	}
 	if l.done {
 		return schema.Event{}, ErrClosed
 	}
@@ -220,7 +226,7 @@ func (l *FileLog) Append(_ context.Context, e schema.Event) (schema.Event, error
 }
 
 // ReadAfter implements EventLog.
-func (l *FileLog) ReadAfter(_ context.Context, afterSeq int64, limit int) ([]schema.Event, error) {
+func (l *FileLog) ReadAfter(ctx context.Context, afterSeq int64, limit int) ([]schema.Event, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.done {
@@ -229,11 +235,11 @@ func (l *FileLog) ReadAfter(_ context.Context, afterSeq int64, limit int) ([]sch
 	if l.err != nil {
 		return nil, l.err
 	}
-	return l.scan(afterSeq, limit, func(_ schema.Event) bool { return true })
+	return l.scan(ctx, afterSeq, limit, func(_ schema.Event) bool { return true })
 }
 
 // ReadByType implements EventLog.
-func (l *FileLog) ReadByType(_ context.Context, eventType schema.EventType, afterSeq int64, limit int) ([]schema.Event, error) {
+func (l *FileLog) ReadByType(ctx context.Context, eventType schema.EventType, afterSeq int64, limit int) ([]schema.Event, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.done {
@@ -242,11 +248,11 @@ func (l *FileLog) ReadByType(_ context.Context, eventType schema.EventType, afte
 	if l.err != nil {
 		return nil, l.err
 	}
-	return l.scan(afterSeq, limit, func(e schema.Event) bool { return e.Type == eventType })
+	return l.scan(ctx, afterSeq, limit, func(e schema.Event) bool { return e.Type == eventType })
 }
 
 // ReadForGoal implements EventLog.
-func (l *FileLog) ReadForGoal(_ context.Context, goalID string, afterSeq int64, limit int) ([]schema.Event, error) {
+func (l *FileLog) ReadForGoal(ctx context.Context, goalID string, afterSeq int64, limit int) ([]schema.Event, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.done {
@@ -255,13 +261,13 @@ func (l *FileLog) ReadForGoal(_ context.Context, goalID string, afterSeq int64, 
 	if l.err != nil {
 		return nil, l.err
 	}
-	return l.scan(afterSeq, limit, func(e schema.Event) bool { return e.GoalID == goalID })
+	return l.scan(ctx, afterSeq, limit, func(e schema.Event) bool { return e.GoalID == goalID })
 }
 
 // scan reads the JSONL file, skipping events with SequenceNum <= afterSeq,
 // collecting up to limit events (0 = no limit) that satisfy pred.
 // Caller must hold at least l.mu.RLock().
-func (l *FileLog) scan(afterSeq int64, limit int, pred func(schema.Event) bool) ([]schema.Event, error) {
+func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func(schema.Event) bool) ([]schema.Event, error) {
 	f, err := os.Open(l.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -274,6 +280,9 @@ func (l *FileLog) scan(afterSeq int64, limit int, pred func(schema.Event) bool) 
 	var out []schema.Event
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line, readErr := r.ReadBytes('\n')
 		if len(line) == 0 && errors.Is(readErr, io.EOF) {
 			break
