@@ -180,13 +180,19 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 					return false, false, "", result.err
 				}
 				if result.epoch < currentEpoch {
-					// Stale line tagged before a previous auto-proceed; discard.
+					// Stale line from a previous auto-proceed window. Notify the user
+					// so they know to re-enter their response rather than hanging silently.
+					if _, werr := fmt.Fprint(s.out, "[Your input was not received — the review window had already elapsed. Please re-enter your response.]\n"); werr != nil {
+						return false, false, "", werr
+					}
 					continue
 				}
 				approved, proceeded, notes := parseApproval(result.line)
 				return approved, proceeded, notes, nil
 			case <-ctx.Done():
 				return false, false, "", ctx.Err()
+			case <-s.stop:
+				return false, false, "", fmt.Errorf("gate: closed")
 			}
 		}
 	}
@@ -205,7 +211,11 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 				return false, false, "", result.err
 			}
 			if result.epoch < currentEpoch {
-				// Stale line tagged before a previous auto-proceed; discard.
+				// Stale line from a previous auto-proceed window. Notify the user
+				// so they know to re-enter their response rather than hanging silently.
+				if _, werr := fmt.Fprint(s.out, "[Your input was not received — the review window had already elapsed. Please re-enter your response.]\n"); werr != nil {
+					return false, false, "", werr
+				}
 				continue
 			}
 			approved, _, notes := parseApproval(result.line)
@@ -223,6 +233,8 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 			return true, true, "", nil
 		case <-ctx.Done():
 			return false, false, "", ctx.Err()
+		case <-s.stop:
+			return false, false, "", fmt.Errorf("gate: closed")
 		}
 	}
 }
