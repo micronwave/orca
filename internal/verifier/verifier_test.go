@@ -67,6 +67,13 @@ func (f *countingGateRunner) Run(ctx context.Context, command, workingDir string
 	return result.exitCode, result.output, result.err
 }
 
+type waitingGateRunner struct{}
+
+func (waitingGateRunner) Run(ctx context.Context, command, workingDir string) (int, string, error) {
+	<-ctx.Done()
+	return -1, "", ctx.Err()
+}
+
 func TestProposeObligations_createsTemplatesForUnmetConditions(t *testing.T) {
 	t.Parallel()
 
@@ -774,6 +781,282 @@ func TestVerify_ProposedRiskClaimForcesHumanReview(t *testing.T) {
 	}
 }
 
+func TestMutation_DisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-disabled")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{}, fakeGateRunner{
+		results: map[string]gateResult{"mutation": {exitCode: 1, output: "survivor"}},
+	})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-disabled", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertNoEvidenceType(t, ctx, st, schema.EvidenceMutationResult)
+	assertNoWarningContains(t, result.Warnings, "[mutation]")
+}
+
+func TestMutation_CleanRun_SavesEvidenceNoClaimWarning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-clean")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:         true,
+		Mutation:        true,
+		MutationCommand: "mutation",
+	}, fakeGateRunner{results: map[string]gateResult{"mutation": {exitCode: 0, output: "ok"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-clean", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	ev := assertEvidenceType(t, ctx, st, schema.EvidenceMutationResult)
+	if ev.ExitCode != 0 || ev.Summary != "mutation testing passed: no survivors found" {
+		t.Fatalf("mutation evidence = %+v, want clean summary", ev)
+	}
+	assertNoWarningContains(t, result.Warnings, "test gap candidate")
+}
+
+func TestMutation_CommandNotSet_Skipped(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-skipped")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:  true,
+		Mutation: true,
+	}, fakeGateRunner{})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-skipped", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "mutation gate skipped: mutation_command not configured")
+	assertNoWarningContains(t, result.Warnings, "[mutation]")
+	assertNoEvidenceType(t, ctx, st, schema.EvidenceMutationResult)
+}
+
+func TestMutation_SurvivorFound_AddsTestGapCandidateWarning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-survivor")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:         true,
+		Mutation:        true,
+		MutationCommand: "mutation",
+	}, fakeGateRunner{results: map[string]gateResult{"mutation": {exitCode: 1, output: "survivor in foo"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-survivor", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	ev := assertEvidenceType(t, ctx, st, schema.EvidenceMutationResult)
+	if ev.ExitCode != 1 || !strings.Contains(ev.Summary, "mutation testing found survivors") {
+		t.Fatalf("mutation evidence = %+v, want survivor summary", ev)
+	}
+	assertWarningContains(t, result.Warnings, "[mutation] survivor found: test gap candidate")
+}
+
+func TestMutation_BlockingSurvivor_ReturnsRetry(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-blocking")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:          true,
+		Mutation:         true,
+		MutationCommand:  "mutation",
+		MutationBlocking: true,
+	}, fakeGateRunner{results: map[string]gateResult{"mutation": {exitCode: 1, output: "survivor"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-blocking", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionRetry {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionRetry)
+	}
+	if result.RecommendationRationale != "[mutation] blocking survivors found" {
+		t.Fatalf("RecommendationRationale = %q", result.RecommendationRationale)
+	}
+}
+
+func TestMutation_NonBlockingSurvivor_WarningOnly(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-nonblocking")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:         true,
+		Mutation:        true,
+		MutationCommand: "mutation",
+	}, fakeGateRunner{results: map[string]gateResult{"mutation": {exitCode: 1, output: "survivor"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-nonblocking", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionAccept {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionAccept)
+	}
+	assertWarningContains(t, result.Warnings, "[mutation] survivor found: test gap candidate")
+}
+
+func TestMutation_Timeout_WarningNoClaimCandidate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-mutation-timeout")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:                true,
+		Mutation:               true,
+		MutationCommand:        "mutation",
+		MutationTimeoutSeconds: 1,
+	}, waitingGateRunner{})
+
+	result, err := engine.Verify(ctx, "PATCH-mutation-timeout", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "mutation gate timed out")
+	assertNoWarningContains(t, result.Warnings, "test gap candidate")
+	ev := assertEvidenceType(t, ctx, st, schema.EvidenceMutationResult)
+	if ev.ExitCode != -1 {
+		t.Fatalf("mutation timeout evidence exit = %d, want -1", ev.ExitCode)
+	}
+}
+
+func TestAdversarial_DisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-disabled")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{}, fakeGateRunner{
+		results: map[string]gateResult{"adversarial": {exitCode: 1, output: "fail"}},
+	})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-disabled", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertNoSource(t, ctx, st, "adversarial gate")
+	assertNoWarningContains(t, result.Warnings, "[adversarial]")
+}
+
+func TestAdversarial_CommandNotSet_Skipped(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-skipped")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:          true,
+		AdversarialTests: true,
+	}, fakeGateRunner{})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-skipped", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "adversarial gate skipped: adversarial_command not configured")
+	assertNoSource(t, ctx, st, "adversarial gate")
+}
+
+func TestAdversarial_CleanRun_NoClaimWarning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-clean")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:            true,
+		AdversarialTests:   true,
+		AdversarialCommand: "adversarial",
+	}, fakeGateRunner{results: map[string]gateResult{"adversarial": {exitCode: 0, output: "ok"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-clean", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	ev := assertSource(t, ctx, st, "adversarial gate")
+	if ev.Type != schema.EvidenceTestResult || ev.ExitCode != 0 {
+		t.Fatalf("adversarial evidence = %+v, want passing test_result", ev)
+	}
+	assertWarningContains(t, result.Warnings, "[adversarial] gate passed: no challenge failures")
+	assertNoWarningContains(t, result.Warnings, "test gap candidate")
+}
+
+func TestAdversarial_Failure_AddsTestGapCandidateWarning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-fail")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:            true,
+		AdversarialTests:   true,
+		AdversarialCommand: "adversarial",
+	}, fakeGateRunner{results: map[string]gateResult{"adversarial": {exitCode: 1, output: "challenge failed"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-fail", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	ev := assertSource(t, ctx, st, "adversarial gate")
+	if ev.Type != schema.EvidenceTestResult || ev.ExitCode != 1 {
+		t.Fatalf("adversarial evidence = %+v, want failing test_result", ev)
+	}
+	assertWarningContains(t, result.Warnings, "[adversarial] challenge failed: test gap candidate")
+}
+
+func TestAdversarial_BlockingFailure_ReturnsHumanReview(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-blocking")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:             true,
+		AdversarialTests:    true,
+		AdversarialCommand:  "adversarial",
+		AdversarialBlocking: true,
+	}, fakeGateRunner{results: map[string]gateResult{"adversarial": {exitCode: 1, output: "challenge failed"}}})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-blocking", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
+	}
+	if result.RecommendationRationale != "[adversarial] blocking challenge failure" {
+		t.Fatalf("RecommendationRationale = %q", result.RecommendationRationale)
+	}
+}
+
+func TestAdversarial_Timeout_WarningNoBlocking(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAdvancedGateStore(t, ctx, "PATCH-adv-timeout")
+	engine := newAdvancedGateEngine(st, config.AdvancedConfig{
+		Enabled:                   true,
+		AdversarialTests:          true,
+		AdversarialCommand:        "adversarial",
+		AdversarialBlocking:       true,
+		AdversarialTimeoutSeconds: 1,
+	}, waitingGateRunner{})
+
+	result, err := engine.Verify(ctx, "PATCH-adv-timeout", VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertWarningContains(t, result.Warnings, "[adversarial] gate timed out")
+	if result.RecommendedAction != schema.ActionAccept {
+		t.Fatalf("RecommendedAction = %s, want %s on timeout (not a failure)", result.RecommendedAction, schema.ActionAccept)
+	}
+}
+
 func TestMAVEN_FactualProbe_MissingEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -1027,8 +1310,26 @@ func newMAVENStore(t *testing.T, ctx context.Context, scenario mavenScenario) *s
 	return st
 }
 
+func newAdvancedGateStore(t *testing.T, ctx context.Context, patchID string) *store.FileStore {
+	t.Helper()
+	return newMAVENStore(t, ctx, mavenScenario{
+		obligationID:     "OB-" + patchID,
+		evidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		blocking:         true,
+		expectedFiles:    []string{"internal/verifier/verifier.go"},
+		patchID:          patchID,
+		changedFiles:     []string{"internal/verifier/verifier.go"},
+	})
+}
+
 func newMAVENEngine(st *store.FileStore, advanced config.AdvancedConfig) *Engine {
 	engine := NewWithConfig(st, Config{Advanced: advanced}, fakeGateRunner{})
+	engine.commandChecker = func(string) error { return nil }
+	return engine
+}
+
+func newAdvancedGateEngine(st *store.FileStore, advanced config.AdvancedConfig, runner GateRunner) *Engine {
+	engine := NewWithConfig(st, Config{Advanced: advanced}, runner)
 	engine.commandChecker = func(string) error { return nil }
 	return engine
 }
@@ -1050,4 +1351,88 @@ func assertNoMAVENWarnings(t *testing.T, warnings []string) {
 			t.Fatalf("warnings = %v, want no MAVEN warnings", warnings)
 		}
 	}
+}
+
+func assertNoWarningContains(t *testing.T, warnings []string, notWant string) {
+	t.Helper()
+	for _, warning := range warnings {
+		if strings.Contains(warning, notWant) {
+			t.Fatalf("warnings = %v, want no substring %q", warnings, notWant)
+		}
+	}
+}
+
+func assertEvidenceType(t *testing.T, ctx context.Context, st *store.FileStore, evidenceType schema.EvidenceType) *schema.EvidenceArtifact {
+	t.Helper()
+	all, err := st.LoadEvidenceForObligation(ctx, "OB-"+currentPatchIDFromStore(t, ctx, st))
+	if err != nil {
+		t.Fatalf("LoadEvidenceForObligation: %v", err)
+	}
+	for _, ev := range all {
+		if ev.Type == evidenceType {
+			return ev
+		}
+	}
+	t.Fatalf("missing evidence type %s in %+v", evidenceType, all)
+	return nil
+}
+
+func assertNoEvidenceType(t *testing.T, ctx context.Context, st *store.FileStore, evidenceType schema.EvidenceType) {
+	t.Helper()
+	all := allAdvancedEvidence(t, ctx, st)
+	for _, ev := range all {
+		if ev.Type == evidenceType {
+			t.Fatalf("found evidence type %s: %+v", evidenceType, ev)
+		}
+	}
+}
+
+func assertSource(t *testing.T, ctx context.Context, st *store.FileStore, source string) *schema.EvidenceArtifact {
+	t.Helper()
+	all := allAdvancedEvidence(t, ctx, st)
+	for _, ev := range all {
+		if ev.Source == source {
+			return ev
+		}
+	}
+	t.Fatalf("missing evidence source %q in %+v", source, all)
+	return nil
+}
+
+func assertNoSource(t *testing.T, ctx context.Context, st *store.FileStore, source string) {
+	t.Helper()
+	all := allAdvancedEvidence(t, ctx, st)
+	for _, ev := range all {
+		if ev.Source == source {
+			t.Fatalf("found evidence source %q: %+v", source, ev)
+		}
+	}
+}
+
+func allAdvancedEvidence(t *testing.T, ctx context.Context, st *store.FileStore) []*schema.EvidenceArtifact {
+	t.Helper()
+	all, err := st.LoadEvidenceForObligation(ctx, "OB-"+currentPatchIDFromStore(t, ctx, st))
+	if err != nil {
+		t.Fatalf("LoadEvidenceForObligation: %v", err)
+	}
+	return all
+}
+
+func currentPatchIDFromStore(t *testing.T, ctx context.Context, st *store.FileStore) string {
+	t.Helper()
+	result, err := st.LoadActiveGoal(ctx)
+	if err != nil {
+		t.Fatalf("LoadActiveGoal: %v", err)
+	}
+	if result == nil || len(result.GoalConditions) != 1 {
+		t.Fatalf("active goal = %+v, want one condition", result)
+	}
+	obligations, err := st.LoadObligationsForCondition(ctx, result.GoalConditions[0].ID)
+	if err != nil {
+		t.Fatalf("LoadObligationsForCondition: %v", err)
+	}
+	if len(obligations) != 1 {
+		t.Fatalf("obligations = %+v, want one", obligations)
+	}
+	return strings.TrimPrefix(obligations[0].ObligationID, "OB-")
 }

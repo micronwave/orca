@@ -16,6 +16,7 @@
 //	                  EvidenceArtifacts via LoadEvidenceForObligation and LoadEvidence,
 //	                  ClaimArtifacts via LoadClaim (for supplemental review signals)
 //	Writes (store):   Obligations via SaveObligation (ProposeObligations only),
+//	                  verifier-owned EvidenceArtifacts via SaveEvidence,
 //	                  verifier-owned gate FailureFingerprints via SaveFailure,
 //	                  VerifierResult via SaveVerifierResult (Verify only)
 //	Writes (log):     none directly — the ArtifactStore implementation emits
@@ -366,12 +367,30 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		}
 	}
 
+	mutationWarnings, mutationBlocking, err := s.runMutationGate(ctx, goalID, capsule.CapsuleID, workingDir, obligationRefs, patch.ChangedFiles)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, mutationWarnings...)
+
+	adversarialWarnings, adversarialBlocking, err := s.runAdversarialGate(ctx, goalID, capsule.CapsuleID, workingDir, obligationRefs, patch.ChangedFiles)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, adversarialWarnings...)
+
 	blockingFailures = uniqueStrings(blockingFailures)
 	recommendedAction := schema.ActionAccept
 	recommendationRationale := "all blocking verifier stages passed"
 	if len(blockingFailures) > 0 {
 		recommendedAction = schema.ActionRetry
 		recommendationRationale = "one or more blocking checks failed"
+	} else if mutationBlocking {
+		recommendedAction = schema.ActionRetry
+		recommendationRationale = "[mutation] blocking survivors found"
+	} else if adversarialBlocking {
+		recommendedAction = schema.ActionHumanReview
+		recommendationRationale = "[adversarial] blocking challenge failure"
 	} else if reviewFindings.requiresHumanReview || mavenRequiresHumanReview {
 		recommendedAction = schema.ActionHumanReview
 		if mavenRequiresHumanReview && reviewFindings.requiresHumanReview {
@@ -400,6 +419,109 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		return nil, fmt.Errorf("verifier: save verifier result %s: %w", result.VerifierResultID, err)
 	}
 	return result, nil
+}
+
+func (s *Engine) runMutationGate(
+	ctx context.Context,
+	goalID, capsuleID string,
+	workingDir string,
+	obligationRefs []string,
+	changedFiles []string,
+) ([]string, bool, error) {
+	if !s.advanced.Enabled || !s.advanced.Mutation {
+		return nil, false, nil
+	}
+	command := strings.TrimSpace(s.advanced.MutationCommand)
+	if command == "" {
+		return []string{"mutation gate skipped: mutation_command not configured"}, false, nil
+	}
+
+	timeout := 120 * time.Second
+	if s.advanced.MutationTimeoutSeconds > 0 {
+		timeout = time.Duration(s.advanced.MutationTimeoutSeconds) * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	exitCode, output, err := s.runner.Run(runCtx, command, workingDir)
+	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+	if err != nil && !timedOut {
+		return nil, false, fmt.Errorf("verifier: mutation gate goal %s capsule %s: %w", goalID, capsuleID, err)
+	}
+	if timedOut {
+		exitCode = -1
+	}
+
+	summary := "mutation testing passed: no survivors found"
+	warnings := []string(nil)
+	blocking := false
+	if timedOut {
+		summary = "mutation testing timed out"
+		warnings = append(warnings, "[mutation] mutation gate timed out")
+	} else if exitCode != 0 {
+		summary = fmt.Sprintf("mutation testing found survivors (exit_code=%d): %s", exitCode, summarizeAdvancedOutput(output, 200))
+		warnings = append(warnings, fmt.Sprintf("[mutation] survivor found: test gap candidate for %s", advancedGateFiles(changedFiles)))
+		blocking = s.advanced.MutationBlocking
+	} else {
+		warnings = append(warnings, "[mutation] gate passed: no survivors found")
+	}
+
+	if _, err := s.saveAdvancedEvidence(ctx, schema.EvidenceMutationResult, "verifier", command, exitCode, summary, output, obligationRefs); err != nil {
+		return nil, false, err
+	}
+	return warnings, blocking, nil
+}
+
+func (s *Engine) runAdversarialGate(
+	ctx context.Context,
+	goalID, capsuleID string,
+	workingDir string,
+	obligationRefs []string,
+	changedFiles []string,
+) ([]string, bool, error) {
+	if !s.advanced.Enabled || !s.advanced.AdversarialTests {
+		return nil, false, nil
+	}
+	command := strings.TrimSpace(s.advanced.AdversarialCommand)
+	if command == "" {
+		return []string{"adversarial gate skipped: adversarial_command not configured"}, false, nil
+	}
+
+	timeout := 60 * time.Second
+	if s.advanced.AdversarialTimeoutSeconds > 0 {
+		timeout = time.Duration(s.advanced.AdversarialTimeoutSeconds) * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	exitCode, output, err := s.runner.Run(runCtx, command, workingDir)
+	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+	if err != nil && !timedOut {
+		return nil, false, fmt.Errorf("verifier: adversarial gate goal %s capsule %s: %w", goalID, capsuleID, err)
+	}
+	if timedOut {
+		exitCode = -1
+	}
+
+	summary := "adversarial gate passed: no challenge failures"
+	warnings := []string(nil)
+	blocking := false
+	if timedOut {
+		summary = "adversarial gate timed out"
+		warnings = append(warnings, "[adversarial] gate timed out")
+	} else if exitCode != 0 {
+		summary = fmt.Sprintf("adversarial challenge failed (exit_code=%d): %s", exitCode, summarizeAdvancedOutput(output, 200))
+		warnings = append(warnings, "[adversarial] challenge failed: test gap candidate")
+		blocking = s.advanced.AdversarialBlocking
+	} else {
+		warnings = append(warnings, "[adversarial] gate passed: no challenge failures")
+	}
+
+	if _, err := s.saveAdvancedEvidence(ctx, schema.EvidenceTestResult, "adversarial gate", command, exitCode, summary, output, obligationRefs); err != nil {
+		return nil, false, err
+	}
+	_ = changedFiles
+	return warnings, blocking, nil
 }
 
 type reviewFindings struct {
@@ -829,6 +951,40 @@ func (s *Engine) saveEvidence(
 	return evidence, nil
 }
 
+func (s *Engine) saveAdvancedEvidence(
+	ctx context.Context,
+	evidenceType schema.EvidenceType,
+	source string,
+	command string,
+	exitCode int,
+	summary string,
+	output string,
+	obligationRefs []string,
+) (*schema.EvidenceArtifact, error) {
+	supports := append([]string(nil), obligationRefs...)
+	weakens := []string(nil)
+	if exitCode != 0 {
+		supports = nil
+		weakens = append([]string(nil), obligationRefs...)
+	}
+	evidence := &schema.EvidenceArtifact{
+		EvidenceID:   idgen.New("EV"),
+		Type:         evidenceType,
+		Source:       source,
+		Command:      command,
+		ExitCode:     exitCode,
+		Summary:      summary,
+		InlineOutput: summarizeAdvancedOutput(output, 300),
+		Supports:     supports,
+		Weakens:      weakens,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := s.store.SaveEvidence(ctx, evidence); err != nil {
+		return nil, fmt.Errorf("verifier: save evidence %s: %w", evidence.EvidenceID, err)
+	}
+	return evidence, nil
+}
+
 func (s *Engine) runOrReuseGate(
 	ctx context.Context,
 	goalID string,
@@ -1034,6 +1190,22 @@ func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []
 		}
 	}
 	return violations
+}
+
+func summarizeAdvancedOutput(output string, limit int) string {
+	out := strings.TrimSpace(output)
+	if limit <= 0 || len(out) <= limit {
+		return out
+	}
+	return out[:limit]
+}
+
+func advancedGateFiles(changedFiles []string) string {
+	files := uniqueStrings(changedFiles)
+	if len(files) == 0 {
+		return "changed files"
+	}
+	return strings.Join(files, ", ")
 }
 
 func inForbiddenPath(file string, forbiddenPaths []string) bool {
