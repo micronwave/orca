@@ -35,6 +35,7 @@ func openLogAt(t *testing.T, path string) *eventlog.FileLog {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", path, err)
 	}
+	t.Cleanup(func() { _ = l.Close() })
 	return l
 }
 

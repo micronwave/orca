@@ -417,6 +417,7 @@ func seedOrcaDir(t *testing.T, withCapsule bool) string {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
+	t.Cleanup(func() { log.Close() })
 	st, err := store.New(orcaDir, log)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
