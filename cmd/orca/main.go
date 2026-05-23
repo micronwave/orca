@@ -178,13 +178,11 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func() error, error
 	}
 	artifactStore, err := store.New(orcaDir, log)
 	if err != nil {
-		_ = log.Close()
-		return nil, nil, err
+		return nil, nil, errors.Join(err, log.Close())
 	}
 	rt, err := newRuntime(cfg, orcaDir, noLearning, log, artifactStore)
 	if err != nil {
-		_ = log.Close()
-		return nil, nil, err
+		return nil, nil, errors.Join(err, log.Close())
 	}
 	return rt, func() error {
 		rt.gatekeeper.Close()
@@ -239,10 +237,12 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 }
 
 func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
+	fmt.Fprintf(os.Stderr, "[orca] compiling intent\n")
 	goal, err := rt.intentCompiler.Compile(ctx, rawIntent)
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "[orca] goal %s: proposing obligations\n", goal.GoalID)
 	if _, err := rt.verifierEngine.ProposeObligations(ctx, goal.GoalID); err != nil {
 		return err
 	}
@@ -251,6 +251,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		if err := rt.reconciler.FreshnessCheck(ctx, goal.GoalID); err != nil {
 			return fmt.Errorf("orca: freshness check for goal %s: %w", goal.GoalID, err)
 		}
+		fmt.Fprintf(os.Stderr, "[orca] goal %s: planning\n", goal.GoalID)
 		plan, err := rt.planner.Plan(ctx, goal.GoalID)
 		if err != nil {
 			return err
@@ -274,6 +275,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if err != nil {
 				return fmt.Errorf("orca: load capsule %s: %w", capsuleID, err)
 			}
+			fmt.Fprintf(os.Stderr, "[orca] capsule %s: compiling projections\n", capsuleID)
 			if _, err := rt.projector.CompileHumanSummary(ctx, capsuleID); err != nil {
 				return err
 			}
@@ -284,6 +286,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			// different components and may disagree.
 			if capsule.Role == schema.RoleExecutor && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
 				reviewWindow := reviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
+				fmt.Fprintf(os.Stderr, "[orca] capsule %s: awaiting projection review (window %s)\n", capsuleID, reviewWindow)
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
 					return err
@@ -293,6 +296,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 				}
 			}
 
+			fmt.Fprintf(os.Stderr, "[orca] capsule %s: checking budget\n", capsuleID)
 			check, err := rt.budget.CheckCapsuleBudget(ctx, capsuleID)
 			if err != nil {
 				return err
@@ -300,6 +304,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if !check.Allowed {
 				return fmt.Errorf("orca: budget rejected capsule %s: %s", capsuleID, check.Reason)
 			}
+			fmt.Fprintf(os.Stderr, "[orca] capsule %s (%s): compiling agent projection\n", capsuleID, capsule.Role)
 			agentProjection, err := rt.compileAgentProjection(ctx, capsule)
 			if err != nil {
 				return err
@@ -307,6 +312,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if err := rt.store.UpdateCapsuleProjectionID(ctx, capsuleID, agentProjection.ContextProjectionID); err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stderr, "[orca] capsule %s: running agent\n", capsuleID)
 			runResult, err := rt.runner.Run(ctx, capsuleID)
 			if err != nil {
 				return err
@@ -341,10 +347,12 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		// orchestrator must not re-emit for these when backfilling earlier accepted patches.
 		reconcilerMergeEmitted := make(map[string]bool)
 		for _, patchID := range patchIDs {
+			fmt.Fprintf(os.Stderr, "[orca] patch %s: verifying\n", patchID)
 			verifyResult, err := rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(os.Stderr, "[orca] patch %s: reconciling (recommended action: %s)\n", verifyResult.PatchID, verifyResult.RecommendedAction)
 			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
 			if err != nil {
 				return err
@@ -366,6 +374,7 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 				blockingReason = result.BlockingReason
 			}
 		}
+		fmt.Fprintf(os.Stderr, "[orca] goal %s: computing ROI\n", goal.GoalID)
 		if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
 			return err
 		}
