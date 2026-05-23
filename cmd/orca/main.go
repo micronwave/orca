@@ -62,7 +62,7 @@ func run(args []string) error {
 	}
 }
 
-func runInit(args []string) error {
+func runInit(args []string) (err error) {
 	fs := flag.NewFlagSet("orca init", flag.ContinueOnError)
 	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
@@ -75,7 +75,11 @@ func runInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer log.Close()
+	defer func() {
+		if closeErr := log.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	if _, err := store.New(*orcaDir, log); err != nil {
 		return err
 	}
@@ -89,7 +93,7 @@ func runInit(args []string) error {
 	return nil
 }
 
-func runGoal(args []string) error {
+func runGoal(args []string) (err error) {
 	fs := flag.NewFlagSet("orca goal", flag.ContinueOnError)
 	goalFlag := fs.String("goal", "", "user goal to execute")
 	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
@@ -108,7 +112,11 @@ func runGoal(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer closeFn()
+	defer func() {
+		if closeErr := closeFn(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	active, err := rt.store.LoadActiveGoal(context.Background())
 	if err != nil {
@@ -120,35 +128,43 @@ func runGoal(args []string) error {
 	return rt.runControlLoop(context.Background(), goalText)
 }
 
-func runStatus(args []string) error {
+func runStatus(args []string) (err error) {
 	fs := flag.NewFlagSet("orca status", flag.ContinueOnError)
 	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	rt, closeFn, err := openRuntime(*orcaDir, false)
-	if err != nil {
-		return err
+	rt, closeFn, openErr := openRuntime(*orcaDir, false)
+	if openErr != nil {
+		return openErr
 	}
-	defer closeFn()
+	defer func() {
+		if closeErr := closeFn(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	return rt.printStatus(context.Background(), os.Stdout)
 }
 
-func runCancel(args []string, in io.Reader, out io.Writer) error {
+func runCancel(args []string, in io.Reader, out io.Writer) (err error) {
 	fs := flag.NewFlagSet("orca cancel", flag.ContinueOnError)
 	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	rt, closeFn, err := openRuntime(*orcaDir, false)
-	if err != nil {
-		return err
+	rt, closeFn, openErr := openRuntime(*orcaDir, false)
+	if openErr != nil {
+		return openErr
 	}
-	defer closeFn()
+	defer func() {
+		if closeErr := closeFn(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	return rt.cancelActiveGoal(context.Background(), in, out)
 }
 
-func openRuntime(orcaDir string, noLearning bool) (*runtime, func(), error) {
+func openRuntime(orcaDir string, noLearning bool) (*runtime, func() error, error) {
 	cfg, err := config.Load(filepath.Join(orcaDir, "config.yaml"))
 	if err != nil {
 		return nil, nil, err
@@ -170,9 +186,9 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func(), error) {
 		_ = log.Close()
 		return nil, nil, err
 	}
-	return rt, func() {
+	return rt, func() error {
 		rt.gatekeeper.Close()
-		_ = log.Close()
+		return log.Close()
 	}, nil
 }
 
