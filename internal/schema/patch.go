@@ -29,10 +29,10 @@ type PatchArtifact struct {
 	// produced this patch, copied from AgentSidecarOutput.TokensUsed. Zero when
 	// the adapter could not determine a count. Some CLI adapters do not expose
 	// token usage, so zero is expected for those capsules.
-	TokensUsed int `json:"tokens_used,omitempty"`
+	TokensUsed int `json:"tokens_used"`
 	// WallTimeSeconds is the measured CLI execution duration for the capsule run
 	// that produced this patch.
-	WallTimeSeconds float64 `json:"wall_time_seconds,omitempty"`
+	WallTimeSeconds float64 `json:"wall_time_seconds"`
 }
 
 // RetryContract describes why a patch cannot merge and what the next capsule

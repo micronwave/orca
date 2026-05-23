@@ -53,8 +53,8 @@ type AgentSidecarOutput struct {
 	// TokensUsed is set by the adapter after execution from the CLI's usage report —
 	// it is infrastructure metadata, not something the agent itself reports.
 	// Zero means the adapter could not determine a count.
-	TokensUsed int `json:"tokens_used,omitempty"`
+	TokensUsed int `json:"tokens_used"`
 	// WallTimeSeconds is measured by the adapter/runner around CLI execution.
 	// Zero means the duration could not be determined.
-	WallTimeSeconds float64 `json:"wall_time_seconds,omitempty"`
+	WallTimeSeconds float64 `json:"wall_time_seconds"`
 }
