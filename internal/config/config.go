@@ -32,6 +32,9 @@ type VerifierGate struct {
 }
 
 type GateConfig struct {
+	// ReviewWindowSeconds is the auto-proceed window for single/low-risk projection
+	// gates. 0 disables auto-proceed (gate blocks until explicit human input).
+	// Default: 30. See gate.ReviewWindowFor for how this is applied per topology.
 	ReviewWindowSeconds int
 }
 
