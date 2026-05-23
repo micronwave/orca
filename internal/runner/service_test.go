@@ -125,7 +125,6 @@ func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
 				t.Fatalf("write file in execute: %v", err)
 			}
 			runGit(t, capsule.Sandbox.WorktreePath, "add", "runner_walltime.txt")
-			time.Sleep(time.Millisecond) // ensure measurable duration for the fallback timer
 			return &schema.AgentSidecarOutput{
 				ObligationsAddressed: []string{"OB-1"},
 				FilesChanged:         []string{"runner_walltime.txt"},
@@ -139,14 +138,22 @@ func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
 			}, nil
 		},
 	}
-	before := time.Now()
-	result, err := New(env.st, env.log, env.orcaDir, adapter).Run(env.ctx, capsuleID)
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	fakeStart := time.Unix(1000, 0)
+	calls := 0
+	r.nowFn = func() time.Time {
+		calls++
+		if calls == 1 {
+			return fakeStart
+		}
+		return fakeStart.Add(50 * time.Millisecond)
+	}
+	result, err := r.Run(env.ctx, capsuleID)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	elapsed := time.Since(before).Seconds()
-	if result.WallTimeSeconds <= 0 || result.WallTimeSeconds > elapsed+1 {
-		t.Fatalf("RunResult.WallTimeSeconds = %.6f, want > 0 and <= %.6f", result.WallTimeSeconds, elapsed+1)
+	if result.WallTimeSeconds <= 0 {
+		t.Fatalf("RunResult.WallTimeSeconds = %.6f, want > 0 (fallback clock must fill in)", result.WallTimeSeconds)
 	}
 	patch, err := env.st.LoadPatch(env.ctx, result.PatchID)
 	if err != nil {

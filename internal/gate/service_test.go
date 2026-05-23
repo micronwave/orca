@@ -97,7 +97,9 @@ func TestReviewProjection_AutoProceedsAfterWindow(t *testing.T) {
 	reader, writer := io.Pipe()
 	t.Cleanup(func() { _ = writer.Close() })
 	var out bytes.Buffer
-	g := gate.NewWithIO(e.st, reader, &out)
+	g := gate.NewWithIO(e.st, reader, &out, gate.WithTimerFunc(func(time.Duration) *time.Timer {
+		return time.NewTimer(0) // fires immediately — no real-time dependency
+	}))
 
 	decision, err := g.ReviewProjection(e.ctx, "CAP-1", 5*time.Millisecond)
 	if err != nil {

@@ -31,6 +31,7 @@ type Runner struct {
 	orcaDir    string
 	noLearning bool
 	adapters   map[schema.AgentType]Adapter
+	nowFn      func() time.Time
 }
 
 // Config holds runner-local options not part of the repo config file contract.
@@ -61,6 +62,7 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 		orcaDir:    strings.TrimSpace(orcaDir),
 		noLearning: cfg.NoLearning,
 		adapters:   registry,
+		nowFn:      time.Now,
 	}
 }
 
@@ -226,14 +228,14 @@ func (s *Runner) runAdapter(
 	capsule *schema.ExecutionCapsule,
 	projection *schema.ContextProjection,
 ) (*schema.AgentSidecarOutput, bool, error) {
-	start := time.Now()
+	start := s.nowFn()
 	output, err := adapter.Execute(ctx, capsule, projection)
 	if err == nil {
 		if output == nil {
 			return nil, false, fmt.Errorf("runner: execute capsule %s: adapter returned nil output with no error", capsule.CapsuleID)
 		}
 		if output.WallTimeSeconds <= 0 {
-			output.WallTimeSeconds = time.Since(start).Seconds()
+			output.WallTimeSeconds = s.nowFn().Sub(start).Seconds()
 		}
 		return output, true, nil
 	}
@@ -249,7 +251,7 @@ func (s *Runner) runAdapter(
 		return nil, false, fmt.Errorf("runner: transcript extraction for capsule %s: adapter returned nil output", capsule.CapsuleID)
 	}
 	if output.WallTimeSeconds <= 0 {
-		output.WallTimeSeconds = time.Since(start).Seconds()
+		output.WallTimeSeconds = s.nowFn().Sub(start).Seconds()
 	}
 	return output, false, nil
 }

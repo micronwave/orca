@@ -22,6 +22,16 @@ type lineResult struct {
 	epoch uint64
 }
 
+// Option configures a Gatekeeper.
+type Option func(*Gatekeeper)
+
+// WithTimerFunc replaces the timer constructor used by timed review windows.
+// The default is time.NewTimer. Pass a zero-duration factory in tests to make
+// the window fire immediately without real-time dependency.
+func WithTimerFunc(f func(time.Duration) *time.Timer) Option {
+	return func(g *Gatekeeper) { g.timerFunc = f }
+}
+
 // Gatekeeper presents decisions to the developer and records their response
 // as a DecisionRecord. Every gate call blocks until the developer responds or
 // the context is cancelled.
@@ -42,9 +52,10 @@ type Gatekeeper struct {
 	// epoch is incremented whenever a timed gate auto-proceeds. Lines tagged with
 	// an older epoch are stale (typed during a window that already timed out) and
 	// must be discarded by the next gate.
-	epoch    atomic.Uint64
-	stop     chan struct{}
-	stopOnce sync.Once
+	epoch     atomic.Uint64
+	stop      chan struct{}
+	stopOnce  sync.Once
+	timerFunc func(time.Duration) *time.Timer
 }
 
 // New returns a terminal-backed Gatekeeper.
@@ -53,7 +64,8 @@ func New(st *store.FileStore) *Gatekeeper {
 }
 
 // NewWithIO returns a Gatekeeper with injected streams for tests and embedding.
-func NewWithIO(st *store.FileStore, in io.Reader, out io.Writer) *Gatekeeper {
+// Optional Option values (e.g. WithTimerFunc) may be passed to override defaults.
+func NewWithIO(st *store.FileStore, in io.Reader, out io.Writer, opts ...Option) *Gatekeeper {
 	if st == nil {
 		panic("gate: store is required")
 	}
@@ -64,7 +76,18 @@ func NewWithIO(st *store.FileStore, in io.Reader, out io.Writer) *Gatekeeper {
 		out = os.Stdout
 	}
 	lines := make(chan lineResult, 1)
-	return &Gatekeeper{store: st, lines: lines, in: in, out: out, stop: make(chan struct{})}
+	g := &Gatekeeper{
+		store:     st,
+		lines:     lines,
+		in:        in,
+		out:       out,
+		stop:      make(chan struct{}),
+		timerFunc: time.NewTimer,
+	}
+	for _, o := range opts {
+		o(g)
+	}
+	return g
 }
 
 // Close stops the background reader goroutine if it was started. After Close,
@@ -207,7 +230,7 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 	if _, err := fmt.Fprintf(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject. Auto-proceeding in %v...]\n", reviewWindow); err != nil {
 		return false, false, "", err
 	}
-	timer := time.NewTimer(reviewWindow)
+	timer := s.timerFunc(reviewWindow)
 	defer timer.Stop()
 	for {
 		select {
