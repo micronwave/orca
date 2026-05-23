@@ -226,7 +226,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 		store:      st,
 
 		intentCompiler: newIntentCompiler(st),
-		verifierEngine: newVerifierEngine(st, cfg.Verifier, noLearning),
+		verifierEngine: newVerifierEngine(st, cfg.Verifier, cfg.Advanced, noLearning),
 		planner:        newPlanner(st, cfg.Budget, orcaDir, noLearning),
 		projector:      newProjector(st, cfg.Verifier),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
@@ -505,7 +505,7 @@ func ensureInitTarget(orcaDir string) error {
 }
 
 func defaultConfigYAML() string {
-	return `# Orca Phase 1 local runtime configuration.
+	return `# Orca Phase 4 local runtime configuration.
 # Keep this file in the simple shape supported by internal/config.Load:
 # sections, scalar values, and verifier.gates list items only.
 
@@ -535,6 +535,20 @@ adapters:
   # Leave empty to resolve from PATH.
   codex_path: ""
   claude_path: ""
+
+advanced:
+  # All advanced checks are off by default. Enable explicitly when needed.
+  enabled: false
+  maven: false
+  mutation: false
+  mutation_command: ""
+  mutation_timeout_seconds: 120
+  mutation_blocking: false
+  adversarial_tests: false
+  adversarial_command: ""
+  adversarial_timeout_seconds: 60
+  adversarial_blocking: false
+  reviewer_diversity: false
 `
 }
 
@@ -1013,11 +1027,12 @@ func newIntentCompiler(st *store.FileStore) *intent.Compiler {
 	return intent.New(st)
 }
 
-func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, noLearning bool) *verifier.Engine {
+func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, adv config.AdvancedConfig, noLearning bool) *verifier.Engine {
 	return verifier.NewWithConfig(st, verifier.Config{
 		Gates:      cfg.Gates,
 		WorkingDir: cfg.WorkingDir,
 		NoLearning: noLearning,
+		Advanced:   adv,
 	}, nil)
 }
 

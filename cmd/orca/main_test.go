@@ -376,6 +376,30 @@ func TestRunCancelEOFAbortsWithoutCancelling(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigYAMLIncludesAdvancedAndLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := defaultConfigYAML()
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load(defaultConfigYAML): %v", err)
+	}
+	if cfg.Advanced.Enabled {
+		t.Fatal("Advanced.Enabled = true, want false (default)")
+	}
+	if cfg.Advanced.MutationTimeoutSeconds != 120 {
+		t.Fatalf("Advanced.MutationTimeoutSeconds = %d, want 120", cfg.Advanced.MutationTimeoutSeconds)
+	}
+	if cfg.Advanced.AdversarialTimeoutSeconds != 60 {
+		t.Fatalf("Advanced.AdversarialTimeoutSeconds = %d, want 60", cfg.Advanced.AdversarialTimeoutSeconds)
+	}
+	if !strings.Contains(yaml, "advanced:") {
+		t.Fatal("defaultConfigYAML does not contain 'advanced:' block")
+	}
+}
+
 var configLoad = config.Load
 
 func writeTestConfig(t *testing.T, path string) {
