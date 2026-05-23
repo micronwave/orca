@@ -239,7 +239,7 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		evidenceType := staticEvidenceType(gate)
 		evidence, exitCode, err := s.runOrReuseGate(ctx, goalID, latestSnapshotID, gate, evidenceType, workingDir, obligationRefs)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("verifier: patch %s capsule %s: %w", patchID, capsule.CapsuleID, err)
 		}
 		createdEvidence = append(createdEvidence, evidence...)
 		if gate.Blocking && exitCode != 0 {
@@ -257,7 +257,7 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		testGate := s.config.Gates[testGateIndex]
 		evidence, exitCode, err := s.runOrReuseGate(ctx, goalID, latestSnapshotID, testGate, schema.EvidenceTestResult, workingDir, obligationRefs)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("verifier: patch %s capsule %s: %w", patchID, capsule.CapsuleID, err)
 		}
 		createdEvidence = append(createdEvidence, evidence...)
 		if testGate.Blocking && exitCode != 0 {
@@ -689,7 +689,7 @@ func (s *Engine) runOrReuseGate(
 	}
 	exitCode, output, runErr := s.runner.Run(ctx, command, workingDir)
 	if runErr != nil {
-		return nil, 0, fmt.Errorf("verifier: run gate %q: %w", gate.Name, runErr)
+		return nil, 0, fmt.Errorf("verifier: run gate %q goal %s: %w", gate.Name, goalID, runErr)
 	}
 	contentHash := evidenceContentHash(evidenceType, command, workingDir, exitCode, output, obligationRefs, goalID, snapshotID)
 	evidence, err := s.saveEvidence(ctx, evidenceType, command, exitCode, summarizeOutput(output), obligationRefs, reuseKey, snapshotID, contentHash)
