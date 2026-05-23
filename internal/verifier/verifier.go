@@ -1,6 +1,6 @@
-// Package verifier defines the VerifierEngine interface, which has two jobs:
-// (1) propose initial obligations from a GoalIR, and (2) check whether evidence
-// satisfies obligations for a given patch. orca.md §6 step 3, §10.
+// Package verifier provides the Engine, which has two jobs: (1) propose initial
+// obligations from a GoalIR, and (2) check whether evidence satisfies
+// obligations for a given patch. orca.md §6 step 3, §10.
 //
 // Phase 1 decision: ProposeObligations uses fixed deterministic templates for
 // evidence mapping, test/static gate evidence, and scope preservation. It does
@@ -51,38 +51,6 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
-// VerifierEngine has two jobs (orca.md §6, §10):
-//  1. ProposeObligations: derive the initial Obligation set from a GoalIR.
-//  2. Verify: check whether collected evidence satisfies obligations for a patch.
-//
-// Default verification stages for Verify run in order (orca.md §10):
-//  1. Preflight: repo status, auth, configured gates, clean base
-//  2. Scope check: changed files and LOC within capsule contract
-//  3. Static checks: lint, typecheck, formatting as configured
-//  4. Targeted tests: tests relevant to changed files or obligations
-//  5. Regression checks: reproduction or regression evidence for bugfix/security obligations
-//  6. Patch review: model or human review for risk, assumptions, obligation fit
-//  7. Merge readiness: all blocking obligations satisfied or waived
-//
-// Stages 1–4 run in order; the first blocking failure within that group stops
-// the remaining stages in 1–4. Stages 5–7 always run for their applicable
-// obligation types regardless of any stage 1–4 blocking failure.
-type VerifierEngine interface {
-	// ProposeObligations derives the initial Obligation set from the GoalIR
-	// for goalID, persists each obligation via SaveObligation, and returns the
-	// IDs of the created obligations. Called once by the orchestrator after
-	// IntentCompiler.Compile and before ObligationPlanner.Plan. orca.md §6 step 3.
-	ProposeObligations(ctx context.Context, goalID string) ([]string, error)
-
-	// Verify runs all applicable verifier stages for the patch identified by
-	// patchID and returns a VerifierResult mapping each obligation to its
-	// verdict. The result is persisted via SaveVerifierResult before returning.
-	//
-	// The RecommendedAction field is the authoritative signal consumed by the
-	// Reconciler: accept, retry, split, reject, or human_review.
-	Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error)
-}
-
 // VerifyInput carries supplemental artifacts produced by reviewer/tester/
 // investigator capsules in the same plan cycle so verification can incorporate
 // peer review signal into recommendation confidence.
@@ -91,20 +59,14 @@ type VerifyInput struct {
 	SupplementalClaimIDs    []string
 }
 
-// SupplementalVerifierEngine extends VerifierEngine with supplemental inputs.
-// The orchestrator type-asserts this interface when available.
-type SupplementalVerifierEngine interface {
-	VerifierEngine
-	VerifyWithSupplements(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error)
-}
-
 // GateRunner abstracts subprocess execution for verifier gates.
 type GateRunner interface {
 	Run(ctx context.Context, command, workingDir string) (exitCode int, output string, err error)
 }
 
-type service struct {
-	store          store.ArtifactStore
+// Engine implements the two verifier jobs: propose obligations and verify patch evidence.
+type Engine struct {
+	store          *store.FileStore
 	config         config.VerifierConfig
 	noLearning     bool
 	runner         GateRunner
@@ -119,17 +81,17 @@ type Config struct {
 	NoLearning bool
 }
 
-// New returns the default VerifierEngine implementation.
-func New(st store.ArtifactStore, cfg config.VerifierConfig, runner GateRunner) VerifierEngine {
+// New returns the default Engine implementation.
+func New(st *store.FileStore, cfg config.VerifierConfig, runner GateRunner) *Engine {
 	return NewWithConfig(st, Config{Gates: cfg.Gates, WorkingDir: cfg.WorkingDir}, runner)
 }
 
-// NewWithConfig returns the default VerifierEngine with verifier-local options.
-func NewWithConfig(st store.ArtifactStore, cfg Config, runner GateRunner) VerifierEngine {
+// NewWithConfig returns an Engine with verifier-local options.
+func NewWithConfig(st *store.FileStore, cfg Config, runner GateRunner) *Engine {
 	if runner == nil {
 		runner = execGateRunner{}
 	}
-	return &service{
+	return &Engine{
 		store:          st,
 		config:         config.VerifierConfig{Gates: cfg.Gates, WorkingDir: cfg.WorkingDir},
 		noLearning:     cfg.NoLearning,
@@ -138,7 +100,7 @@ func NewWithConfig(st store.ArtifactStore, cfg Config, runner GateRunner) Verifi
 	}
 }
 
-func (s *service) ProposeObligations(ctx context.Context, goalID string) ([]string, error) {
+func (s *Engine) ProposeObligations(ctx context.Context, goalID string) ([]string, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("verifier: store is required")
 	}
@@ -191,11 +153,7 @@ func (s *service) ProposeObligations(ctx context.Context, goalID string) ([]stri
 	return obligationIDs, nil
 }
 
-func (s *service) Verify(ctx context.Context, patchID string) (*schema.VerifierResult, error) {
-	return s.VerifyWithSupplements(ctx, patchID, VerifyInput{})
-}
-
-func (s *service) VerifyWithSupplements(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error) {
+func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("verifier: store is required")
 	}
@@ -408,7 +366,7 @@ func (r reviewFindings) rationale() string {
 	return fmt.Sprintf("supplemental reviewer claims require human review: %s", strings.Join(r.claimIDs, ", "))
 }
 
-func (s *service) reviewFindingsFromClaims(ctx context.Context, claimIDs []string) (reviewFindings, error) {
+func (s *Engine) reviewFindingsFromClaims(ctx context.Context, claimIDs []string) (reviewFindings, error) {
 	claimIDs = uniqueStrings(claimIDs)
 	findings := reviewFindings{}
 	for _, claimID := range claimIDs {
@@ -435,7 +393,7 @@ func (s *service) reviewFindingsFromClaims(ctx context.Context, claimIDs []strin
 	return findings, nil
 }
 
-func (s *service) loadEvidenceByID(ctx context.Context, evidenceIDs []string) (map[string]*schema.EvidenceArtifact, error) {
+func (s *Engine) loadEvidenceByID(ctx context.Context, evidenceIDs []string) (map[string]*schema.EvidenceArtifact, error) {
 	evidenceIDs = uniqueStrings(evidenceIDs)
 	loaded := make(map[string]*schema.EvidenceArtifact, len(evidenceIDs))
 	for _, evidenceID := range evidenceIDs {
@@ -448,7 +406,7 @@ func (s *service) loadEvidenceByID(ctx context.Context, evidenceIDs []string) (m
 	return loaded, nil
 }
 
-func (s *service) collectObligationEvidence(
+func (s *Engine) collectObligationEvidence(
 	ctx context.Context,
 	obligationID string,
 	createdEvidence []*schema.EvidenceArtifact,
@@ -599,7 +557,7 @@ func hasFailedEvidence(evidence []*schema.EvidenceArtifact) bool {
 	return false
 }
 
-func (s *service) saveGateFailure(
+func (s *Engine) saveGateFailure(
 	ctx context.Context,
 	goalID string,
 	capsuleID string,
@@ -651,7 +609,7 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-func (s *service) saveEvidence(
+func (s *Engine) saveEvidence(
 	ctx context.Context,
 	evidenceType schema.EvidenceType,
 	command string,
@@ -688,7 +646,7 @@ func (s *service) saveEvidence(
 	return evidence, nil
 }
 
-func (s *service) runOrReuseGate(
+func (s *Engine) runOrReuseGate(
 	ctx context.Context,
 	goalID string,
 	snapshotID string,
@@ -738,7 +696,7 @@ func (s *service) runOrReuseGate(
 	return []*schema.EvidenceArtifact{evidence}, exitCode, nil
 }
 
-func (s *service) reuseGateEvidence(
+func (s *Engine) reuseGateEvidence(
 	ctx context.Context,
 	evidenceType schema.EvidenceType,
 	command string,
@@ -784,7 +742,7 @@ func (s *service) reuseGateEvidence(
 	return reused, nil
 }
 
-func (s *service) goalIDForObligations(ctx context.Context, obligationRefs []string) (string, error) {
+func (s *Engine) goalIDForObligations(ctx context.Context, obligationRefs []string) (string, error) {
 	goal, err := s.store.LoadActiveGoal(ctx)
 	if err != nil {
 		return "", fmt.Errorf("verifier: load active goal for snapshot scope: %w", err)
@@ -808,7 +766,7 @@ func (s *service) goalIDForObligations(ctx context.Context, obligationRefs []str
 	return goal.GoalID, nil
 }
 
-func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
+func (s *Engine) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
 	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
 	if err == nil {
 		return snapshot.SnapshotID, nil

@@ -934,7 +934,7 @@ func TestEvidenceReuse(t *testing.T) {
 		t.Fatalf("SavePatch 1: %v", err)
 	}
 
-	firstResult, err := ve.Verify(ctx, patch1)
+	firstResult, err := ve.Verify(ctx, patch1, verifier.VerifyInput{})
 	if err != nil {
 		t.Fatalf("Verify 1: %v", err)
 	}
@@ -976,7 +976,7 @@ func TestEvidenceReuse(t *testing.T) {
 		t.Fatalf("SavePatch 2: %v", err)
 	}
 
-	secondResult, err := ve.Verify(ctx, patch2)
+	secondResult, err := ve.Verify(ctx, patch2, verifier.VerifyInput{})
 	if err != nil {
 		t.Fatalf("Verify 2: %v", err)
 	}
@@ -1607,7 +1607,7 @@ func TestNoLearningIsolation(t *testing.T) {
 			PatchID: "PATCH-NOLEARN-EV-1", CapsuleID: "CAP-NOLEARN-EV-1",
 			ObligationIDsClaimed: []string{oblID}, Status: schema.PatchCandidate,
 		})
-		if _, err := ve1.Verify(ctx, "PATCH-NOLEARN-EV-1"); err != nil {
+		if _, err := ve1.Verify(ctx, "PATCH-NOLEARN-EV-1", verifier.VerifyInput{}); err != nil {
 			t.Fatalf("Verify 1: %v", err)
 		}
 
@@ -1625,7 +1625,7 @@ func TestNoLearningIsolation(t *testing.T) {
 			PatchID: "PATCH-NOLEARN-EV-2", CapsuleID: "CAP-NOLEARN-EV-2",
 			ObligationIDsClaimed: []string{oblID}, Status: schema.PatchCandidate,
 		})
-		secondResult, err := ve2.Verify(ctx, "PATCH-NOLEARN-EV-2")
+		secondResult, err := ve2.Verify(ctx, "PATCH-NOLEARN-EV-2", verifier.VerifyInput{})
 		if err != nil {
 			t.Fatalf("Verify 2: %v", err)
 		}

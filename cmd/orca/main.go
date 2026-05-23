@@ -171,9 +171,7 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func(), error) {
 		return nil, nil, err
 	}
 	return rt, func() {
-		if gk, ok := rt.gatekeeper.(io.Closer); ok {
-			_ = gk.Close()
-		}
+		rt.gatekeeper.Close()
 		_ = log.Close()
 	}, nil
 }
@@ -183,20 +181,20 @@ type runtime struct {
 	orcaDir    string
 	noLearning bool
 
-	eventLog eventlog.EventLog
-	store    store.ArtifactStore
+	eventLog *eventlog.FileLog
+	store    *store.FileStore
 
-	intentCompiler intent.IntentCompiler
-	verifierEngine verifier.VerifierEngine
-	planner        planner.ObligationPlanner
-	projector      projector.ContextCompiler
-	gatekeeper     gate.HumanGatekeeper
-	budget         budget.BudgetController
-	runner         runner.CapsuleRunner
-	reconciler     reconciler.Reconciler
+	intentCompiler *intent.Compiler
+	verifierEngine *verifier.Engine
+	planner        *planner.Planner
+	projector      *projector.Compiler
+	gatekeeper     *gate.Gatekeeper
+	budget         *budget.Controller
+	runner         *runner.Runner
+	reconciler     *reconciler.Reconciler
 }
 
-func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log eventlog.EventLog, st store.ArtifactStore) (*runtime, error) {
+func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventlog.FileLog, st *store.FileStore) (*runtime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("orca: config is required")
 	}
@@ -409,13 +407,10 @@ func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string, la
 }
 
 func (rt *runtime) verifyPatch(ctx context.Context, patchID string, supplementalEvidenceIDs, supplementalClaimIDs []string) (*schema.VerifierResult, error) {
-	if engine, ok := rt.verifierEngine.(verifier.SupplementalVerifierEngine); ok {
-		return engine.VerifyWithSupplements(ctx, patchID, verifier.VerifyInput{
-			SupplementalEvidenceIDs: supplementalEvidenceIDs,
-			SupplementalClaimIDs:    supplementalClaimIDs,
-		})
-	}
-	return rt.verifierEngine.Verify(ctx, patchID)
+	return rt.verifierEngine.Verify(ctx, patchID, verifier.VerifyInput{
+		SupplementalEvidenceIDs: supplementalEvidenceIDs,
+		SupplementalClaimIDs:    supplementalClaimIDs,
+	})
 }
 
 func ensureInitTarget(orcaDir string) error {
@@ -979,11 +974,11 @@ func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWin
 	return defaultWindow
 }
 
-func newIntentCompiler(st store.ArtifactStore) intent.IntentCompiler {
+func newIntentCompiler(st *store.FileStore) *intent.Compiler {
 	return intent.New(st)
 }
 
-func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig, noLearning bool) verifier.VerifierEngine {
+func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, noLearning bool) *verifier.Engine {
 	return verifier.NewWithConfig(st, verifier.Config{
 		Gates:      cfg.Gates,
 		WorkingDir: cfg.WorkingDir,
@@ -991,7 +986,7 @@ func newVerifierEngine(st store.ArtifactStore, cfg config.VerifierConfig, noLear
 	}, nil)
 }
 
-func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string, noLearning bool) planner.ObligationPlanner {
+func newPlanner(st *store.FileStore, cfg config.BudgetConfig, orcaDir string, noLearning bool) *planner.Planner {
 	var outcomes planner.OutcomeReader
 	if !noLearning {
 		outcomes = st
@@ -1006,19 +1001,19 @@ func newPlanner(st store.ArtifactStore, cfg config.BudgetConfig, orcaDir string,
 	}, outcomes)
 }
 
-func newProjector(st store.ArtifactStore, cfg config.VerifierConfig) projector.ContextCompiler {
+func newProjector(st *store.FileStore, cfg config.VerifierConfig) *projector.Compiler {
 	return projector.New(st, cfg)
 }
 
-func newGatekeeper(st store.ArtifactStore, _ config.GateConfig) gate.HumanGatekeeper {
+func newGatekeeper(st *store.FileStore, _ config.GateConfig) *gate.Gatekeeper {
 	return gate.New(st)
 }
 
-func newBudgetController(log eventlog.EventLog, _ config.BudgetConfig) budget.BudgetController {
+func newBudgetController(log *eventlog.FileLog, _ config.BudgetConfig) *budget.Controller {
 	return budget.New(log)
 }
 
-func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg config.AdapterConfig, noLearning bool) runner.CapsuleRunner {
+func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, noLearning bool) *runner.Runner {
 	return runner.NewWithConfig(
 		st,
 		log,
@@ -1029,6 +1024,6 @@ func newCapsuleRunner(st store.ArtifactStore, log eventlog.EventLog, orcaDir str
 	)
 }
 
-func newReconciler(st store.ArtifactStore, log eventlog.EventLog, noLearning bool) reconciler.Reconciler {
+func newReconciler(st *store.FileStore, log *eventlog.FileLog, noLearning bool) *reconciler.Reconciler {
 	return reconciler.New(st, log, reconciler.Config{NoLearning: noLearning})
 }

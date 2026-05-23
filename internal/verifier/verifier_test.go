@@ -202,10 +202,10 @@ func TestVerify_savesEvidenceAndResult(t *testing.T) {
 			"go vet ./...":  {exitCode: 0, output: "ok"},
 			"go test ./...": {exitCode: 0, output: "ok"},
 		},
-	}).(*service)
+	})
 	engine.commandChecker = func(string) error { return nil }
 
-	result, err := engine.Verify(ctx, "PATCH-verify")
+	result, err := engine.Verify(ctx, "PATCH-verify", VerifyInput{})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -293,10 +293,10 @@ func TestVerify_failsBlockingObligationWhenTestGateFails(t *testing.T) {
 		results: map[string]gateResult{
 			"go test ./...": {exitCode: 1, output: "FAIL"},
 		},
-	}).(*service)
+	})
 	engine.commandChecker = func(string) error { return nil }
 
-	result, err := engine.Verify(ctx, "PATCH-fail")
+	result, err := engine.Verify(ctx, "PATCH-fail", VerifyInput{})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -373,10 +373,10 @@ func TestVerify_ReusesMatchingGateEvidenceForCurrentSnapshot(t *testing.T) {
 	engine := NewWithConfig(st, Config{
 		Gates:      []config.VerifierGate{{Name: "go_test", Command: "go test ./...", Blocking: true}},
 		WorkingDir: workingDir,
-	}, runner).(*service)
+	}, runner)
 	engine.commandChecker = func(string) error { return nil }
 
-	result, err := engine.Verify(ctx, "PATCH-reuse")
+	result, err := engine.Verify(ctx, "PATCH-reuse", VerifyInput{})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -454,10 +454,10 @@ func TestVerify_ChangedSnapshotOrNoLearningForcesFreshGateRun(t *testing.T) {
 				Gates:      []config.VerifierGate{{Name: "go_test", Command: "go test ./...", Blocking: true}},
 				WorkingDir: workingDir,
 				NoLearning: tc.noLearning,
-			}, runner).(*service)
+			}, runner)
 			engine.commandChecker = func(string) error { return nil }
 
-			result, err := engine.Verify(ctx, "PATCH-reuse")
+			result, err := engine.Verify(ctx, "PATCH-reuse", VerifyInput{})
 			if err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
@@ -492,7 +492,7 @@ func TestParseCommand_supportsQuotedExecutablePath(t *testing.T) {
 	}
 }
 
-func TestVerifyWithSupplements_UsesSupplementalEvidence(t *testing.T) {
+func TestVerify_UsesSupplementalEvidence(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -553,13 +553,13 @@ func TestVerifyWithSupplements_UsesSupplementalEvidence(t *testing.T) {
 		t.Fatalf("SaveEvidence: %v", err)
 	}
 
-	engine := New(st, config.VerifierConfig{}, fakeGateRunner{}).(*service)
+	engine := New(st, config.VerifierConfig{}, fakeGateRunner{})
 	engine.commandChecker = func(string) error { return nil }
-	result, err := engine.VerifyWithSupplements(ctx, "PATCH-supp-ev", VerifyInput{
+	result, err := engine.Verify(ctx, "PATCH-supp-ev", VerifyInput{
 		SupplementalEvidenceIDs: []string{"EV-supp-ev"},
 	})
 	if err != nil {
-		t.Fatalf("VerifyWithSupplements: %v", err)
+		t.Fatalf("Verify: %v", err)
 	}
 	if result.RecommendedAction != schema.ActionAccept {
 		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionAccept)
@@ -623,9 +623,9 @@ func TestVerify_ErrorsWhenNoActiveGoal(t *testing.T) {
 		t.Fatalf("SavePatch: %v", err)
 	}
 
-	engine := New(st, config.VerifierConfig{}, fakeGateRunner{}).(*service)
+	engine := New(st, config.VerifierConfig{}, fakeGateRunner{})
 	engine.commandChecker = func(string) error { return nil }
-	_, err = engine.Verify(ctx, "PATCH-nogoal")
+	_, err = engine.Verify(ctx, "PATCH-nogoal", VerifyInput{})
 	if err == nil {
 		t.Fatal("Verify: expected error when no active goal, got nil")
 	}
@@ -692,7 +692,7 @@ func seedVerifierReuseScenario(t *testing.T, ctx context.Context, st *store.File
 	}
 }
 
-func TestVerifyWithSupplements_ProposedRiskClaimForcesHumanReview(t *testing.T) {
+func TestVerify_ProposedRiskClaimForcesHumanReview(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -758,13 +758,13 @@ func TestVerifyWithSupplements_ProposedRiskClaimForcesHumanReview(t *testing.T) 
 		t.Fatalf("SaveClaim: %v", err)
 	}
 
-	engine := New(st, config.VerifierConfig{}, fakeGateRunner{}).(*service)
+	engine := New(st, config.VerifierConfig{}, fakeGateRunner{})
 	engine.commandChecker = func(string) error { return nil }
-	result, err := engine.VerifyWithSupplements(ctx, "PATCH-supp-claim", VerifyInput{
+	result, err := engine.Verify(ctx, "PATCH-supp-claim", VerifyInput{
 		SupplementalClaimIDs: []string{"CLM-supp-risk"},
 	})
 	if err != nil {
-		t.Fatalf("VerifyWithSupplements: %v", err)
+		t.Fatalf("Verify: %v", err)
 	}
 	if result.RecommendedAction != schema.ActionHumanReview {
 		t.Fatalf("RecommendedAction = %s, want %s", result.RecommendedAction, schema.ActionHumanReview)
