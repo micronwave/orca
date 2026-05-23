@@ -19,6 +19,10 @@ const (
 	// read capsule budget limits from the event stream. orca.md §9, §12.
 	EventCapsuleCreated            EventType = "capsule_created"
 	EventCapsuleStarted            EventType = "capsule_started"
+	// EventCapsuleStateUpdated is emitted by the runner before every intermediate
+	// lifecycle state mutation (workspace_attached, setup_run, agent_running) so
+	// crash+replay reconstructs the exact state the capsule had reached.
+	EventCapsuleStateUpdated       EventType = "capsule_state_updated"
 	EventCapsuleCompleted          EventType = "capsule_completed"
 	// EventCapsuleProjectionLinked is emitted by FileStore.UpdateCapsuleProjectionID
 	// before mutating the capsule file, making the projection link replayable.

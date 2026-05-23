@@ -251,7 +251,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.updateClaimStatusNoLock(p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
 
-	case schema.EventCapsuleStarted, schema.EventCapsuleCompleted:
+	case schema.EventCapsuleStarted, schema.EventCapsuleStateUpdated, schema.EventCapsuleCompleted:
 		var p schema.CapsuleTransitionPayload
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
 			return fmt.Errorf("unmarshal capsule transition payload: %w", err)

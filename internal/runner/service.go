@@ -129,11 +129,19 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	if err = ensureWorktree(ctx, capsule.Sandbox.WorktreePath); err != nil {
 		return result, fmt.Errorf("runner: ensure worktree for capsule %s: %w", capsule.CapsuleID, err)
 	}
+	wsEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStateUpdated, schema.CapsuleStateWorkspaceAttached)
+	if err != nil {
+		return result, err
+	}
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateWorkspaceAttached); err != nil {
-		return result, fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateWorkspaceAttached, err)
+		return result, &store.MaterializationError{Event: wsEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateWorkspaceAttached, err)}
+	}
+	setupEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStateUpdated, schema.CapsuleStateSetupRun)
+	if err != nil {
+		return result, err
 	}
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateSetupRun); err != nil {
-		return result, fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateSetupRun, err)
+		return result, &store.MaterializationError{Event: setupEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateSetupRun, err)}
 	}
 
 	runCtx := ctx
@@ -148,8 +156,12 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 		return result, fmt.Errorf("runner: adapter preflight for capsule %s: %w", capsule.CapsuleID, err)
 	}
 
+	agentEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStateUpdated, schema.CapsuleStateAgentRunning)
+	if err != nil {
+		return result, err
+	}
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateAgentRunning); err != nil {
-		return result, fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateAgentRunning, err)
+		return result, &store.MaterializationError{Event: agentEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateAgentRunning, err)}
 	}
 
 	output, sidecarUsed, err := s.runAdapter(runCtx, adapter, capsule, projection)
