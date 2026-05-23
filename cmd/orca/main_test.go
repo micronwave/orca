@@ -555,7 +555,7 @@ func markObligationSatisfied(t *testing.T, orcaDir, obligationID string, evidenc
 	data := mustJSON(t, schema.ObligationStatusPayload{
 		ObligationID: obligationID,
 		Status:       schema.ObligationSatisfied,
-		SatisfiedBy:  evidenceIDs,
+		SatisfiedBy:  &evidenceIDs,
 	})
 	if _, err := log.Append(ctx, schema.Event{
 		Type:       schema.EventObligationStatusUpdated,
@@ -565,7 +565,7 @@ func markObligationSatisfied(t *testing.T, orcaDir, obligationID string, evidenc
 	}); err != nil {
 		t.Fatalf("append obligation status: %v", err)
 	}
-	if err := st.UpdateObligationStatus(ctx, obligationID, schema.ObligationSatisfied, evidenceIDs); err != nil {
+	if err := st.UpdateObligationStatus(ctx, obligationID, schema.ObligationSatisfied, &evidenceIDs); err != nil {
 		t.Fatalf("update obligation status: %v", err)
 	}
 }

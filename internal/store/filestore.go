@@ -596,7 +596,7 @@ func (s *FileStore) LoadObligationsForCondition(ctx context.Context, conditionID
 	return out, nil
 }
 
-func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy []string) error {
+func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
 	if err := validateArtifactID("obligation", obligationID); err != nil {
 		return err
 	}
@@ -608,7 +608,7 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	}
 	o.Status = status
 	if satisfiedBy != nil {
-		o.SatisfiedBy = satisfiedBy
+		o.SatisfiedBy = *satisfiedBy
 	}
 	return s.writeFile(s.artifactPath(dirObligations, obligationID), o)
 }

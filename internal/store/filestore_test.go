@@ -341,7 +341,8 @@ func TestObligation_UpdateStatus(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
-	if err := e.st.UpdateObligationStatus(e.ctx, "OB-1", schema.ObligationSatisfied, []string{"EV-1"}); err != nil {
+	evIDs := []string{"EV-1"}
+	if err := e.st.UpdateObligationStatus(e.ctx, "OB-1", schema.ObligationSatisfied, &evIDs); err != nil {
 		t.Fatalf("UpdateObligationStatus: %v", err)
 	}
 	got, _ := e.st.LoadObligation(e.ctx, "OB-1")
@@ -1797,7 +1798,7 @@ func TestReplay_AppliesObligationStatusUpdated(t *testing.T) {
 		Payload: marshalJSON(t, schema.ObligationStatusPayload{
 			ObligationID: "OB-1",
 			Status:       schema.ObligationSatisfied,
-			SatisfiedBy:  []string{"EV-1"},
+			SatisfiedBy:  &[]string{"EV-1"},
 		}),
 	}); err != nil {
 		t.Fatalf("Append obligation_status_updated: %v", err)

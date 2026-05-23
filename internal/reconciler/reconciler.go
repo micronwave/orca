@@ -248,16 +248,25 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileRe
 		if status != schema.ObligationSatisfied {
 			ids = nil
 		}
+		// satisfiedByPtr is non-nil only when marking satisfied so that nil means
+		// "no change to evidence IDs" and &ids means "set to exactly these IDs".
+		// Passing nil for non-satisfied statuses is safe here: the reconciler only
+		// operates on obligations that were open before this run (SatisfiedBy is
+		// empty), so there are no stale evidence IDs to clear.
+		var satisfiedByPtr *[]string
+		if status == schema.ObligationSatisfied {
+			satisfiedByPtr = &ids
+		}
 		var ev schema.Event
 		ev, err = s.appendEvent(ctx, schema.EventObligationStatusUpdated, goal.GoalID, obl.ObligationID, schema.ObligationStatusPayload{
 			ObligationID: obl.ObligationID,
 			Status:       status,
-			SatisfiedBy:  ids,
+			SatisfiedBy:  satisfiedByPtr,
 		})
 		if err != nil {
 			return ReconcileResult{}, err
 		}
-		if err := s.store.UpdateObligationStatus(ctx, obl.ObligationID, status, ids); err != nil {
+		if err := s.store.UpdateObligationStatus(ctx, obl.ObligationID, status, satisfiedByPtr); err != nil {
 			return ReconcileResult{}, &store.MaterializationError{Event: ev, Err: fmt.Errorf("reconciler: update obligation %s: %w", obl.ObligationID, err)}
 		}
 	}

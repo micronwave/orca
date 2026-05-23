@@ -310,7 +310,7 @@ func (s *FileStore) updateGoalStatusNoLock(goalID string, status schema.GoalStat
 
 // updateObligationStatusNoLock reads the obligation file, updates Status and
 // SatisfiedBy, then writes back. Caller must hold s.mu.Lock().
-func (s *FileStore) updateObligationStatusNoLock(obligationID string, status schema.ObligationStatus, satisfiedBy []string) error {
+func (s *FileStore) updateObligationStatusNoLock(obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
 	path := s.artifactPath(dirObligations, obligationID)
 	o, err := readFile[schema.Obligation](path)
 	if err != nil {
@@ -318,7 +318,7 @@ func (s *FileStore) updateObligationStatusNoLock(obligationID string, status sch
 	}
 	o.Status = status
 	if satisfiedBy != nil {
-		o.SatisfiedBy = satisfiedBy
+		o.SatisfiedBy = *satisfiedBy
 	}
 	return s.writeFile(path, o)
 }

@@ -67,11 +67,15 @@ type GoalStatusPayload struct {
 }
 
 // ObligationStatusPayload is the event payload for obligation_status_updated.
-// SatisfiedBy is optional and mirrors ArtifactStore.UpdateObligationStatus.
+// SatisfiedBy is a pointer so nil (field absent) means "no change to evidence IDs"
+// while non-nil (including &[]string{}) means "set SatisfiedBy to exactly this slice".
+// Using *[]string instead of []string with omitempty prevents the ambiguity where
+// an intentional clear to empty would be indistinguishable from "no change" after
+// JSON round-trip (omitempty strips both nil and empty slices).
 type ObligationStatusPayload struct {
 	ObligationID string           `json:"obligation_id"`
 	Status       ObligationStatus `json:"status"`
-	SatisfiedBy  []string         `json:"satisfied_by,omitempty"`
+	SatisfiedBy  *[]string        `json:"satisfied_by,omitempty"`
 }
 
 // ClaimStatusPayload is the event payload for claim_status_updated.
