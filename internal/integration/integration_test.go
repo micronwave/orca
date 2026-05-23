@@ -1,9 +1,5 @@
-//go:build integration
-
 // Package integration_test encodes the Phase 1 acceptance tests.
-// These tests are gated behind the "integration" build tag so that plain
-// `go test ./...` does not exit non-zero due to intentionally failing gates.
-// Run with: go test -tags=integration ./internal/integration/...
+// Run with: go test ./internal/integration/...
 //
 // Each test exercises the full artifact lifecycle across the event log and
 // materialized store, not any single component in isolation.
