@@ -6,14 +6,19 @@ import (
 	"strings"
 
 	"github.com/micronwave/orca/internal/schema"
-	"github.com/micronwave/orca/internal/store"
 )
 
 const maxPriorCapsules = 10
 
+// FailureLookup is the read-only store interface required by Prepare.
+// Defined here (consumer side) so failurehistory does not depend on store.
+type FailureLookup interface {
+	LoadFailuresBySignature(ctx context.Context, goalID, normalizedSignature string) ([]*schema.FailureFingerprint, error)
+}
+
 // Prepare normalizes a new failure and attaches prior-attempt history before it
 // is saved as a distinct fingerprint artifact.
-func Prepare(ctx context.Context, st *store.FileStore, goalID string, failure *schema.FailureFingerprint, noLearning bool) error {
+func Prepare(ctx context.Context, st FailureLookup, goalID string, failure *schema.FailureFingerprint, noLearning bool) error {
 	if failure == nil {
 		return fmt.Errorf("failurehistory: failure is required")
 	}
