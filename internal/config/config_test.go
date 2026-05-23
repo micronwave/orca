@@ -139,6 +139,151 @@ budget:
 	}
 }
 
+func TestAdvancedConfigAbsentDefaultsToZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := AdvancedConfig{}
+	if cfg.Advanced != want {
+		t.Fatalf("Advanced = %+v, want zero value", cfg.Advanced)
+	}
+}
+
+func TestAdvancedConfigRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+
+advanced:
+  enabled: true
+  maven: true
+  mutation: true
+  mutation_command: "go-mutants ./..."
+  mutation_timeout_seconds: 90
+  mutation_blocking: true
+  adversarial_tests: true
+  adversarial_command: "fuzz run ./..."
+  adversarial_timeout_seconds: 45
+  adversarial_blocking: true
+  reviewer_diversity: true
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := AdvancedConfig{
+		Enabled:                   true,
+		Maven:                     true,
+		Mutation:                  true,
+		MutationCommand:           "go-mutants ./...",
+		MutationTimeoutSeconds:    90,
+		MutationBlocking:          true,
+		AdversarialTests:          true,
+		AdversarialCommand:        "fuzz run ./...",
+		AdversarialTimeoutSeconds: 45,
+		AdversarialBlocking:       true,
+		ReviewerDiversity:         true,
+	}
+	if cfg.Advanced != want {
+		t.Fatalf("Advanced = %+v, want %+v", cfg.Advanced, want)
+	}
+}
+
+func TestAdvancedConfigUnknownKeyReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+
+advanced:
+  enabled: false
+  unknown_field: true
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with unknown advanced field, want error")
+	}
+}
+
+func TestAdvancedConfigTimeoutExceedsMaxReturnsError(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "mutation_timeout_overflow",
+			yaml: `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+advanced:
+  enabled: true
+  mutation_timeout_seconds: 99999999
+`,
+		},
+		{
+			name: "adversarial_timeout_overflow",
+			yaml: `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+advanced:
+  enabled: true
+  adversarial_timeout_seconds: 99999999
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load succeeded with timeout exceeding max, want error")
+			}
+		})
+	}
+}
+
 func TestStripCommentQuoteAware(t *testing.T) {
 	cases := []struct {
 		input string

@@ -24,6 +24,24 @@ type Config struct {
 	Gate     GateConfig
 	Budget   BudgetConfig
 	Adapters AdapterConfig
+	Advanced AdvancedConfig
+}
+
+// AdvancedConfig holds optional Phase 4 verification features. All fields
+// default to false/zero/empty, meaning every advanced check is off unless
+// explicitly enabled in config.yaml.
+type AdvancedConfig struct {
+	Enabled                   bool
+	Maven                     bool
+	Mutation                  bool
+	MutationCommand           string
+	MutationTimeoutSeconds    int
+	MutationBlocking          bool
+	AdversarialTests          bool
+	AdversarialCommand        string
+	AdversarialTimeoutSeconds int
+	AdversarialBlocking       bool
+	ReviewerDiversity         bool
 }
 
 type VerifierConfig struct {
@@ -202,6 +220,79 @@ func Load(path string) (*Config, error) {
 				cfg.Adapters.ClaudePath = value
 			default:
 				return nil, fmt.Errorf("config: unknown adapters field %q on line %d", key, lineNum)
+			}
+		case "advanced":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "enabled":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.Enabled = b
+			case "maven":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.Maven = b
+			case "mutation":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.Mutation = b
+			case "mutation_command":
+				cfg.Advanced.MutationCommand = value
+			case "mutation_timeout_seconds":
+				n, err := parseNonNegativeInt(value, lineNum)
+				if err != nil {
+					return nil, err
+				}
+				if n > maxDurationSeconds {
+					return nil, fmt.Errorf("config: mutation_timeout_seconds %d exceeds maximum %d", n, maxDurationSeconds)
+				}
+				cfg.Advanced.MutationTimeoutSeconds = n
+			case "mutation_blocking":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.MutationBlocking = b
+			case "adversarial_tests":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.AdversarialTests = b
+			case "adversarial_command":
+				cfg.Advanced.AdversarialCommand = value
+			case "adversarial_timeout_seconds":
+				n, err := parseNonNegativeInt(value, lineNum)
+				if err != nil {
+					return nil, err
+				}
+				if n > maxDurationSeconds {
+					return nil, fmt.Errorf("config: adversarial_timeout_seconds %d exceeds maximum %d", n, maxDurationSeconds)
+				}
+				cfg.Advanced.AdversarialTimeoutSeconds = n
+			case "adversarial_blocking":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.AdversarialBlocking = b
+			case "reviewer_diversity":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Advanced.ReviewerDiversity = b
+			default:
+				return nil, fmt.Errorf("config: unknown advanced field %q on line %d", key, lineNum)
 			}
 		default:
 			return nil, fmt.Errorf("config: unknown section %q on line %d", section, lineNum)
