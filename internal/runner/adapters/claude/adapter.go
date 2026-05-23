@@ -116,7 +116,11 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		stdin:      briefingFile,
 	})
 	if runErr != nil {
-		return nil, fmt.Errorf("claude adapter: execute failed: %w: %s", runErr, strings.TrimSpace(stderr))
+		stderrSnippet := strings.TrimSpace(stderr)
+		if len(stderrSnippet) > 512 {
+			stderrSnippet = stderrSnippet[:512] + "... (see " + transcriptPath + " for full output)"
+		}
+		return nil, fmt.Errorf("claude adapter: execute failed: %w: %s", runErr, stderrSnippet)
 	}
 
 	outer := &claudeJSONResult{}
