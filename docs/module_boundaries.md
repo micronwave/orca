@@ -88,16 +88,16 @@ directly alongside their store writes.
 
 | Import path | Package name | What it defines |
 |---|---|---|
-| `internal/store` | `store` | `ArtifactStore` interface |
-| `internal/eventlog` | `eventlog` | `EventLog` interface |
-| `internal/intent` | `intent` | `IntentCompiler` interface |
-| `internal/planner` | `planner` | `ObligationPlanner`, `TopologyClassifier`, `PlanResult` |
-| `internal/projector` | `projector` | `ContextCompiler` interface |
-| `internal/runner` | `runner` | `CapsuleRunner`, `Adapter`, `RunResult`, `ErrNoSidecar`, `ErrInvalidSidecar` |
-| `internal/verifier` | `verifier` | `VerifierEngine` interface |
-| `internal/reconciler` | `reconciler` | `Reconciler`, `ReconcileResult` |
-| `internal/budget` | `budget` | `BudgetController`, `BudgetCheck`, `Spend`, `ROI` |
-| `internal/gate` | `gate` | `HumanGatekeeper`, `GateDecision` |
+| `internal/store` | `store` | `*FileStore` (concrete) |
+| `internal/eventlog` | `eventlog` | `*FileLog` (concrete) |
+| `internal/intent` | `intent` | `*Compiler`, `New` |
+| `internal/planner` | `planner` | `*Planner`, `PlanResult`, `OutcomeReader` (narrow consumer interface), `ClassifyInput` |
+| `internal/projector` | `projector` | `*Compiler`, `New` |
+| `internal/runner` | `runner` | `*Runner`, `Adapter` (narrow interface, claude+codex impls), `RunResult`, `ErrNoSidecar`, `ErrInvalidSidecar` |
+| `internal/verifier` | `verifier` | `*Engine`, `VerifyInput`, `GateRunner` (narrow interface) |
+| `internal/reconciler` | `reconciler` | `*Reconciler`, `ReconcileResult` |
+| `internal/budget` | `budget` | `*Controller`, `BudgetCheck`, `Spend`, `ROI` |
+| `internal/gate` | `gate` | `*Gatekeeper`, `GateDecision` |
 | `internal/schema` | `schema` | data-only artifact and event types |
 
 `internal/projector` is named "projector" rather than "context" to avoid
