@@ -169,9 +169,13 @@ func (s *Controller) spendForGoal(ctx context.Context, goalID string, capsuleIDF
 	return spend, records, nil
 }
 
-func coordinationCost(record schema.BudgetRecord) int {
+// CoordinationCost returns the total coordination overhead for a BudgetRecord:
+// retries, duplicated file reads, overlapping edits, and human interventions.
+func CoordinationCost(record schema.BudgetRecord) int {
 	return record.Retries + record.DuplicatedFileReads + record.OverlappingEdits + record.HumanInterventions
 }
+
+func coordinationCost(record schema.BudgetRecord) int { return CoordinationCost(record) }
 
 func validateBudgetRecord(r *schema.BudgetRecord) error {
 	if r.TokensSpent < 0 || r.WallTimeSeconds < 0 || r.Retries < 0 || r.ToolCalls < 0 ||

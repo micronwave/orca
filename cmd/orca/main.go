@@ -284,8 +284,8 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			// require a separate pre-execution gate. Also use plan.MaxObligationRisk
 			// rather than goal.RiskLevel: goal risk and obligation risk are set by
 			// different components and may disagree.
-			if capsule.Role == schema.RoleExecutor && shouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
-				reviewWindow := reviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
+			if capsule.Role == schema.RoleExecutor && gate.ShouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
+				reviewWindow := gate.ReviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
 				fmt.Fprintf(os.Stderr, "[orca] capsule %s: awaiting projection review (window %s)\n", capsuleID, reviewWindow)
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
@@ -759,7 +759,7 @@ func (rt *runtime) blockingHumanDecisions(
 		if err != nil {
 			return nil, fmt.Errorf("orca status: load topology decision %s: %w", capsule.TopologyDecisionID, err)
 		}
-		if shouldReviewProjection(schema.Topology(decision.Decision), maxRisk) {
+		if gate.ShouldReviewProjection(schema.Topology(decision.Decision), maxRisk) {
 			decided, err := rt.hasGateDecision(ctx, goal.GoalID, "projection_review", capsule.CapsuleID)
 			if err != nil {
 				return nil, err
@@ -940,14 +940,13 @@ func writeBudgetByObligation(out io.Writer, records []*schema.BudgetRecord) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		record := byObligation[id]
-		coordinationCost := record.Retries + record.DuplicatedFileReads + record.OverlappingEdits + record.HumanInterventions
 		fmt.Fprintf(out, "- %s tokens=%d wall_time_seconds=%.2f tool_calls=%d retries=%d coordination_cost=%d discharged=%d accepted=%d rejected=%d\n",
 			id,
 			record.TokensSpent,
 			record.WallTimeSeconds,
 			record.ToolCalls,
 			record.Retries,
-			coordinationCost,
+			budget.CoordinationCost(record),
 			record.ObligationsDischarged,
 			record.PatchesAccepted,
 			record.PatchesRejected,
@@ -955,13 +954,8 @@ func writeBudgetByObligation(out io.Writer, records []*schema.BudgetRecord) {
 	}
 }
 
-type topologySelectedPayload struct {
-	Topology   schema.Topology `json:"topology"`
-	DecisionID string          `json:"decision_id"`
-}
-
 func (rt *runtime) emitTopologySelected(ctx context.Context, goalID string, plan planner.PlanResult) (schema.Event, error) {
-	payload, err := json.Marshal(topologySelectedPayload{
+	payload, err := json.Marshal(schema.TopologySelectedPayload{
 		Topology:   plan.Topology,
 		DecisionID: plan.DecisionID,
 	})
@@ -974,30 +968,6 @@ func (rt *runtime) emitTopologySelected(ctx context.Context, goalID string, plan
 		ArtifactID: plan.DecisionID,
 		Payload:    payload,
 	})
-}
-
-func shouldReviewProjection(topology schema.Topology, risk schema.RiskLevel) bool {
-	switch topology {
-	case schema.TopologyHumanGated:
-		return true
-	case schema.TopologyImplementerReviewer:
-		return risk == schema.RiskMedium || risk == schema.RiskHigh
-	case schema.TopologySingle, schema.TopologyParallel, schema.TopologyTestFirst, schema.TopologyInvestigateThenImpl:
-		return true // gate all risk levels; window varies by risk in reviewWindowFor
-	default:
-		return false
-	}
-}
-
-func reviewWindowFor(topology schema.Topology, risk schema.RiskLevel, defaultWindow time.Duration) time.Duration {
-	if topology == schema.TopologyHumanGated || topology == schema.TopologyImplementerReviewer {
-		return 0
-	}
-	// Single and Phase 2 topologies: medium/high risk blocks indefinitely; low-risk gets the auto-proceed window.
-	if risk == schema.RiskMedium || risk == schema.RiskHigh {
-		return 0
-	}
-	return defaultWindow
 }
 
 func newIntentCompiler(st *store.FileStore) *intent.Compiler {

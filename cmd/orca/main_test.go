@@ -12,6 +12,7 @@ import (
 
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
+	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -302,13 +303,13 @@ func TestRunGoal_NoLearningFlag(t *testing.T) {
 }
 
 func TestShouldReviewProjectionForIRTopology(t *testing.T) {
-	if !shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
+	if !gate.ShouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
 		t.Fatal("IR + medium should require review")
 	}
-	if !shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskHigh) {
+	if !gate.ShouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskHigh) {
 		t.Fatal("IR + high should require review")
 	}
-	if shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskLow) {
+	if gate.ShouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskLow) {
 		t.Fatal("IR + low should not require review")
 	}
 }
@@ -316,16 +317,16 @@ func TestShouldReviewProjectionForIRTopology(t *testing.T) {
 // TestShouldReviewProjection_IRAlwaysGatesRegardlessOfGoalRisk verifies that the
 // gate fires for implementer_reviewer topology even when goal.RiskLevel is low.
 // The obligation risk (not goal risk) determines whether IR was selected; passing
-// goal.RiskLevel to shouldReviewProjection could silently skip the required gate.
+// goal.RiskLevel to gate.ShouldReviewProjection could silently skip the required gate.
 // Callers must pass plan.MaxObligationRisk, not goal.RiskLevel.
 func TestShouldReviewProjection_IRAlwaysGatesRegardlessOfGoalRisk(t *testing.T) {
 	// The classifier only selects IR for medium/high obligation risk. If goal risk
-	// is low but topology is IR, shouldReviewProjection(IR, medium) must be true.
-	if !shouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
+	// is low but topology is IR, gate.ShouldReviewProjection(IR, medium) must be true.
+	if !gate.ShouldReviewProjection(schema.TopologyImplementerReviewer, schema.RiskMedium) {
 		t.Fatal("IR + medium obligation risk must require gate")
 	}
 	// Reviewer capsules are always excluded from the gate — checked by the caller
-	// using capsule.Role != schema.RoleReviewer before calling shouldReviewProjection.
+	// using capsule.Role != schema.RoleReviewer before calling gate.ShouldReviewProjection.
 }
 
 func TestReviewWindowForGateRules(t *testing.T) {
@@ -344,9 +345,9 @@ func TestReviewWindowForGateRules(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := reviewWindowFor(tt.topology, tt.risk, defaultWindow)
+			got := gate.ReviewWindowFor(tt.topology, tt.risk, defaultWindow)
 			if got != tt.want {
-				t.Fatalf("reviewWindowFor() = %s, want %s", got, tt.want)
+				t.Fatalf("gate.ReviewWindowFor() = %s, want %s", got, tt.want)
 			}
 		})
 	}
@@ -354,7 +355,7 @@ func TestReviewWindowForGateRules(t *testing.T) {
 
 func TestShouldReviewProjection_SingleTopologyAllRisksGate(t *testing.T) {
 	for _, risk := range []schema.RiskLevel{schema.RiskLow, schema.RiskMedium, schema.RiskHigh} {
-		if !shouldReviewProjection(schema.TopologySingle, risk) {
+		if !gate.ShouldReviewProjection(schema.TopologySingle, risk) {
 			t.Fatalf("single + %s must require review gate", risk)
 		}
 	}
