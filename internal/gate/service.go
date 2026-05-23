@@ -88,6 +88,8 @@ func (s *Gatekeeper) startReader() {
 		}
 	}
 	go func() {
+		fmt.Fprintf(os.Stderr, "gate: stdin reader started\n")
+		defer fmt.Fprintf(os.Stderr, "gate: stdin reader stopped\n")
 		for {
 			// Snapshot the epoch BEFORE blocking on ReadString. If the timer fires
 			// while the read is in progress, the epoch will increment after this
@@ -101,10 +103,13 @@ func (s *Gatekeeper) startReader() {
 			epoch := s.epoch.Load()
 			line, err := r.ReadString('\n')
 			if err == io.EOF && line == "" {
-				send(lineResult{err: fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF), epoch: epoch})
+				readErr := fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF)
+				fmt.Fprintf(os.Stderr, "gate: stdin reader error: %v\n", readErr)
+				send(lineResult{err: readErr, epoch: epoch})
 				return
 			}
 			if err != nil && err != io.EOF {
+				fmt.Fprintf(os.Stderr, "gate: stdin reader error: %v\n", err)
 				send(lineResult{err: err, epoch: epoch})
 				return
 			}
