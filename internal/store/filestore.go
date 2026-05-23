@@ -158,7 +158,7 @@ func readFile[T any](path string) (*T, error) {
 
 // scanDir reads every .json file in the absolute directory dir and returns
 // the unmarshaled values. Returns nil slice (not error) if dir is missing.
-func scanDir[T any](dir string) ([]*T, error) {
+func scanDir[T any](ctx context.Context, dir string) ([]*T, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -168,6 +168,9 @@ func scanDir[T any](dir string) ([]*T, error) {
 	}
 	var out []*T
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
@@ -229,8 +232,8 @@ func (s *FileStore) ensureProjectionAbsent(id string) error {
 
 // findGoalIDForCondition scans all goal files and returns the GoalID of the
 // goal whose GoalConditions list contains conditionID.
-func (s *FileStore) findGoalIDForCondition(conditionID string) (string, error) {
-	goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+func (s *FileStore) findGoalIDForCondition(ctx context.Context, conditionID string) (string, error) {
+	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 	if err != nil {
 		return "", err
 	}
@@ -269,16 +272,16 @@ func (s *FileStore) requireExistingGoal(goalID string) error {
 	return nil
 }
 
-func (s *FileStore) goalIDForObligation(obligationID string) (string, error) {
+func (s *FileStore) goalIDForObligation(ctx context.Context, obligationID string) (string, error) {
 	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
 	if err != nil {
 		return "", fmt.Errorf("store: load obligation %s: %w", obligationID, err)
 	}
-	return s.findGoalIDForCondition(obl.GoalConditionID)
+	return s.findGoalIDForCondition(ctx, obl.GoalConditionID)
 }
 
 // goalIDForCapsule follows capsule → obligation → condition → goal.
-func (s *FileStore) goalIDForCapsule(capsuleID string) (string, error) {
+func (s *FileStore) goalIDForCapsule(ctx context.Context, capsuleID string) (string, error) {
 	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
 	if err != nil {
 		return "", fmt.Errorf("store: load capsule %s: %w", capsuleID, err)
@@ -286,15 +289,15 @@ func (s *FileStore) goalIDForCapsule(capsuleID string) (string, error) {
 	if len(c.ObligationIDs) == 0 {
 		return "", fmt.Errorf("store: capsule %s has no obligation IDs", capsuleID)
 	}
-	return s.goalIDForObligation(c.ObligationIDs[0])
+	return s.goalIDForObligation(ctx, c.ObligationIDs[0])
 }
 
-func (s *FileStore) goalIDForEvidence(ev *schema.EvidenceArtifact) (string, error) {
+func (s *FileStore) goalIDForEvidence(ctx context.Context, ev *schema.EvidenceArtifact) (string, error) {
 	for _, obligationID := range append(append([]string{}, ev.Supports...), ev.Weakens...) {
 		if obligationID == "" {
 			continue
 		}
-		goalID, err := s.goalIDForObligation(obligationID)
+		goalID, err := s.goalIDForObligation(ctx, obligationID)
 		if err == nil {
 			return goalID, nil
 		}
@@ -305,7 +308,7 @@ func (s *FileStore) goalIDForEvidence(ev *schema.EvidenceArtifact) (string, erro
 	return "", fmt.Errorf("store: evidence %s has no resolvable obligation reference", ev.EvidenceID)
 }
 
-func (s *FileStore) goalIDForProjectionSources(sourceIDs []string) (string, error) {
+func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []string) (string, error) {
 	if len(sourceIDs) == 0 {
 		return "", fmt.Errorf("store: projection source_artifact_ids are required to resolve goal")
 	}
@@ -315,7 +318,7 @@ func (s *FileStore) goalIDForProjectionSources(sourceIDs []string) (string, erro
 		}
 	}
 	for _, id := range sourceIDs {
-		goalID, err := s.goalIDForCapsule(id)
+		goalID, err := s.goalIDForCapsule(ctx, id)
 		if err == nil {
 			return goalID, nil
 		}
@@ -324,7 +327,7 @@ func (s *FileStore) goalIDForProjectionSources(sourceIDs []string) (string, erro
 		}
 	}
 	for _, id := range sourceIDs {
-		goalID, err := s.goalIDForObligation(id)
+		goalID, err := s.goalIDForObligation(ctx, id)
 		if err == nil {
 			return goalID, nil
 		}
@@ -344,7 +347,7 @@ func (s *FileStore) goalIDForProjectionSources(sourceIDs []string) (string, erro
 	return "", fmt.Errorf("store: no projection source resolves to a goal")
 }
 
-func (s *FileStore) goalIDForRelatedIDs(relatedIDs []string) (string, error) {
+func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string) (string, error) {
 	if len(relatedIDs) == 0 {
 		return "", fmt.Errorf("store: related_ids are required to resolve goal")
 	}
@@ -364,42 +367,42 @@ func (s *FileStore) goalIDForRelatedIDs(relatedIDs []string) (string, error) {
 			}
 			return id, nil
 		},
-		s.goalIDForObligation,
-		s.goalIDForCapsule,
+		func(id string) (string, error) { return s.goalIDForObligation(ctx, id) },
+		func(id string) (string, error) { return s.goalIDForCapsule(ctx, id) },
 		func(id string) (string, error) {
 			p, err := readFile[schema.PatchArtifact](s.artifactPath(dirPatches, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(p.CapsuleID)
+			return s.goalIDForCapsule(ctx, p.CapsuleID)
 		},
 		func(id string) (string, error) {
 			c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(c.SourceCapsuleID)
+			return s.goalIDForCapsule(ctx, c.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
 			f, err := readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(f.SourceCapsuleID)
+			return s.goalIDForCapsule(ctx, f.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
 			r, err := readFile[schema.VerifierResult](s.artifactPath(dirVerifierResults, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(r.CapsuleID)
+			return s.goalIDForCapsule(ctx, r.CapsuleID)
 		},
 		func(id string) (string, error) {
 			ev, err := readFile[schema.EvidenceArtifact](s.artifactPath(dirEvidence, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForEvidence(ev)
+			return s.goalIDForEvidence(ctx, ev)
 		},
 	}
 	for _, resolve := range resolvers {
@@ -440,7 +443,7 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 	// Enforce one-active-goal invariant atomically under the write lock,
 	// closing the TOCTOU window between LoadActiveGoal and SaveGoal.
 	if g.Status == schema.GoalStatusActive {
-		goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+		goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 		if err != nil {
 			return fmt.Errorf("store: check active goal: %w", err)
 		}
@@ -472,7 +475,7 @@ func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR
 func (s *FileStore) LoadActiveGoal(ctx context.Context) (*schema.GoalIR, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +504,7 @@ func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status 
 func (s *FileStore) LoadGoalCondition(ctx context.Context, conditionID string) (*schema.GoalCondition, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	goals, err := scanDir[schema.GoalIR](filepath.Join(s.root, dirGoals))
+	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +530,7 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 	if err := ensureArtifactAbsent("obligation", s.artifactPath(dirObligations, o.ObligationID), o.ObligationID); err != nil {
 		return err
 	}
-	goalID, err := s.findGoalIDForCondition(o.GoalConditionID)
+	goalID, err := s.findGoalIDForCondition(ctx, o.GoalConditionID)
 	if err != nil {
 		return fmt.Errorf("store: SaveObligation: %w", err)
 	}
@@ -556,7 +559,7 @@ func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*
 	for _, c := range g.GoalConditions {
 		conditionIDs[c.ID] = true
 	}
-	all, err := scanDir[schema.Obligation](filepath.Join(s.root, dirObligations))
+	all, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +575,7 @@ func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*
 func (s *FileStore) LoadObligationsForCondition(ctx context.Context, conditionID string) ([]*schema.Obligation, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.Obligation](filepath.Join(s.root, dirObligations))
+	all, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +616,7 @@ func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule)
 	if err := ensureArtifactAbsent("capsule", s.artifactPath(dirCapsules, c.CapsuleID), c.CapsuleID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsuleFromObligation(c)
+	goalID, err := s.goalIDForCapsuleFromObligation(ctx, c)
 	if err != nil {
 		return fmt.Errorf("store: SaveCapsule: %w", err)
 	}
@@ -626,11 +629,11 @@ func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule)
 
 // goalIDForCapsuleFromObligation resolves the goalID from the capsule's
 // first ObligationID without loading the capsule from disk (it's not saved yet).
-func (s *FileStore) goalIDForCapsuleFromObligation(c *schema.ExecutionCapsule) (string, error) {
+func (s *FileStore) goalIDForCapsuleFromObligation(ctx context.Context, c *schema.ExecutionCapsule) (string, error) {
 	if len(c.ObligationIDs) == 0 {
 		return "", fmt.Errorf("store: capsule %s has no obligation IDs", c.CapsuleID)
 	}
-	return s.goalIDForObligation(c.ObligationIDs[0])
+	return s.goalIDForObligation(ctx, c.ObligationIDs[0])
 }
 
 func (s *FileStore) LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error) {
@@ -669,7 +672,7 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 	if len(c.ObligationIDs) == 0 {
 		return fmt.Errorf("store: UpdateCapsuleProjectionID: capsule %s has no obligation IDs", capsuleID)
 	}
-	goalID, err := s.goalIDForObligation(c.ObligationIDs[0])
+	goalID, err := s.goalIDForObligation(ctx, c.ObligationIDs[0])
 	if err != nil {
 		return fmt.Errorf("store: UpdateCapsuleProjectionID: %w", err)
 	}
@@ -698,7 +701,7 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 		return err
 	}
 	saved := *p
-	goalID, err := s.goalIDForProjectionSources(saved.SourceArtifactIDs)
+	goalID, err := s.goalIDForProjectionSources(ctx, saved.SourceArtifactIDs)
 	if err != nil {
 		return fmt.Errorf("store: SaveProjection: %w", err)
 	}
@@ -720,7 +723,7 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 	}
 	saved := *p
 	saved.Role = schema.ProjectionRoleHumanSummary
-	goalID, err := s.goalIDForProjectionSources(saved.SourceArtifactIDs)
+	goalID, err := s.goalIDForProjectionSources(ctx, saved.SourceArtifactIDs)
 	if err != nil {
 		return fmt.Errorf("store: SaveHumanSummaryProjection: %w", err)
 	}
@@ -758,7 +761,7 @@ func (s *FileStore) LoadHumanSummaryProjectionForCapsule(ctx context.Context, ca
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.HumanSummaryProjection](filepath.Join(s.root, dirProjHuman))
+	all, err := scanDir[schema.HumanSummaryProjection](ctx, filepath.Join(s.root, dirProjHuman))
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +786,7 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 	if err := ensureArtifactAbsent("patch", s.artifactPath(dirPatches, p.PatchID), p.PatchID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(p.CapsuleID)
+	goalID, err := s.goalIDForCapsule(ctx, p.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SavePatch: %w", err)
 	}
@@ -817,7 +820,7 @@ func (s *FileStore) UpdatePatchStatus(ctx context.Context, patchID string, statu
 func (s *FileStore) LoadPatchesForCapsule(ctx context.Context, capsuleID string) ([]*schema.PatchArtifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.PatchArtifact](filepath.Join(s.root, dirPatches))
+	all, err := scanDir[schema.PatchArtifact](ctx, filepath.Join(s.root, dirPatches))
 	if err != nil {
 		return nil, err
 	}
@@ -836,7 +839,7 @@ func (s *FileStore) LoadPatchesForObligation(ctx context.Context, obligationID s
 	if err := validateArtifactID("obligation", obligationID); err != nil {
 		return nil, err
 	}
-	all, err := scanDir[schema.PatchArtifact](filepath.Join(s.root, dirPatches))
+	all, err := scanDir[schema.PatchArtifact](ctx, filepath.Join(s.root, dirPatches))
 	if err != nil {
 		return nil, err
 	}
@@ -860,7 +863,7 @@ func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact
 	if err := ensureArtifactAbsent("evidence", s.artifactPath(dirEvidence, e.EvidenceID), e.EvidenceID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForEvidence(e)
+	goalID, err := s.goalIDForEvidence(ctx, e)
 	if err != nil {
 		return fmt.Errorf("store: SaveEvidence: %w", err)
 	}
@@ -880,7 +883,7 @@ func (s *FileStore) LoadEvidence(ctx context.Context, evidenceID string) (*schem
 func (s *FileStore) LoadEvidenceForObligation(ctx context.Context, obligationID string) ([]*schema.EvidenceArtifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.EvidenceArtifact](filepath.Join(s.root, dirEvidence))
+	all, err := scanDir[schema.EvidenceArtifact](ctx, filepath.Join(s.root, dirEvidence))
 	if err != nil {
 		return nil, err
 	}
@@ -896,7 +899,7 @@ func (s *FileStore) LoadEvidenceForObligation(ctx context.Context, obligationID 
 func (s *FileStore) LoadReusableEvidenceForObligation(ctx context.Context, obligationID string, evidenceType schema.EvidenceType, reuseKey string, snapshotID string) (*schema.EvidenceArtifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.EvidenceArtifact](filepath.Join(s.root, dirEvidence))
+	all, err := scanDir[schema.EvidenceArtifact](ctx, filepath.Join(s.root, dirEvidence))
 	if err != nil {
 		return nil, err
 	}
@@ -930,7 +933,7 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 	if err := ensureArtifactAbsent("claim", s.artifactPath(dirClaims, c.ClaimID), c.ClaimID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(c.SourceCapsuleID)
+	goalID, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveClaim: %w", err)
 	}
@@ -959,7 +962,7 @@ func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []stri
 			fileSet[normalized] = true
 		}
 	}
-	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	all, err := scanDir[schema.ClaimArtifact](ctx, filepath.Join(s.root, dirClaims))
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +984,7 @@ func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []stri
 func (s *FileStore) LoadClaimsForCapsule(ctx context.Context, capsuleID string) ([]*schema.ClaimArtifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	all, err := scanDir[schema.ClaimArtifact](ctx, filepath.Join(s.root, dirClaims))
 	if err != nil {
 		return nil, err
 	}
@@ -1007,13 +1010,13 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 	if !exists {
 		return nil, ErrNotFound
 	}
-	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	all, err := scanDir[schema.ClaimArtifact](ctx, filepath.Join(s.root, dirClaims))
 	if err != nil {
 		return nil, err
 	}
 	out := make([]*schema.ClaimArtifact, 0, len(all))
 	for _, claim := range all {
-		claimGoalID, err := s.goalIDForCapsule(claim.SourceCapsuleID)
+		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -1040,7 +1043,7 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 	if !exists {
 		return nil, ErrNotFound
 	}
-	all, err := scanDir[schema.ClaimArtifact](filepath.Join(s.root, dirClaims))
+	all, err := scanDir[schema.ClaimArtifact](ctx, filepath.Join(s.root, dirClaims))
 	if err != nil {
 		return nil, err
 	}
@@ -1049,7 +1052,7 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 		if claim.Status != status {
 			continue
 		}
-		claimGoalID, err := s.goalIDForCapsule(claim.SourceCapsuleID)
+		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -1106,7 +1109,7 @@ func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprin
 	if err := ensureArtifactAbsent("failure", s.artifactPath(dirFailures, f.FailureID), f.FailureID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(f.SourceCapsuleID)
+	goalID, err := s.goalIDForCapsule(ctx, f.SourceCapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveFailure: %w", err)
 	}
@@ -1135,7 +1138,7 @@ func (s *FileStore) LoadFailuresForFiles(ctx context.Context, files []string) ([
 			fileSet[normalized] = true
 		}
 	}
-	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
+	all, err := scanDir[schema.FailureFingerprint](ctx, filepath.Join(s.root, dirFailures))
 	if err != nil {
 		return nil, err
 	}
@@ -1154,7 +1157,7 @@ func (s *FileStore) LoadFailuresForFiles(ctx context.Context, files []string) ([
 func (s *FileStore) LoadFailuresForCapsule(ctx context.Context, capsuleID string) ([]*schema.FailureFingerprint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
+	all, err := scanDir[schema.FailureFingerprint](ctx, filepath.Join(s.root, dirFailures))
 	if err != nil {
 		return nil, err
 	}
@@ -1170,7 +1173,7 @@ func (s *FileStore) LoadFailuresForCapsule(ctx context.Context, capsuleID string
 // LoadAllFailures returns FailureFingerprints associated with goalID.
 // FailureFingerprint has no GoalID field, so the MVP implementation resolves
 // SourceCapsuleID → ObligationID → GoalConditionID → GoalID.
-func (s *FileStore) LoadAllFailures(_ context.Context, goalID string) ([]*schema.FailureFingerprint, error) {
+func (s *FileStore) LoadAllFailures(ctx context.Context, goalID string) ([]*schema.FailureFingerprint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if goalID == "" {
@@ -1183,13 +1186,13 @@ func (s *FileStore) LoadAllFailures(_ context.Context, goalID string) ([]*schema
 	if !exists {
 		return nil, ErrNotFound
 	}
-	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
+	all, err := scanDir[schema.FailureFingerprint](ctx, filepath.Join(s.root, dirFailures))
 	if err != nil {
 		return nil, err
 	}
 	var out []*schema.FailureFingerprint
 	for _, f := range all {
-		resolvedGoalID, err := s.goalIDForCapsule(f.SourceCapsuleID)
+		resolvedGoalID, err := s.goalIDForCapsule(ctx, f.SourceCapsuleID)
 		if err != nil {
 			// Skip orphaned failures (capsule or obligation files missing) but
 			// propagate genuine I/O or corruption errors so callers are not
@@ -1244,7 +1247,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 		out = append(out, current)
 		seen[failure.FailureID] = true
 	}
-	all, err := scanDir[schema.FailureFingerprint](filepath.Join(s.root, dirFailures))
+	all, err := scanDir[schema.FailureFingerprint](ctx, filepath.Join(s.root, dirFailures))
 	if err != nil {
 		return nil, err
 	}
@@ -1255,7 +1258,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 		if seen[failure.FailureID] || failure.ErrorSignature != errorSignature {
 			continue
 		}
-		resolvedGoalID, err := s.goalIDForCapsule(failure.SourceCapsuleID)
+		resolvedGoalID, err := s.goalIDForCapsule(ctx, failure.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -1280,7 +1283,7 @@ func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierRe
 	if err := ensureArtifactAbsent("verifier result", s.artifactPath(dirVerifierResults, r.VerifierResultID), r.VerifierResultID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(r.CapsuleID)
+	goalID, err := s.goalIDForCapsule(ctx, r.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveVerifierResult: %w", err)
 	}
@@ -1300,7 +1303,7 @@ func (s *FileStore) LoadVerifierResult(ctx context.Context, resultID string) (*s
 func (s *FileStore) LoadVerifierResultForPatch(ctx context.Context, patchID string) (*schema.VerifierResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.VerifierResult](filepath.Join(s.root, dirVerifierResults))
+	all, err := scanDir[schema.VerifierResult](ctx, filepath.Join(s.root, dirVerifierResults))
 	if err != nil {
 		return nil, err
 	}
@@ -1323,7 +1326,7 @@ func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) 
 	if err := ensureArtifactAbsent("decision", s.artifactPath(dirDecisions, d.DecisionID), d.DecisionID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForRelatedIDs(d.RelatedIDs)
+	goalID, err := s.goalIDForRelatedIDs(ctx, d.RelatedIDs)
 	if err != nil {
 		return fmt.Errorf("store: SaveDecision: %w", err)
 	}
@@ -1367,7 +1370,7 @@ func (s *FileStore) LoadTopologyOutcomesForGoal(ctx context.Context, goalID stri
 	if err := s.requireExistingGoal(goalID); err != nil {
 		return nil, err
 	}
-	all, err := scanDir[schema.TopologyOutcomeRecord](filepath.Join(s.root, dirTopologyOutcomes))
+	all, err := scanDir[schema.TopologyOutcomeRecord](ctx, filepath.Join(s.root, dirTopologyOutcomes))
 	if err != nil {
 		return nil, err
 	}
@@ -1384,7 +1387,7 @@ func (s *FileStore) LoadTopologyOutcomesForGoal(ctx context.Context, goalID stri
 func (s *FileStore) LoadTopologyOutcomes(ctx context.Context, topology schema.Topology, maxRisk schema.RiskLevel) ([]*schema.TopologyOutcomeRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.TopologyOutcomeRecord](filepath.Join(s.root, dirTopologyOutcomes))
+	all, err := scanDir[schema.TopologyOutcomeRecord](ctx, filepath.Join(s.root, dirTopologyOutcomes))
 	if err != nil {
 		return nil, err
 	}
@@ -1428,7 +1431,7 @@ func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*sch
 func (s *FileStore) LoadBudgetForGoal(ctx context.Context, goalID string) ([]*schema.BudgetRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.BudgetRecord](filepath.Join(s.root, dirBudgets))
+	all, err := scanDir[schema.BudgetRecord](ctx, filepath.Join(s.root, dirBudgets))
 	if err != nil {
 		return nil, err
 	}
@@ -1492,7 +1495,7 @@ func (s *FileStore) SaveSnapshot(ctx context.Context, snap *schema.StateSnapshot
 func (s *FileStore) LoadLatestSnapshot(ctx context.Context, goalID string) (*schema.StateSnapshot, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	all, err := scanDir[schema.StateSnapshot](filepath.Join(s.root, dirSnapshots))
+	all, err := scanDir[schema.StateSnapshot](ctx, filepath.Join(s.root, dirSnapshots))
 	if err != nil {
 		return nil, err
 	}

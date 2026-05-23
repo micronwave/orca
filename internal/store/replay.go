@@ -51,7 +51,10 @@ func Replay(ctx context.Context, log eventlog.EventLog, s *FileStore, afterSeq i
 // applyEvent applies a single event to the file store without emitting a
 // new event. Callers must not hold s.mu (this function acquires it internally
 // via the internal write helpers to keep locking symmetric with normal saves).
-func applyEvent(_ context.Context, s *FileStore, e schema.Event) error {
+func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
