@@ -75,13 +75,13 @@ const (
 // All exported methods are safe for concurrent use.
 type FileStore struct {
 	root string
-	log  eventlog.EventLog
+	log  *eventlog.FileLog
 	mu   sync.RWMutex
 }
 
 // New creates or opens the FileStore at root, building the required directory
 // hierarchy. root is typically the .orca directory for the repository.
-func New(root string, log eventlog.EventLog) (*FileStore, error) {
+func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirPatches, dirEvidence, dirClaims,
@@ -1557,5 +1557,3 @@ func sortTopologyOutcomes(records []*schema.TopologyOutcomeRecord) {
 	})
 }
 
-// compile-time interface satisfaction check
-var _ ArtifactStore = (*FileStore)(nil)

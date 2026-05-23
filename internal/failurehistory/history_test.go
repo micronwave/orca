@@ -12,7 +12,7 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
-func newTestStore(t *testing.T) store.ArtifactStore {
+func newTestStore(t *testing.T) *store.FileStore {
 	t.Helper()
 	root := t.TempDir()
 	log, err := eventlog.Open(filepath.Join(root, "events.log"))
@@ -27,7 +27,7 @@ func newTestStore(t *testing.T) store.ArtifactStore {
 	return st
 }
 
-func seedGoal(t *testing.T, ctx context.Context, st store.ArtifactStore, goalID string) {
+func seedGoal(t *testing.T, ctx context.Context, st *store.FileStore, goalID string) {
 	t.Helper()
 	if err := st.SaveGoal(ctx, &schema.GoalIR{
 		GoalID: goalID,
@@ -41,7 +41,7 @@ func seedGoal(t *testing.T, ctx context.Context, st store.ArtifactStore, goalID 
 	}
 }
 
-func seedCapsule(t *testing.T, ctx context.Context, st store.ArtifactStore, capsuleID, conditionID string) {
+func seedCapsule(t *testing.T, ctx context.Context, st *store.FileStore, capsuleID, conditionID string) {
 	t.Helper()
 	if err := st.SaveObligation(ctx, &schema.Obligation{
 		ObligationID:    "OB-" + capsuleID,

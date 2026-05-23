@@ -26,7 +26,7 @@ import (
 // Events that require updating existing files (patch_accepted, capsule_started,
 // etc.) fail if the target artifact is missing. That catches out-of-order or
 // malformed histories instead of silently materializing stale state.
-func Replay(ctx context.Context, log eventlog.EventLog, s *FileStore, afterSeq int64) error {
+func Replay(ctx context.Context, log *eventlog.FileLog, s *FileStore, afterSeq int64) error {
 	const batchSize = 200
 	seq := afterSeq
 	for {

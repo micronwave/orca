@@ -13,7 +13,7 @@ const maxPriorCapsules = 10
 
 // Prepare normalizes a new failure and attaches prior-attempt history before it
 // is saved as a distinct fingerprint artifact.
-func Prepare(ctx context.Context, st store.ArtifactStore, goalID string, failure *schema.FailureFingerprint, noLearning bool) error {
+func Prepare(ctx context.Context, st *store.FileStore, goalID string, failure *schema.FailureFingerprint, noLearning bool) error {
 	if failure == nil {
 		return fmt.Errorf("failurehistory: failure is required")
 	}
