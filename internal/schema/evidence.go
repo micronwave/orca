@@ -17,6 +17,10 @@ const (
 	// assert any command exit code and must not satisfy gate checks that require
 	// test_result, lint_result, or typecheck_result evidence.
 	EvidenceAgentOutput EvidenceType = "agent_output"
+	// Phase 4 types — add only these three; others remain deferred.
+	EvidenceStaticAnalysis EvidenceType = "static_analysis_result"
+	EvidenceMutationResult EvidenceType = "mutation_survivor"
+	EvidenceAgentReview    EvidenceType = "agent_review"
 )
 
 // EvidenceArtifact proves, weakens, or contextualizes a claim or patch.

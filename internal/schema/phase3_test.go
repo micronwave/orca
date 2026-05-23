@@ -97,3 +97,23 @@ func TestPhase3SchemaJSONNames(t *testing.T) {
 		})
 	}
 }
+
+func TestEvidenceTypeUnmarshalAcceptsPhase4Types(t *testing.T) {
+	cases := []EvidenceType{
+		EvidenceStaticAnalysis,
+		EvidenceMutationResult,
+		EvidenceAgentReview,
+	}
+	for _, typ := range cases {
+		t.Run(string(typ), func(t *testing.T) {
+			data := []byte(`{"evidence_id":"EV-1","type":"` + string(typ) + `"}`)
+			var evidence EvidenceArtifact
+			if err := json.Unmarshal(data, &evidence); err != nil {
+				t.Fatalf("Unmarshal EvidenceArtifact: %v", err)
+			}
+			if evidence.Type != typ {
+				t.Fatalf("Type = %s, want %s", evidence.Type, typ)
+			}
+		})
+	}
+}

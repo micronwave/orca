@@ -301,7 +301,8 @@ func (e *EvidenceType) UnmarshalJSON(data []byte) error {
 	}
 	switch EvidenceType(s) {
 	case EvidenceTestResult, EvidenceLintResult, EvidenceTypecheckResult,
-		EvidenceDiffRiskReport, EvidenceAgentOutput:
+		EvidenceDiffRiskReport, EvidenceAgentOutput, EvidenceStaticAnalysis,
+		EvidenceMutationResult, EvidenceAgentReview:
 		*e = EvidenceType(s)
 		return nil
 	}
