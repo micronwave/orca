@@ -316,17 +316,13 @@ func TestRunReviewerCanProduceEvidenceWithoutPatch(t *testing.T) {
 			}, nil
 		},
 	}
-	countingStore := &savePatchCountingStore{ArtifactStore: env.st}
-	r := New(countingStore, env.log, env.orcaDir, adapter)
+	r := New(env.st, env.log, env.orcaDir, adapter)
 	result, err := r.Run(env.ctx, capsuleID)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if result.PatchID != "" {
 		t.Fatalf("PatchID = %q, want empty for evidence-only reviewer run", result.PatchID)
-	}
-	if countingStore.savePatchCalls != 0 {
-		t.Fatalf("SavePatch calls = %d, want 0 for evidence-only reviewer run", countingStore.savePatchCalls)
 	}
 	if len(result.EvidenceIDs) == 0 || len(result.ClaimIDs) == 0 {
 		t.Fatalf("RunResult = %+v, want evidence and claims", result)
@@ -336,16 +332,6 @@ func TestRunReviewerCanProduceEvidenceWithoutPatch(t *testing.T) {
 	} else if len(patches) != 0 {
 		t.Fatalf("reviewer created %d patch artifacts, want none", len(patches))
 	}
-}
-
-type savePatchCountingStore struct {
-	store.ArtifactStore
-	savePatchCalls int
-}
-
-func (s *savePatchCountingStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) error {
-	s.savePatchCalls++
-	return s.ArtifactStore.SavePatch(ctx, p)
 }
 
 func TestRunFailureTransitionsCapsuleAndPersistsInfraFailure(t *testing.T) {

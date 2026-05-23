@@ -1,8 +1,6 @@
-// Package planner defines the ObligationPlanner and TopologyClassifier interfaces.
-//
-// The ObligationPlanner creates ExecutionCapsules for open obligations and records
-// the topology decision. The TopologyClassifier is an internal dependency of the
-// planner; nothing outside this package calls it directly.
+// Package planner provides the Planner, which creates ExecutionCapsules for open
+// obligations and records the topology decision. Topology classification is an
+// internal detail; nothing outside this package calls it directly.
 //
 // Dependency contract (ObligationPlanner):
 //
@@ -68,26 +66,9 @@ type PlanResult struct {
 	MaxObligationRisk schema.RiskLevel
 }
 
-type ObligationPlanner interface {
-	// Plan reads open obligations under goalID, selects topology via the
-	// TopologyClassifier, creates one or more ExecutionCapsules, persists all
-	// artifacts, and returns a PlanResult. The orchestrator uses Topology and
-	// DecisionID to emit topology_selected to the event log.
-	Plan(ctx context.Context, goalID string) (PlanResult, error)
-}
-
-// TopologyClassifier selects the execution topology for an obligation set.
-// It is called only by ObligationPlanner; no other package imports it.
-//
-// Reads:  obligations and fingerprints passed directly (not from the store)
-// Writes: returns the chosen topology and a rationale string; the caller
-//
-//	(ObligationPlanner) is responsible for persisting the DecisionRecord
-//
-// The three MVP topologies are defined in orca.md §7. The planner passes a
-// ClassifyInput containing all currently known classifier inputs. Unknown fields
-// remain zero-valued and must be treated by classifiers as "unknown / use default
-// behavior" rather than as negative evidence.
+// ClassifyInput holds the inputs to the internal topology classifier.
+// Unknown fields remain zero-valued and must be treated as "unknown / use
+// default behavior" rather than as negative evidence.
 type ClassifyInput struct {
 	Obligations  []*schema.Obligation
 	Fingerprints []*schema.FailureFingerprint
@@ -99,13 +80,6 @@ type ClassifyInput struct {
 	BudgetRemaining           int
 	ExpectedFilesByObligation map[string][]string
 	ProtectedPaths            []string
-}
-
-type TopologyClassifier interface {
-	// Classify returns the selected Topology and a human-readable rationale.
-	// The rationale must name the specific classifier inputs that drove the
-	// decision (e.g. "high-risk obligations, 3 prior failures in affected files").
-	Classify(input ClassifyInput) (topology schema.Topology, rationale string, err error)
 }
 
 // OutcomeReader is the planner-owned interface for reading historical topology

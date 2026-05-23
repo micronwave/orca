@@ -20,26 +20,30 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
-type service struct {
-	store      store.ArtifactStore
-	log        eventlog.EventLog
+// Runner executes an agent inside a bounded execution capsule. It selects an
+// Adapter by capsule.Agent, runs the agent under contract, collects outputs via
+// sidecar or transcript extraction, normalizes output into schema artifacts,
+// persists them, and returns the IDs of all produced artifacts.
+type Runner struct {
+	store      *store.FileStore
+	log        *eventlog.FileLog
 	orcaDir    string
 	noLearning bool
 	adapters   map[schema.AgentType]Adapter
 }
 
+// Config holds runner-local options not part of the repo config file contract.
 type Config struct {
 	NoLearning bool
 }
 
-// New returns the default CapsuleRunner implementation.
-func New(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, adapters ...Adapter) CapsuleRunner {
+// New returns a Runner.
+func New(st *store.FileStore, log *eventlog.FileLog, orcaDir string, adapters ...Adapter) *Runner {
 	return NewWithConfig(st, log, orcaDir, Config{}, adapters...)
 }
 
-// NewWithConfig returns the default CapsuleRunner implementation with
-// runner-local options.
-func NewWithConfig(st store.ArtifactStore, log eventlog.EventLog, orcaDir string, cfg Config, adapters ...Adapter) CapsuleRunner {
+// NewWithConfig returns a Runner with runner-local options.
+func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg Config, adapters ...Adapter) *Runner {
 	registry := make(map[schema.AgentType]Adapter, len(adapters))
 	for _, adapter := range adapters {
 		if adapter == nil {
@@ -47,7 +51,7 @@ func NewWithConfig(st store.ArtifactStore, log eventlog.EventLog, orcaDir string
 		}
 		registry[adapter.AgentType()] = adapter
 	}
-	return &service{
+	return &Runner{
 		store:      st,
 		log:        log,
 		orcaDir:    strings.TrimSpace(orcaDir),
@@ -56,7 +60,7 @@ func NewWithConfig(st store.ArtifactStore, log eventlog.EventLog, orcaDir string
 	}
 }
 
-func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, err error) {
+func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, err error) {
 	if s.store == nil {
 		return RunResult{}, fmt.Errorf("runner: store is required")
 	}
@@ -203,7 +207,7 @@ func (s *service) Run(ctx context.Context, capsuleID string) (result RunResult, 
 	return result, nil
 }
 
-func (s *service) runAdapter(
+func (s *Runner) runAdapter(
 	ctx context.Context,
 	adapter Adapter,
 	capsule *schema.ExecutionCapsule,
@@ -237,7 +241,7 @@ func (s *service) runAdapter(
 	return output, false, nil
 }
 
-func (s *service) resolveGoalID(ctx context.Context) (string, error) {
+func (s *Runner) resolveGoalID(ctx context.Context) (string, error) {
 	goal, err := s.store.LoadActiveGoal(ctx)
 	if err != nil {
 		return "", fmt.Errorf("runner: load active goal: %w", err)
@@ -248,7 +252,7 @@ func (s *service) resolveGoalID(ctx context.Context) (string, error) {
 	return goal.GoalID, nil
 }
 
-func (s *service) appendCapsuleTransition(
+func (s *Runner) appendCapsuleTransition(
 	ctx context.Context,
 	goalID string,
 	capsuleID string,
@@ -273,7 +277,7 @@ func (s *service) appendCapsuleTransition(
 	return nil
 }
 
-func (s *service) failCapsule(
+func (s *Runner) failCapsule(
 	ctx context.Context,
 	goalID string,
 	capsule *schema.ExecutionCapsule,
@@ -301,7 +305,7 @@ func (s *service) failCapsule(
 	return failure.FailureID, nil
 }
 
-func (s *service) saveEvidence(
+func (s *Runner) saveEvidence(
 	ctx context.Context,
 	capsule *schema.ExecutionCapsule,
 	output *schema.AgentSidecarOutput,
@@ -337,7 +341,7 @@ func (s *service) saveEvidence(
 	return evidenceIDs, nil
 }
 
-func (s *service) saveClaims(
+func (s *Runner) saveClaims(
 	ctx context.Context,
 	capsule *schema.ExecutionCapsule,
 	output *schema.AgentSidecarOutput,

@@ -1,10 +1,8 @@
-// Package budget defines the BudgetController interface, which tracks token,
-// time, and coordination cost against verified value. It is a projection over
-// the event log: budget state is derived from events, not from the artifact store.
-//
-// BudgetRecords in the artifact store are written by the Reconciler after
-// reconciliation completes. The BudgetController computes live metrics directly
-// from the event stream and enforces per-capsule limits before execution begins.
+// Package budget provides the Controller, which tracks token, time, and
+// coordination cost against verified value. Budget state is derived from events
+// in the log, not from the artifact store. BudgetRecords in the store are
+// written by the Reconciler; the Controller computes live metrics directly from
+// the event stream and enforces per-capsule limits before execution begins.
 //
 // Dependency contract:
 //
@@ -22,25 +20,9 @@
 package budget
 
 import (
-	"context"
-
 	"github.com/micronwave/orca/internal/schema"
 )
 
-// BudgetController enforces capsule budget limits and computes ROI metrics.
-// Budget limits come from the capsule_created event payload; accumulated spend
-// comes from budget_record_saved/updated event payloads in the event log.
-type BudgetController interface {
-	// CheckCapsuleBudget reads accumulated spend and budget limits from the
-	// event log for capsuleID and returns whether execution is permitted.
-	// Called by the orchestrator before handing capsuleID to the CapsuleRunner.
-	CheckCapsuleBudget(ctx context.Context, capsuleID string) (BudgetCheck, error)
-
-	// ComputeROI reads the full event log for goalID and returns verified
-	// value metrics. The primary metric is verified value per 1K tokens.
-	// orca.md §12.
-	ComputeROI(ctx context.Context, goalID string) (ROI, error)
-}
 
 // BudgetCheck is the result of a pre-run budget evaluation.
 type BudgetCheck struct {

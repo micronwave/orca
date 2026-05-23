@@ -1,4 +1,4 @@
-// Package reconciler defines the Reconciler interface, which maps evidence to
+// Package reconciler provides the Reconciler, which maps evidence to
 // obligations, accepts or rejects patches, and creates follow-up obligations.
 //
 // Reconciliation happens after every capsule completion, verifier failure, and
@@ -65,6 +65,14 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
+
+// Config configures the Reconciler.
+type Config struct {
+	// NoLearning disables topology outcome recording. When true, Reconcile does
+	// not write TopologyOutcomeRecords to the store. orca.md §13.
+	NoLearning bool
+}
+
 // Reconciler processes the verifier result for a completed patch, advances
 // obligation state, decides patch acceptance, creates follow-up obligations
 // from failures, and records all decisions.
@@ -75,45 +83,15 @@ import (
 //   - Scope violations require human approval or capsule retry
 //   - Failed static gates block merge unless explicitly waived
 //   - Unverified claims may not justify merge
-type Reconciler interface {
-	// Reconcile processes the VerifierResult for patchID. It:
-	//   1. Reads the VerifierResult and maps evidence to obligations
-	//   2. Emits obligation_status_updated, then accepts/rejects each obligation
-	//   3. Emits patch_accepted/rejected, then updates PatchArtifact status
-	//   4. Creates follow-up Obligations from blocking failures (if rejected)
-	//   5. Updates BudgetRecords with token spend per obligation
-	//   6. Persists a DecisionRecord explaining the outcome
-	//   7. Takes a StateSnapshot
-	//   8. Emits merge_applied when merge policy permits a merge
-	//
-	// Returns ReconcileResult summarizing the decision. The orchestrator reads
-	// MergeReady and HumanGateRequired to decide whether to surface a merge gate,
-	// merge directly, or loop back to the planner with FollowUpObligationIDs.
-	Reconcile(ctx context.Context, patchID string) (ReconcileResult, error)
-
-	// FreshnessCheck marks previously verified claims stale when their validation
-	// snapshot is older than the current state and accepted patches since then
-	// touched the files those claims describe. Phase 3.6 wires this into the
-	// control loop before planning.
-	FreshnessCheck(ctx context.Context, goalID string) error
-}
-
-// Config configures the Reconciler.
-type Config struct {
-	// NoLearning disables topology outcome recording. When true, Reconcile does
-	// not write TopologyOutcomeRecords to the store. orca.md §13.
-	NoLearning bool
-}
-
-type service struct {
-	store      store.ArtifactStore
-	log        eventlog.EventLog
+type Reconciler struct {
+	store      *store.FileStore
+	log        *eventlog.FileLog
 	noLearning bool
 }
 
-// New returns the default Reconciler implementation.
-func New(st store.ArtifactStore, log eventlog.EventLog, cfg Config) Reconciler {
-	return &service{store: st, log: log, noLearning: cfg.NoLearning}
+// New returns a Reconciler.
+func New(st *store.FileStore, log *eventlog.FileLog, cfg Config) *Reconciler {
+	return &Reconciler{store: st, log: log, noLearning: cfg.NoLearning}
 }
 
 // ReconcileResult summarizes the reconciler's decision for one patch.
@@ -146,7 +124,7 @@ type ReconcileResult struct {
 	BlockingReason string
 }
 
-func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResult, error) {
+func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileResult, error) {
 	if s.store == nil {
 		return ReconcileResult{}, errors.New("reconciler: store is required")
 	}
@@ -417,7 +395,7 @@ func (s *service) Reconcile(ctx context.Context, patchID string) (ReconcileResul
 // exists for any condition in the goal, regardless of which reconcile round
 // created or satisfied it. Used to enforce the human-gate invariant across
 // multi-patch runs where the final low-risk patch triggers merge readiness.
-func (s *service) goalHasHighRiskObligations(ctx context.Context, goal *schema.GoalIR) (bool, error) {
+func (s *Reconciler) goalHasHighRiskObligations(ctx context.Context, goal *schema.GoalIR) (bool, error) {
 	for _, cond := range goal.GoalConditions {
 		obligations, err := s.store.LoadObligationsForCondition(ctx, cond.ID)
 		if err != nil {
@@ -450,7 +428,7 @@ func reject(result *ReconcileResult, reason string) {
 	}
 }
 
-func (s *service) appendEvent(ctx context.Context, eventType schema.EventType, goalID, artifactID string, payload any) (schema.Event, error) {
+func (s *Reconciler) appendEvent(ctx context.Context, eventType schema.EventType, goalID, artifactID string, payload any) (schema.Event, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return schema.Event{}, fmt.Errorf("reconciler: marshal %s payload: %w", eventType, err)
@@ -467,7 +445,7 @@ func (s *service) appendEvent(ctx context.Context, eventType schema.EventType, g
 	return ev, nil
 }
 
-func (s *service) verifyClaims(ctx context.Context, goalID, capsuleID string) error {
+func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string) error {
 	claims, err := s.store.LoadClaimsForCapsule(ctx, capsuleID)
 	if err != nil {
 		return fmt.Errorf("reconciler: load claims for capsule %s: %w", capsuleID, err)
@@ -510,7 +488,7 @@ func (s *service) verifyClaims(ctx context.Context, goalID, capsuleID string) er
 	return nil
 }
 
-func (s *service) detectClaimDisputes(ctx context.Context, goalID string, vr *schema.VerifierResult) error {
+func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr *schema.VerifierResult) error {
 	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
 		return fmt.Errorf("reconciler: load claims for disputes for goal %s: %w", goalID, err)
@@ -579,7 +557,7 @@ func (s *service) detectClaimDisputes(ctx context.Context, goalID string, vr *sc
 	return nil
 }
 
-func (s *service) decisionInvalidations(ctx context.Context, goalID string) (map[string][]string, error) {
+func (s *Reconciler) decisionInvalidations(ctx context.Context, goalID string) (map[string][]string, error) {
 	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("reconciler: read decision events for goal %s: %w", goalID, err)
@@ -600,7 +578,7 @@ func (s *service) decisionInvalidations(ctx context.Context, goalID string) (map
 	return out, nil
 }
 
-func (s *service) markClaimDisputed(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
+func (s *Reconciler) markClaimDisputed(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
 	if claim == nil {
 		return nil
 	}
@@ -627,7 +605,7 @@ func (s *service) markClaimDisputed(ctx context.Context, goalID string, claim *s
 	return nil
 }
 
-func (s *service) FreshnessCheck(ctx context.Context, goalID string) error {
+func (s *Reconciler) FreshnessCheck(ctx context.Context, goalID string) error {
 	if s.store == nil {
 		return errors.New("reconciler: store is required")
 	}
@@ -670,7 +648,7 @@ func (s *service) FreshnessCheck(ctx context.Context, goalID string) error {
 	return nil
 }
 
-func (s *service) claimTouchedSince(ctx context.Context, goalID string, claim *schema.ClaimArtifact, afterSeq, throughSeq int64) (bool, error) {
+func (s *Reconciler) claimTouchedSince(ctx context.Context, goalID string, claim *schema.ClaimArtifact, afterSeq, throughSeq int64) (bool, error) {
 	claimFiles := normalizedSet(claim.AffectedFiles)
 	if len(claimFiles) == 0 {
 		return false, nil
@@ -708,7 +686,7 @@ func (s *service) claimTouchedSince(ctx context.Context, goalID string, claim *s
 	return false, nil
 }
 
-func (s *service) markClaimStatus(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus) error {
+func (s *Reconciler) markClaimStatus(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus) error {
 	if claim.Status == status {
 		return nil
 	}
@@ -728,7 +706,7 @@ func (s *service) markClaimStatus(ctx context.Context, goalID string, claim *sch
 	return nil
 }
 
-func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
+func (s *Reconciler) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
 	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
 	if err == nil {
 		return snapshot.SnapshotID, nil
@@ -739,7 +717,7 @@ func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, 
 	return "", fmt.Errorf("reconciler: load latest snapshot for goal %s: %w", goalID, err)
 }
 
-func (s *service) invalidateStaleClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
+func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
 	if patch == nil {
 		return nil
 	}
@@ -784,7 +762,7 @@ func (s *service) invalidateStaleClaims(ctx context.Context, goalID string, patc
 	return nil
 }
 
-func (s *service) createFollowUpObligations(ctx context.Context, capsuleID string, source []*schema.Obligation) ([]string, error) {
+func (s *Reconciler) createFollowUpObligations(ctx context.Context, capsuleID string, source []*schema.Obligation) ([]string, error) {
 	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
 	if err != nil {
 		return nil, fmt.Errorf("reconciler: load failures for capsule %s: %w", capsuleID, err)
@@ -864,7 +842,7 @@ func evidenceRequiredForFailure(ft schema.FailureType) []string {
 	}
 }
 
-func (s *service) recommendedFailureActions(ctx context.Context, capsuleID string) ([]string, error) {
+func (s *Reconciler) recommendedFailureActions(ctx context.Context, capsuleID string) ([]string, error) {
 	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
 	if err != nil {
 		return nil, fmt.Errorf("reconciler: load failure recommendations for capsule %s: %w", capsuleID, err)
@@ -883,7 +861,7 @@ func (s *service) recommendedFailureActions(ctx context.Context, capsuleID strin
 	return actions, nil
 }
 
-func (s *service) saveBudgetRecords(
+func (s *Reconciler) saveBudgetRecords(
 	ctx context.Context,
 	goalID string,
 	patch *schema.PatchArtifact,
@@ -1037,7 +1015,7 @@ func countDischarged(statuses map[string]schema.ObligationStatus) int {
 	return count
 }
 
-func (s *service) lastEventForGoal(ctx context.Context, goalID string) (schema.Event, error) {
+func (s *Reconciler) lastEventForGoal(ctx context.Context, goalID string) (schema.Event, error) {
 	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
 	if err != nil {
 		return schema.Event{}, fmt.Errorf("reconciler: read events for goal %s: %w", goalID, err)
@@ -1082,7 +1060,7 @@ type budgetMetrics struct {
 	humanInterventions      int
 }
 
-func (s *service) budgetMetricsForResult(ctx context.Context, vr *schema.VerifierResult) (budgetMetrics, error) {
+func (s *Reconciler) budgetMetricsForResult(ctx context.Context, vr *schema.VerifierResult) (budgetMetrics, error) {
 	evidenceSet := make(map[string]bool)
 	for _, verdict := range vr.ObligationResults {
 		for _, evidenceID := range verdict.EvidenceIDs {
@@ -1096,7 +1074,7 @@ func (s *service) budgetMetricsForResult(ctx context.Context, vr *schema.Verifie
 	return s.budgetMetricsForEvidenceIDs(ctx, evidenceIDs, vr.RecommendedAction)
 }
 
-func (s *service) budgetMetricsForEvidenceIDs(
+func (s *Reconciler) budgetMetricsForEvidenceIDs(
 	ctx context.Context,
 	evidenceIDs []string,
 	action schema.RecommendedAction,
@@ -1129,7 +1107,7 @@ func (s *service) budgetMetricsForEvidenceIDs(
 	return metrics, nil
 }
 
-func saveOrUpdateBudgetRecord(ctx context.Context, st store.ArtifactStore, record *schema.BudgetRecord, exists bool) error {
+func saveOrUpdateBudgetRecord(ctx context.Context, st *store.FileStore, record *schema.BudgetRecord, exists bool) error {
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = record.UpdatedAt
 	}
@@ -1150,7 +1128,7 @@ func newArtifactID(prefix, patchID string, now time.Time) string {
 	return prefix + "-" + patchID + "-" + strconv.FormatInt(now.UnixNano(), 10)
 }
 
-func (s *service) saveTopologyOutcome(
+func (s *Reconciler) saveTopologyOutcome(
 	ctx context.Context,
 	goalID string,
 	patch *schema.PatchArtifact,

@@ -22,27 +22,26 @@ type Config struct {
 	NoLearning         bool
 }
 
-type service struct {
-	store      store.ArtifactStore
-	config     Config
-	classifier TopologyClassifier
-	outcomes   OutcomeReader // may be nil; nil disables historical routing hints
+// Planner reads open obligations for a goal, classifies topology, generates
+// ExecutionCapsules, and returns the new capsule IDs ready for projection and
+// execution.
+type Planner struct {
+	store    *store.FileStore
+	config   Config
+	outcomes OutcomeReader // may be nil; nil disables historical routing hints
 }
 
-type topologyClassifier struct{}
-
-// New returns the default ObligationPlanner implementation.
+// New returns a Planner.
 // outcomes may be nil; when nil, historical routing hints are disabled.
-func New(st store.ArtifactStore, cfg Config, outcomes OutcomeReader) ObligationPlanner {
-	return &service{
-		store:      st,
-		config:     cfg,
-		classifier: topologyClassifier{},
-		outcomes:   outcomes,
+func New(st *store.FileStore, cfg Config, outcomes OutcomeReader) *Planner {
+	return &Planner{
+		store:    st,
+		config:   cfg,
+		outcomes: outcomes,
 	}
 }
 
-func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
+func (s *Planner) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	if s.store == nil {
 		return PlanResult{}, fmt.Errorf("planner: store is required")
 	}
@@ -81,7 +80,7 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 		ExpectedFilesByObligation: expectedFiles,
 	}
 	classifyInput.ExpectedFileOverlap = hasExpectedFileOverlap(classifyInput.ExpectedFilesByObligation)
-	topology, rationale, err := s.classifier.Classify(classifyInput)
+	topology, rationale, err := classify(classifyInput)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner: classify topology: %w", err)
 	}
@@ -138,7 +137,7 @@ func (s *service) Plan(ctx context.Context, goalID string) (PlanResult, error) {
 	}, nil
 }
 
-func (s *service) loadRelevantFailures(ctx context.Context, goalID string, expectedFiles map[string][]string) ([]*schema.FailureFingerprint, error) {
+func (s *Planner) loadRelevantFailures(ctx context.Context, goalID string, expectedFiles map[string][]string) ([]*schema.FailureFingerprint, error) {
 	files := uniqueExpectedFiles(expectedFiles)
 	if len(files) == 0 {
 		return s.store.LoadAllFailures(ctx, goalID)
@@ -164,7 +163,7 @@ func (s *service) loadRelevantFailures(ctx context.Context, goalID string, expec
 	return out, nil
 }
 
-func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.Obligation, goal *schema.GoalIR, decisionID string, hints routingHints) []schema.ExecutionCapsule {
+func (s *Planner) buildCapsules(topology schema.Topology, obligations []*schema.Obligation, goal *schema.GoalIR, decisionID string, hints routingHints) []schema.ExecutionCapsule {
 	executorAgent := selectExecutorAgent(hints)
 	switch topology {
 	case schema.TopologyImplementerReviewer:
@@ -194,7 +193,7 @@ func (s *service) buildCapsules(topology schema.Topology, obligations []*schema.
 	}
 }
 
-func (s *service) newCapsule(
+func (s *Planner) newCapsule(
 	capsuleID string,
 	agent schema.AgentType,
 	role schema.CapsuleRole,
@@ -227,7 +226,7 @@ func roleRequiredOutputs(role schema.CapsuleRole) []string {
 	}
 }
 
-func (s *service) defaultCapsuleBudget() schema.CapsuleBudget {
+func (s *Planner) defaultCapsuleBudget() schema.CapsuleBudget {
 	return schema.CapsuleBudget{
 		MaxTokens:          s.config.DefaultMaxTokens,
 		MaxWallTimeSeconds: s.config.DefaultMaxWallTime,
@@ -235,7 +234,7 @@ func (s *service) defaultCapsuleBudget() schema.CapsuleBudget {
 	}
 }
 
-func (s *service) defaultSandbox(capsuleID string) schema.CapsuleSandbox {
+func (s *Planner) defaultSandbox(capsuleID string) schema.CapsuleSandbox {
 	return schema.CapsuleSandbox{
 		WorktreePath: orcapath.CapsuleWorktreePath(s.config.OrcaDir, capsuleID),
 		Network:      schema.NetworkDeny,
@@ -243,7 +242,7 @@ func (s *service) defaultSandbox(capsuleID string) schema.CapsuleSandbox {
 	}
 }
 
-func (topologyClassifier) Classify(input ClassifyInput) (schema.Topology, string, error) {
+func classify(input ClassifyInput) (schema.Topology, string, error) {
 	input.ExpectedFileOverlap = input.ExpectedFileOverlap || hasExpectedFileOverlap(input.ExpectedFilesByObligation)
 	summary := classifySummary(input)
 	protected, protectedPath := hasProtectedPath(input.ExpectedFilesByObligation, input.ProtectedPaths)
@@ -502,8 +501,6 @@ func selectExecutorAgent(hints routingHints) schema.AgentType {
 	return schema.AgentCodex
 }
 
-var _ ObligationPlanner = (*service)(nil)
-var _ TopologyClassifier = topologyClassifier{}
 
 const (
 	historicalMinSamples = 3
@@ -517,7 +514,7 @@ const (
 // The hint is only applied when the classifier returned single or
 // implementer_reviewer; forced topologies (human_gated, parallel, etc.) are
 // not overridden.
-func (s *service) applyHistoricalRoutingHint(
+func (s *Planner) applyHistoricalRoutingHint(
 	ctx context.Context,
 	topology schema.Topology,
 	rationale string,

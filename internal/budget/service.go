@@ -10,16 +10,19 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 )
 
-type service struct {
-	log eventlog.EventLog
+// Controller enforces capsule budget limits and computes ROI metrics.
+// Budget limits come from the capsule_created event payload; accumulated spend
+// comes from budget_record_saved/updated event payloads in the event log.
+type Controller struct {
+	log *eventlog.FileLog
 }
 
-// New returns an event-log-only budget controller.
-func New(log eventlog.EventLog) BudgetController {
-	return &service{log: log}
+// New returns an event-log-only budget Controller.
+func New(log *eventlog.FileLog) *Controller {
+	return &Controller{log: log}
 }
 
-func (s *service) CheckCapsuleBudget(ctx context.Context, capsuleID string) (BudgetCheck, error) {
+func (s *Controller) CheckCapsuleBudget(ctx context.Context, capsuleID string) (BudgetCheck, error) {
 	if capsuleID == "" {
 		return BudgetCheck{}, fmt.Errorf("budget: capsuleID is required")
 	}
@@ -56,7 +59,7 @@ func (s *service) CheckCapsuleBudget(ctx context.Context, capsuleID string) (Bud
 	return check, nil
 }
 
-func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
+func (s *Controller) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 	if goalID == "" {
 		return ROI{}, fmt.Errorf("budget: goalID is required")
 	}
@@ -87,7 +90,7 @@ func (s *service) ComputeROI(ctx context.Context, goalID string) (ROI, error) {
 	return roi, nil
 }
 
-func (s *service) loadCapsuleFromLog(ctx context.Context, capsuleID string) (schema.ExecutionCapsule, string, error) {
+func (s *Controller) loadCapsuleFromLog(ctx context.Context, capsuleID string) (schema.ExecutionCapsule, string, error) {
 	var seq int64
 	for {
 		events, err := s.log.ReadByType(ctx, schema.EventCapsuleCreated, seq, 200)
@@ -117,7 +120,7 @@ func (s *service) loadCapsuleFromLog(ctx context.Context, capsuleID string) (sch
 	return schema.ExecutionCapsule{}, "", fmt.Errorf("budget: capsule %s: %w", capsuleID, errors.New("not found in event log"))
 }
 
-func (s *service) spendForGoal(ctx context.Context, goalID string, capsuleIDFilter string) (Spend, map[string]schema.BudgetRecord, error) {
+func (s *Controller) spendForGoal(ctx context.Context, goalID string, capsuleIDFilter string) (Spend, map[string]schema.BudgetRecord, error) {
 	records := make(map[string]schema.BudgetRecord)
 	var seq int64
 	for {

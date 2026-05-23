@@ -15,32 +15,34 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
-type service struct {
-	store  store.ArtifactStore
+// Compiler builds role-specific context projections from the artifact graph.
+// Human summaries remain separate from agent projections. orca.md §5.4.
+type Compiler struct {
+	store  *store.FileStore
 	config config.VerifierConfig
 }
 
-// New returns the default ContextCompiler implementation.
-func New(st store.ArtifactStore, cfg config.VerifierConfig) ContextCompiler {
-	return &service{
+// New returns a projector Compiler.
+func New(st *store.FileStore, cfg config.VerifierConfig) *Compiler {
+	return &Compiler{
 		store:  st,
 		config: cfg,
 	}
 }
 
-func (s *service) CompileExecutor(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+func (s *Compiler) CompileExecutor(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
 	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleExecutor)
 }
 
-func (s *service) CompileReviewer(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+func (s *Compiler) CompileReviewer(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
 	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleReviewer)
 }
 
-func (s *service) CompileTester(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
+func (s *Compiler) CompileTester(ctx context.Context, capsuleID string) (*schema.ContextProjection, error) {
 	return s.compileAgentProjection(ctx, capsuleID, schema.ProjectionRoleTester)
 }
 
-func (s *service) compileAgentProjection(ctx context.Context, capsuleID string, role schema.ProjectionRole) (*schema.ContextProjection, error) {
+func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string, role schema.ProjectionRole) (*schema.ContextProjection, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("projector: store is required")
 	}
@@ -103,7 +105,7 @@ func (s *service) compileAgentProjection(ctx context.Context, capsuleID string, 
 	return projection, nil
 }
 
-func (s *service) CompileHumanSummary(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error) {
+func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("projector: store is required")
 	}
@@ -316,7 +318,7 @@ func roleContract(role schema.ProjectionRole) string {
 	}
 }
 
-func (s *service) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
+func (s *Compiler) latestSnapshotID(ctx context.Context, goalID string) (string, error) {
 	snapshot, err := s.store.LoadLatestSnapshot(ctx, goalID)
 	if err == nil {
 		return snapshot.SnapshotID, nil
@@ -581,7 +583,7 @@ func requiredApprovals(topology schema.Topology, obligations []*schema.Obligatio
 	return approvals
 }
 
-func (s *service) buildEvidencePlan() schema.EvidencePlan {
+func (s *Compiler) buildEvidencePlan() schema.EvidencePlan {
 	plan := schema.EvidencePlan{
 		VerifierGates: make([]string, 0, len(s.config.Gates)),
 		TestsToRun:    []string{},
@@ -599,7 +601,7 @@ func (s *service) buildEvidencePlan() schema.EvidencePlan {
 	return plan
 }
 
-func (s *service) loadCapsuleBundle(
+func (s *Compiler) loadCapsuleBundle(
 	ctx context.Context,
 	capsuleID string,
 ) (*schema.ExecutionCapsule, *schema.GoalIR, []*schema.Obligation, []string, error) {
@@ -637,7 +639,7 @@ func (s *service) loadCapsuleBundle(
 	return capsule, goal, obligations, sourceArtifactIDs, nil
 }
 
-func (s *service) loadEvidenceByObligation(
+func (s *Compiler) loadEvidenceByObligation(
 	ctx context.Context,
 	obligations []*schema.Obligation,
 ) (map[string][]*schema.EvidenceArtifact, []string, error) {
@@ -661,7 +663,7 @@ func (s *service) loadEvidenceByObligation(
 	return out, sourceIDs, nil
 }
 
-func (s *service) loadPatchesByObligation(
+func (s *Compiler) loadPatchesByObligation(
 	ctx context.Context,
 	obligations []*schema.Obligation,
 ) ([]*schema.PatchArtifact, []string, error) {
@@ -685,7 +687,7 @@ func (s *service) loadPatchesByObligation(
 	return patches, sourceIDs, nil
 }
 
-func (s *service) loadClaimsForProjection(ctx context.Context, goalID string, files []string, freshnessBase string) ([]*schema.ClaimArtifact, []string, error) {
+func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID string, files []string, freshnessBase string) ([]*schema.ClaimArtifact, []string, error) {
 	_ = freshnessBase
 	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
@@ -704,7 +706,7 @@ func (s *service) loadClaimsForProjection(ctx context.Context, goalID string, fi
 	return out, ids, nil
 }
 
-func (s *service) loadContestedClaims(ctx context.Context, goalID string, files []string) ([]*schema.ClaimArtifact, []string, error) {
+func (s *Compiler) loadContestedClaims(ctx context.Context, goalID string, files []string) ([]*schema.ClaimArtifact, []string, error) {
 	claims, err := s.store.LoadClaimsByStatus(ctx, goalID, schema.ClaimContested)
 	if err != nil {
 		return nil, nil, fmt.Errorf("projector: load contested claims: %w", err)
@@ -722,7 +724,7 @@ func (s *service) loadContestedClaims(ctx context.Context, goalID string, files 
 	return out, ids, nil
 }
 
-func (s *service) loadFailures(ctx context.Context, files []string) ([]*schema.FailureFingerprint, []string, error) {
+func (s *Compiler) loadFailures(ctx context.Context, files []string) ([]*schema.FailureFingerprint, []string, error) {
 	failures, err := s.store.LoadFailuresForFiles(ctx, files)
 	if err != nil {
 		return nil, nil, fmt.Errorf("projector: load failures for files: %w", err)
@@ -734,7 +736,7 @@ func (s *service) loadFailures(ctx context.Context, files []string) ([]*schema.F
 	return failures, ids, nil
 }
 
-func (s *service) loadConditionRefs(ctx context.Context, obligations []*schema.Obligation) ([]schema.ConditionRef, error) {
+func (s *Compiler) loadConditionRefs(ctx context.Context, obligations []*schema.Obligation) ([]schema.ConditionRef, error) {
 	refs := make([]schema.ConditionRef, 0, len(obligations))
 	seen := make(map[string]bool, len(obligations))
 	for _, obligation := range obligations {
@@ -791,4 +793,3 @@ func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) boo
 	return false
 }
 
-var _ ContextCompiler = (*service)(nil)

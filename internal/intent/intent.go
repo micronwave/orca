@@ -1,5 +1,5 @@
-// Package intent defines the IntentCompiler interface, which converts raw user
-// goal text into a persisted GoalIR with initial GoalConditions.
+// Package intent provides the Compiler, which converts raw user goal text into
+// a persisted GoalIR with initial GoalConditions.
 //
 // Phase 1 decision: the MVP compiler is deterministic and rule-based. It treats
 // the raw intent as the primary goal condition, adds a no-regression condition,
@@ -30,7 +30,7 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
-// IntentCompiler converts a raw user goal string into a GoalIR.
+// Compiler converts a raw user goal string into a GoalIR.
 // It derives initial GoalConditions from the input, assigns IDs, persists
 // the GoalIR, and returns the saved record.
 //
@@ -38,23 +38,16 @@ import (
 // Obligations or Capsules — those belong to the ObligationPlanner.
 // One active goal per repo is the MVP constraint; the compiler should reject
 // a second Compile call when a goal is already active.
-type IntentCompiler interface {
-	// Compile parses rawIntent, creates a GoalIR with initial GoalConditions,
-	// persists it via the store and
-	// returns the saved GoalIR.
-	Compile(ctx context.Context, rawIntent string) (*schema.GoalIR, error)
+type Compiler struct {
+	store *store.FileStore
 }
 
-type service struct {
-	store store.ArtifactStore
+// New returns the deterministic Phase 1 intent Compiler.
+func New(st *store.FileStore) *Compiler {
+	return &Compiler{store: st}
 }
 
-// New returns the deterministic Phase 1 IntentCompiler implementation.
-func New(st store.ArtifactStore) IntentCompiler {
-	return &service{store: st}
-}
-
-func (s *service) Compile(ctx context.Context, rawIntent string) (*schema.GoalIR, error) {
+func (s *Compiler) Compile(ctx context.Context, rawIntent string) (*schema.GoalIR, error) {
 	if s.store == nil {
 		return nil, fmt.Errorf("intent: store is required")
 	}

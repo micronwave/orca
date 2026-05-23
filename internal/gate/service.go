@@ -22,8 +22,11 @@ type lineResult struct {
 	epoch uint64
 }
 
-type service struct {
-	store store.ArtifactStore
+// Gatekeeper presents decisions to the developer and records their response
+// as a DecisionRecord. Every gate call blocks until the developer responds or
+// the context is cancelled.
+type Gatekeeper struct {
+	store *store.FileStore
 	// lines is fed by a single goroutine, started lazily on the first Review call.
 	// All gate calls receive from this channel, so only one goroutine ever reads
 	// from the input at a time (no data races, no buffering loss across calls).
@@ -41,13 +44,13 @@ type service struct {
 	stopOnce sync.Once
 }
 
-// New returns a terminal-backed human gatekeeper.
-func New(st store.ArtifactStore) HumanGatekeeper {
+// New returns a terminal-backed Gatekeeper.
+func New(st *store.FileStore) *Gatekeeper {
 	return NewWithIO(st, os.Stdin, os.Stdout)
 }
 
-// NewWithIO returns a gatekeeper with injected streams for tests and embedding.
-func NewWithIO(st store.ArtifactStore, in io.Reader, out io.Writer) HumanGatekeeper {
+// NewWithIO returns a Gatekeeper with injected streams for tests and embedding.
+func NewWithIO(st *store.FileStore, in io.Reader, out io.Writer) *Gatekeeper {
 	if in == nil {
 		in = os.Stdin
 	}
@@ -55,12 +58,12 @@ func NewWithIO(st store.ArtifactStore, in io.Reader, out io.Writer) HumanGatekee
 		out = os.Stdout
 	}
 	lines := make(chan lineResult, 1)
-	return &service{store: st, lines: lines, in: in, out: out, stop: make(chan struct{})}
+	return &Gatekeeper{store: st, lines: lines, in: in, out: out, stop: make(chan struct{})}
 }
 
 // Close stops the background reader goroutine if it was started. After Close,
 // no new gate calls should be made. Safe to call multiple times.
-func (s *service) Close() {
+func (s *Gatekeeper) Close() {
 	s.stopOnce.Do(func() { close(s.stop) })
 }
 
@@ -68,7 +71,7 @@ func (s *service) Close() {
 // called lazily on the first Review call so that runtimes that never invoke a
 // gate (e.g. orca cancel, orca status) do not start a goroutine that would
 // race on stdin.
-func (s *service) startReader() {
+func (s *Gatekeeper) startReader() {
 	r := bufio.NewReader(s.in)
 	send := func(res lineResult) bool {
 		select {
@@ -109,7 +112,7 @@ func (s *service) startReader() {
 	}()
 }
 
-func (s *service) ReviewProjection(ctx context.Context, capsuleID string, reviewWindow time.Duration) (GateDecision, error) {
+func (s *Gatekeeper) ReviewProjection(ctx context.Context, capsuleID string, reviewWindow time.Duration) (GateDecision, error) {
 	projection, err := s.store.LoadHumanSummaryProjectionForCapsule(ctx, capsuleID)
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load human summary for capsule %s: %w", capsuleID, err)
@@ -122,7 +125,7 @@ func (s *service) ReviewProjection(ctx context.Context, capsuleID string, review
 	return s.saveDecision(ctx, "projection_review", capsuleID, approved, proceeded, notes)
 }
 
-func (s *service) ReviewMerge(ctx context.Context, patchID string) (GateDecision, error) {
+func (s *Gatekeeper) ReviewMerge(ctx context.Context, patchID string) (GateDecision, error) {
 	result, err := s.store.LoadVerifierResultForPatch(ctx, patchID)
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load verifier result for patch %s: %w", patchID, err)
@@ -139,7 +142,7 @@ func (s *service) ReviewMerge(ctx context.Context, patchID string) (GateDecision
 	return s.saveDecision(ctx, "merge_review", patchID, approved, proceeded, notes)
 }
 
-func (s *service) ReviewWaiver(ctx context.Context, obligationID string, reason string) (GateDecision, error) {
+func (s *Gatekeeper) ReviewWaiver(ctx context.Context, obligationID string, reason string) (GateDecision, error) {
 	obligation, err := s.store.LoadObligation(ctx, obligationID)
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load obligation %s: %w", obligationID, err)
@@ -152,7 +155,7 @@ func (s *service) ReviewWaiver(ctx context.Context, obligationID string, reason 
 	return s.saveDecision(ctx, "waiver_review", obligationID, approved, proceeded, notes)
 }
 
-func (s *service) review(ctx context.Context, display string, reviewWindow time.Duration, allowTimeout bool) (bool, bool, string, error) {
+func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow time.Duration, allowTimeout bool) (bool, bool, string, error) {
 	s.startOnce.Do(s.startReader)
 	currentEpoch := s.epoch.Load()
 	if _, err := fmt.Fprint(s.out, display); err != nil {
@@ -228,7 +231,7 @@ func parseApproval(line string) (approved bool, proceeded bool, notes string) {
 	return true, false, text
 }
 
-func (s *service) saveDecision(ctx context.Context, gateContext, relatedID string, approved, proceeded bool, notes string) (GateDecision, error) {
+func (s *Gatekeeper) saveDecision(ctx context.Context, gateContext, relatedID string, approved, proceeded bool, notes string) (GateDecision, error) {
 	decision := "approved"
 	if proceeded {
 		decision = "auto_proceeded"

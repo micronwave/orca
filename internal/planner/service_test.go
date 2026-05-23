@@ -119,7 +119,6 @@ func TestPlan_setsDeterministicWorktreePathAndEmitsSingleCapsuleEvent(t *testing
 func TestTopologyClassifier_rules(t *testing.T) {
 	t.Parallel()
 
-	classifier := topologyClassifier{}
 	tests := []struct {
 		name        string
 		input       ClassifyInput
@@ -306,7 +305,7 @@ func TestTopologyClassifier_rules(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, rationale, err := classifier.Classify(tt.input)
+			got, rationale, err := classify(tt.input)
 			if err != nil {
 				t.Fatalf("Classify: %v", err)
 			}

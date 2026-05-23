@@ -66,13 +66,6 @@ var ErrInvalidSidecar = errors.New("agent sidecar output failed schema validatio
 // Partial failures must leave no ambiguous intermediate state. On any error,
 // the runner transitions the capsule to CapsuleStateFailed and ensures
 // a FailureFingerprint is persisted before returning.
-type CapsuleRunner interface {
-	// Run executes capsuleID end-to-end and returns the IDs of all artifacts
-	// produced. Reviewer and tester capsules may return evidence/claims without a
-	// PatchID when they make no file changes. EvidenceIDs, ClaimIDs, and FailureIDs
-	// may all be non-empty on a partial run.
-	Run(ctx context.Context, capsuleID string) (RunResult, error)
-}
 
 // RunResult holds the artifact IDs produced by a capsule run.
 // Consumers load the actual artifacts from the store using these IDs.

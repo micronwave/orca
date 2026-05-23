@@ -16,7 +16,7 @@ type budgetEnv struct {
 	ctx context.Context
 	log *eventlog.FileLog
 	st  *store.FileStore
-	ctl budget.BudgetController
+	ctl *budget.Controller
 }
 
 func newBudgetEnv(t *testing.T) *budgetEnv {
