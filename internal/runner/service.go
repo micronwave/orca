@@ -163,10 +163,14 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	scopeViolations := findScopeViolations(changedFiles, capsule.AllowedPaths, capsule.ForbiddenPaths)
 
 	if !evidenceOnly {
+		baseCommit, err := currentCommit(runCtx, capsule.Sandbox.WorktreePath)
+		if err != nil {
+			return result, err
+		}
 		patch := &schema.PatchArtifact{
 			PatchID:              idgen.New("PATCH"),
 			CapsuleID:            capsule.CapsuleID,
-			BaseCommit:           strings.TrimSpace(currentCommit(runCtx, capsule.Sandbox.WorktreePath)),
+			BaseCommit:           baseCommit,
 			ChangedFiles:         changedFiles,
 			DiffPath:             diffPath,
 			Summary:              strings.TrimSpace(output.Summary),
@@ -431,9 +435,9 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 	// commit, so new files added to the index are included in the patch diff.
 	diffCmd := exec.CommandContext(ctx, "git", "diff", "--no-color", "--binary", "HEAD")
 	diffCmd.Dir = worktreePath
-	diff, err := diffCmd.Output()
+	diff, err := diffCmd.CombinedOutput()
 	if err != nil {
-		return "", nil, fmt.Errorf("runner: git diff in %s: %w", worktreePath, err)
+		return "", nil, fmt.Errorf("runner: git diff in %s: %w: %s", worktreePath, err, strings.TrimSpace(string(diff)))
 	}
 	if err := os.WriteFile(diffPath, diff, 0o644); err != nil {
 		return "", nil, fmt.Errorf("runner: write patch diff %s: %w", diffPath, err)
@@ -441,9 +445,9 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 
 	nameCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--relative", "HEAD")
 	nameCmd.Dir = worktreePath
-	namesRaw, err := nameCmd.Output()
+	namesRaw, err := nameCmd.CombinedOutput()
 	if err != nil {
-		return "", nil, fmt.Errorf("runner: git diff --name-only in %s: %w", worktreePath, err)
+		return "", nil, fmt.Errorf("runner: git diff --name-only in %s: %w: %s", worktreePath, err, strings.TrimSpace(string(namesRaw)))
 	}
 	seen := make(map[string]bool)
 	changed := make([]string, 0)
@@ -459,14 +463,14 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 	return diffPath, changed, nil
 }
 
-func currentCommit(ctx context.Context, worktreePath string) string {
+func currentCommit(ctx context.Context, worktreePath string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
 	cmd.Dir = worktreePath
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("runner: git rev-parse HEAD in %s: %w: %s", worktreePath, err, strings.TrimSpace(string(output)))
 	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(string(output)), nil
 }
 
 func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {

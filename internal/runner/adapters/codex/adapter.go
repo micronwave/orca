@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -114,7 +115,7 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		"-o", absSidecarPath,
 		"-",
 	}
-	_, _, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
+	_, stderr, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
 		args:       args,
 		worktree:   capsule.Sandbox.WorktreePath,
@@ -122,7 +123,7 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		stdin:      briefingFile,
 	})
 	if runErr != nil {
-		return nil, fmt.Errorf("codex adapter: execute failed: %w", runErr)
+		return nil, fmt.Errorf("codex adapter: execute failed: %w: %s", runErr, strings.TrimSpace(stderr))
 	}
 
 	sidecarData, err := os.ReadFile(sidecarPath)
@@ -148,7 +149,7 @@ func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.Exe
 	if err != nil {
 		return nil, fmt.Errorf("codex adapter: read transcript %s: %w", transcriptPath, err)
 	}
-	return extractSidecarFromTranscript(string(data), transcriptPath, capsule.ObligationIDs), nil
+	return extractSidecarFromTranscript(string(data), transcriptPath, capsule.ObligationIDs)
 }
 
 func (a *Adapter) lookupCommand() (string, error) {
@@ -171,12 +172,14 @@ type commandSpec struct {
 	stdin      io.Reader
 }
 
-func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, string, time.Duration, error) {
+func runCommandWithTranscript(ctx context.Context, spec commandSpec) (outStr string, errStr string, d time.Duration, err error) {
 	file, err := os.Create(spec.transcript)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create transcript %s: %w", spec.transcript, err)
 	}
-	defer file.Close()
+	defer func() {
+		err = errors.Join(err, file.Close())
+	}()
 
 	cmd := exec.CommandContext(ctx, spec.executable, spec.args...)
 	cmd.Dir = spec.worktree
@@ -197,9 +200,9 @@ func runCommandWithTranscript(ctx context.Context, spec commandSpec) (string, st
 func ensureCleanWorktree(ctx context.Context, worktreePath string) error {
 	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = worktreePath
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git status --porcelain: %w", err)
+		return fmt.Errorf("git status --porcelain: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	if strings.TrimSpace(string(out)) != "" {
 		return fmt.Errorf("worktree %s has uncommitted changes", worktreePath)
@@ -275,20 +278,35 @@ func sidecarJSONSchema() string {
 }`
 }
 
-func extractSidecarFromTranscript(text, transcriptPath string, allowedObligationIDs []string) *schema.AgentSidecarOutput {
+func extractSidecarFromTranscript(text, transcriptPath string, allowedObligationIDs []string) (*schema.AgentSidecarOutput, error) {
 	filesChanged := uniqueMatches(text, regexp.MustCompile(`(?m)^\s*(?:M|A|D|R)\s+([^\s]+)`))
 	if len(filesChanged) == 0 {
 		filesChanged = uniqueMatches(text, regexp.MustCompile(`(?m)^\+\+\+\s+b\/([^\s]+)`))
 	}
-	commands := collectCommandLines(text)
+	commands, err := collectCommandLines(text)
+	if err != nil {
+		return nil, err
+	}
 	obligationIDs := filterToAllowed(
 		uniqueMatches(text, regexp.MustCompile(`\b(OB-[A-Za-z0-9\-]+)\b`)),
 		allowedObligationIDs,
 	)
-	assumptions := collectByPrefix(text, "assumption:")
-	risks := collectByPrefix(text, "risk:")
-	followUp := collectByPrefix(text, "follow-up:")
-	claims := collectClaims(text)
+	assumptions, err := collectByPrefix(text, "assumption:")
+	if err != nil {
+		return nil, err
+	}
+	risks, err := collectByPrefix(text, "risk:")
+	if err != nil {
+		return nil, err
+	}
+	followUp, err := collectByPrefix(text, "follow-up:")
+	if err != nil {
+		return nil, err
+	}
+	claims, err := collectClaims(text)
+	if err != nil {
+		return nil, err
+	}
 	if len(claims) == 0 {
 		for _, assumption := range assumptions {
 			claims = append(claims, schema.SidecarClaim{Claim: assumption, Type: schema.SidecarClaimProposed})
@@ -303,7 +321,7 @@ func extractSidecarFromTranscript(text, transcriptPath string, allowedObligation
 		Risks:                risks,
 		FollowUpNeeded:       followUp,
 		EvidencePaths:        []string{transcriptPath},
-	}
+	}, nil
 }
 
 func filterToAllowed(ids, allowed []string) []string {
@@ -323,7 +341,7 @@ func filterToAllowed(ids, allowed []string) []string {
 	return out
 }
 
-func collectCommandLines(text string) []string {
+func collectCommandLines(text string) ([]string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	out := make([]string, 0)
 	for scanner.Scan() {
@@ -332,10 +350,13 @@ func collectCommandLines(text string) []string {
 			out = append(out, strings.TrimSpace(strings.TrimPrefix(line, "$ ")))
 		}
 	}
-	return uniqueStrings(out)
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("codex adapter: scan transcript commands: %w", err)
+	}
+	return uniqueStrings(out), nil
 }
 
-func collectByPrefix(text, prefix string) []string {
+func collectByPrefix(text, prefix string) ([]string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	out := make([]string, 0)
 	lowerPrefix := strings.ToLower(prefix)
@@ -346,10 +367,13 @@ func collectByPrefix(text, prefix string) []string {
 			out = append(out, strings.TrimSpace(line[len(prefix):]))
 		}
 	}
-	return uniqueStrings(out)
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("codex adapter: scan transcript prefix %q: %w", prefix, err)
+	}
+	return uniqueStrings(out), nil
 }
 
-func collectClaims(text string) []schema.SidecarClaim {
+func collectClaims(text string) ([]schema.SidecarClaim, error) {
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	out := make([]schema.SidecarClaim, 0)
 	for scanner.Scan() {
@@ -374,7 +398,10 @@ func collectClaims(text string) []schema.SidecarClaim {
 			})
 		}
 	}
-	return out
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("codex adapter: scan transcript claims: %w", err)
+	}
+	return out, nil
 }
 
 func splitClaimMetadata(raw string) (string, []string, []string) {
