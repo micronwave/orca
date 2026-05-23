@@ -108,3 +108,10 @@ type CapsuleProjectionPayload struct {
 	CapsuleID    string `json:"capsule_id"`
 	ProjectionID string `json:"projection_id"`
 }
+
+// TopologySelectedPayload is the event payload for topology_selected.
+// Emitted by the orchestrator after the planner commits the topology decision.
+type TopologySelectedPayload struct {
+	Topology   Topology `json:"topology"`
+	DecisionID string   `json:"decision_id"`
+}
