@@ -14,12 +14,14 @@ import (
 
 // Config defines planner inputs derived from runtime configuration.
 type Config struct {
-	OrcaDir            string
-	ApprovalPolicy     string
-	DefaultMaxTokens   int
-	DefaultMaxWallTime int
-	DefaultMaxRetries  int
-	NoLearning         bool
+	OrcaDir                  string
+	ApprovalPolicy           string
+	DefaultMaxTokens         int
+	DefaultMaxWallTime       int
+	DefaultMaxRetries        int
+	NoLearning               bool
+	ReviewerDiversityEnabled bool
+	PreferredReviewerAdapter string
 }
 
 // Planner reads open obligations for a goal, classifies topology, generates
@@ -172,6 +174,12 @@ func (s *Planner) buildCapsules(topology schema.Topology, obligations []*schema.
 		reviewerAgent := schema.AgentClaude
 		if executorAgent == schema.AgentClaude {
 			reviewerAgent = schema.AgentCodex
+		}
+		if s.config.ReviewerDiversityEnabled && s.config.PreferredReviewerAdapter != "" {
+			preferred := schema.AgentType(s.config.PreferredReviewerAdapter)
+			if preferred != executorAgent {
+				reviewerAgent = preferred
+			}
 		}
 		obligationIDs := make([]string, 0, len(obligations))
 		for _, obligation := range obligations {
@@ -500,7 +508,6 @@ func selectExecutorAgent(hints routingHints) schema.AgentType {
 	}
 	return schema.AgentCodex
 }
-
 
 const (
 	historicalMinSamples = 3

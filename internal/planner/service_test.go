@@ -509,6 +509,100 @@ func TestPlan_implementerReviewerCreatesTwoCapsules(t *testing.T) {
 	}
 }
 
+func TestPlan_ReviewerDiversity_Disabled_UsesAutoSwap(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := planReviewerDiversity(t, Config{
+		ReviewerDiversityEnabled: false,
+		PreferredReviewerAdapter: string(schema.AgentCodex),
+	}, schema.RiskMedium)
+
+	executor, reviewer := loadExecutorAndReviewerCapsules(t, ctx, st, result)
+	if executor.Agent != schema.AgentCodex {
+		t.Fatalf("executor agent = %s, want %s", executor.Agent, schema.AgentCodex)
+	}
+	if reviewer.Agent != schema.AgentClaude {
+		t.Fatalf("reviewer agent = %s, want auto-swap %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
+func TestPlan_ReviewerDiversity_NoPreferredAdapter_UsesAutoSwap(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := planReviewerDiversity(t, Config{
+		ReviewerDiversityEnabled: true,
+		PreferredReviewerAdapter: "",
+	}, schema.RiskMedium)
+
+	executor, reviewer := loadExecutorAndReviewerCapsules(t, ctx, st, result)
+	if executor.Agent != schema.AgentCodex {
+		t.Fatalf("executor agent = %s, want %s", executor.Agent, schema.AgentCodex)
+	}
+	if reviewer.Agent != schema.AgentClaude {
+		t.Fatalf("reviewer agent = %s, want auto-swap %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
+func TestPlan_ReviewerDiversity_PreferredAdapterDifferentFromImplementer(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := planReviewerDiversity(t, Config{
+		ReviewerDiversityEnabled: true,
+		PreferredReviewerAdapter: string(schema.AgentClaude),
+	}, schema.RiskMedium)
+
+	executor, reviewer := loadExecutorAndReviewerCapsules(t, ctx, st, result)
+	if executor.Agent != schema.AgentCodex {
+		t.Fatalf("executor agent = %s, want %s", executor.Agent, schema.AgentCodex)
+	}
+	if reviewer.Agent != schema.AgentClaude {
+		t.Fatalf("reviewer agent = %s, want preferred %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
+func TestPlan_ReviewerDiversity_PreferredAdapterSameAsImplementer_FallsBackToAutoSwap(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := planReviewerDiversity(t, Config{
+		ReviewerDiversityEnabled: true,
+		PreferredReviewerAdapter: string(schema.AgentCodex),
+	}, schema.RiskMedium)
+
+	executor, reviewer := loadExecutorAndReviewerCapsules(t, ctx, st, result)
+	if executor.Agent != schema.AgentCodex {
+		t.Fatalf("executor agent = %s, want %s", executor.Agent, schema.AgentCodex)
+	}
+	if reviewer.Agent != schema.AgentClaude {
+		t.Fatalf("reviewer agent = %s, want auto-swap %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
+func TestPlan_ReviewerDiversity_OnlySingleTopologyAffected(t *testing.T) {
+	t.Parallel()
+
+	ctx, st, result := planReviewerDiversity(t, Config{
+		ReviewerDiversityEnabled: true,
+		PreferredReviewerAdapter: string(schema.AgentClaude),
+	}, schema.RiskLow)
+
+	if result.Topology != schema.TopologySingle {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologySingle)
+	}
+	if len(result.CapsuleIDs) != 1 {
+		t.Fatalf("CapsuleIDs len = %d, want 1", len(result.CapsuleIDs))
+	}
+	capsule, err := st.LoadCapsule(ctx, result.CapsuleIDs[0])
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	if capsule.Role != schema.RoleExecutor {
+		t.Fatalf("Role = %s, want %s", capsule.Role, schema.RoleExecutor)
+	}
+	if capsule.Agent != schema.AgentCodex {
+		t.Fatalf("single topology agent = %s, want executor default %s", capsule.Agent, schema.AgentCodex)
+	}
+}
+
 func TestPlan_UsesHistoricalFailureRoutingHint(t *testing.T) {
 	t.Parallel()
 
@@ -857,6 +951,97 @@ func seedPlanWithRecurringFailureHistory(t *testing.T, noLearning bool) (context
 		t.Fatalf("Plan: %v", err)
 	}
 	return ctx, st, result
+}
+
+func planReviewerDiversity(t *testing.T, cfg Config, risk schema.RiskLevel) (context.Context, *store.FileStore, PlanResult) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	const (
+		goalID      = "G-reviewer-diversity"
+		conditionID = "GC-reviewer-diversity"
+		obligation  = "OB-reviewer-diversity"
+	)
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "plan reviewer diversity",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "plan reviewer diversity",
+			EffectiveDescription: "plan reviewer diversity",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: risk,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     obligation,
+		GoalConditionID:  conditionID,
+		Description:      "review medium-risk implementation",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        risk,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	cfg.OrcaDir = filepath.Join(root, ".orca")
+	cfg.ApprovalPolicy = "auto"
+	cfg.DefaultMaxTokens = 32000
+	cfg.DefaultMaxWallTime = 300
+	cfg.DefaultMaxRetries = 3
+	result, err := New(st, cfg, nil).Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	return ctx, st, result
+}
+
+func loadExecutorAndReviewerCapsules(t *testing.T, ctx context.Context, st *store.FileStore, result PlanResult) (*schema.ExecutionCapsule, *schema.ExecutionCapsule) {
+	t.Helper()
+	if result.Topology != schema.TopologyImplementerReviewer {
+		t.Fatalf("Topology = %s, want %s", result.Topology, schema.TopologyImplementerReviewer)
+	}
+	if len(result.CapsuleIDs) != 2 {
+		t.Fatalf("CapsuleIDs len = %d, want 2", len(result.CapsuleIDs))
+	}
+	var executor, reviewer *schema.ExecutionCapsule
+	for _, capsuleID := range result.CapsuleIDs {
+		capsule, err := st.LoadCapsule(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("LoadCapsule %s: %v", capsuleID, err)
+		}
+		switch capsule.Role {
+		case schema.RoleExecutor:
+			executor = capsule
+		case schema.RoleReviewer:
+			reviewer = capsule
+		}
+	}
+	if executor == nil {
+		t.Fatal("executor capsule not found")
+	}
+	if reviewer == nil {
+		t.Fatal("reviewer capsule not found")
+	}
+	if executor.Agent == reviewer.Agent {
+		t.Fatalf("executor and reviewer both use %s; reviewer diversity invariant broken", executor.Agent)
+	}
+	return executor, reviewer
 }
 
 // stubOutcomeReader is a minimal OutcomeReader used in historical-routing tests.

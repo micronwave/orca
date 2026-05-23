@@ -400,6 +400,77 @@ func TestDefaultConfigYAMLIncludesAdvancedAndLoads(t *testing.T) {
 	}
 }
 
+func TestNewPlannerWiresReviewerDiversityPreferredAdapter(t *testing.T) {
+	ctx := context.Background()
+	orcaDir := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(orcaDir, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(orcaDir, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         "G-reviewer-diversity",
+		OriginalIntent: "wire reviewer diversity",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   "GC-reviewer-diversity",
+			Description:          "wire reviewer diversity",
+			EffectiveDescription: "wire reviewer diversity",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskMedium,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-reviewer-diversity",
+		GoalConditionID:  "GC-reviewer-diversity",
+		Description:      "review medium-risk implementation",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskMedium,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	plannerSvc := newPlanner(
+		st,
+		config.BudgetConfig{DefaultMaxTokens: 32000, DefaultMaxWallTimeSeconds: 300, DefaultMaxRetries: 3},
+		config.AdapterConfig{CodexPath: "codex.exe", ClaudePath: "claude.exe"},
+		config.AdvancedConfig{Enabled: true, ReviewerDiversity: true},
+		orcaDir,
+		false,
+	)
+	result, err := plannerSvc.Plan(ctx, "G-reviewer-diversity")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	var reviewer *schema.ExecutionCapsule
+	for _, capsuleID := range result.CapsuleIDs {
+		capsule, err := st.LoadCapsule(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("LoadCapsule %s: %v", capsuleID, err)
+		}
+		if capsule.Role == schema.RoleReviewer {
+			reviewer = capsule
+		}
+	}
+	if reviewer == nil {
+		t.Fatal("reviewer capsule not found")
+	}
+	if reviewer.Agent != schema.AgentClaude {
+		t.Fatalf("reviewer agent = %s, want configured preferred %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
 var configLoad = config.Load
 
 func writeTestConfig(t *testing.T, path string) {

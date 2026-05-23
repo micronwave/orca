@@ -227,7 +227,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 
 		intentCompiler: newIntentCompiler(st),
 		verifierEngine: newVerifierEngine(st, cfg.Verifier, cfg.Advanced, noLearning),
-		planner:        newPlanner(st, cfg.Budget, orcaDir, noLearning),
+		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, orcaDir, noLearning),
 		projector:      newProjector(st, cfg.Verifier),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
@@ -1036,18 +1036,31 @@ func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, adv confi
 	}, nil)
 }
 
-func newPlanner(st *store.FileStore, cfg config.BudgetConfig, orcaDir string, noLearning bool) *planner.Planner {
+func newPlanner(
+	st *store.FileStore,
+	cfg config.BudgetConfig,
+	adapters config.AdapterConfig,
+	adv config.AdvancedConfig,
+	orcaDir string,
+	noLearning bool,
+) *planner.Planner {
 	var outcomes planner.OutcomeReader
 	if !noLearning {
 		outcomes = st
 	}
+	preferredReviewer := ""
+	if adv.Enabled && adv.ReviewerDiversity && adapters.ClaudePath != "" && adapters.CodexPath != "" {
+		preferredReviewer = string(schema.AgentClaude)
+	}
 	return planner.New(st, planner.Config{
-		OrcaDir:            orcaDir,
-		ApprovalPolicy:     "auto",
-		DefaultMaxTokens:   cfg.DefaultMaxTokens,
-		DefaultMaxWallTime: cfg.DefaultMaxWallTimeSeconds,
-		DefaultMaxRetries:  cfg.DefaultMaxRetries,
-		NoLearning:         noLearning,
+		OrcaDir:                  orcaDir,
+		ApprovalPolicy:           "auto",
+		DefaultMaxTokens:         cfg.DefaultMaxTokens,
+		DefaultMaxWallTime:       cfg.DefaultMaxWallTimeSeconds,
+		DefaultMaxRetries:        cfg.DefaultMaxRetries,
+		NoLearning:               noLearning,
+		ReviewerDiversityEnabled: adv.Enabled && adv.ReviewerDiversity,
+		PreferredReviewerAdapter: preferredReviewer,
 	}, outcomes)
 }
 
