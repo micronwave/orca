@@ -141,11 +141,13 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 }
 
 func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.ExecutionCapsule, transcriptPath string) (*schema.AgentSidecarOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(transcriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("codex adapter: read transcript %s: %w", transcriptPath, err)
 	}
-	_ = ctx
 	return extractSidecarFromTranscript(string(data), transcriptPath, capsule.ObligationIDs), nil
 }
 
