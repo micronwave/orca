@@ -352,8 +352,16 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 			if err != nil {
 				return err
 			}
+			var reconcileIn reconciler.ReconcileInput
+			if len(verifyResult.BlockingFailures) > 0 {
+				waivers, waiverErr := rt.collectWaivers(ctx, verifyResult)
+				if waiverErr != nil {
+					return waiverErr
+				}
+				reconcileIn.Waivers = waivers
+			}
 			fmt.Fprintf(os.Stderr, "[orca] patch %s: reconciling (recommended action: %s)\n", verifyResult.PatchID, verifyResult.RecommendedAction)
-			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID)
+			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID, reconcileIn)
 			if err != nil {
 				return err
 			}
@@ -436,6 +444,37 @@ func (rt *runtime) verifyPatch(ctx context.Context, patchID string, supplemental
 		SupplementalEvidenceIDs: supplementalEvidenceIDs,
 		SupplementalClaimIDs:    supplementalClaimIDs,
 	})
+}
+
+// collectWaivers presents a ReviewWaiver gate for each blocking obligation in
+// vr whose verifier verdict is VerdictFailed. Gate-level failures (static/test
+// gate summaries) that appear in BlockingFailures but not in ObligationResults
+// are not waivable and are skipped. If any obligation waiver is rejected it
+// returns an error immediately. Otherwise it returns a map from obligation ID
+// to the approved gate decision ID.
+func (rt *runtime) collectWaivers(ctx context.Context, vr *schema.VerifierResult) (map[string]string, error) {
+	waivers := make(map[string]string)
+	for _, verdict := range vr.ObligationResults {
+		if verdict.Verdict != schema.VerdictFailed {
+			continue
+		}
+		obl, err := rt.store.LoadObligation(ctx, verdict.ObligationID)
+		if err != nil {
+			return nil, fmt.Errorf("orca: load obligation %s for waiver: %w", verdict.ObligationID, err)
+		}
+		if !obl.Blocking {
+			continue
+		}
+		decision, err := rt.gatekeeper.ReviewWaiver(ctx, verdict.ObligationID, obl.Description)
+		if err != nil {
+			return nil, fmt.Errorf("orca: waiver review for obligation %s: %w", verdict.ObligationID, err)
+		}
+		if !decision.Approved {
+			return nil, fmt.Errorf("orca: waiver rejected for obligation %s: %s", verdict.ObligationID, decision.Notes)
+		}
+		waivers[verdict.ObligationID] = decision.DecisionID
+	}
+	return waivers, nil
 }
 
 func ensureInitTarget(orcaDir string) error {

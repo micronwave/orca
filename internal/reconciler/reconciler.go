@@ -94,6 +94,16 @@ func New(st *store.FileStore, log *eventlog.FileLog, cfg Config) *Reconciler {
 	return &Reconciler{store: st, log: log, noLearning: cfg.NoLearning}
 }
 
+// ReconcileInput carries optional per-call options for Reconcile.
+// Callers that do not need waivers can omit it entirely.
+type ReconcileInput struct {
+	// Waivers maps obligation ID to the gate decision ID that pre-approved
+	// the waiver. When present for a blocking obligation whose verifier verdict
+	// is failed, Reconcile treats the verdict as waived (VerdictWaived) with
+	// WaivedBy set to the decision ID.
+	Waivers map[string]string
+}
+
 // ReconcileResult summarizes the reconciler's decision for one patch.
 type ReconcileResult struct {
 	// PatchAccepted is true when all blocking obligations are satisfied or waived.
@@ -124,7 +134,12 @@ type ReconcileResult struct {
 	BlockingReason string
 }
 
-func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileResult, error) {
+func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...ReconcileInput) (ReconcileResult, error) {
+	var in ReconcileInput
+	if len(opts) > 0 {
+		in = opts[0]
+	}
+
 	if s.store == nil {
 		return ReconcileResult{}, errors.New("reconciler: store is required")
 	}
@@ -136,6 +151,13 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileRe
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("reconciler: load verifier result for patch %s: %w", patchID, err)
 	}
+
+	// Apply pre-approved gate waivers: replace VerdictFailed with VerdictWaived
+	// in an in-memory copy so the stored VerifierResult is never mutated.
+	if len(in.Waivers) > 0 {
+		vr = applyWaivers(vr, in.Waivers)
+	}
+
 	patch, err := s.store.LoadPatch(ctx, patchID)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("reconciler: load patch %s: %w", patchID, err)
@@ -438,6 +460,40 @@ func reject(result *ReconcileResult, reason string) {
 	if result.BlockingReason == "" {
 		result.BlockingReason = reason
 	}
+}
+
+// applyWaivers returns a shallow copy of vr with VerdictFailed obligation
+// results replaced by VerdictWaived for any obligation ID present in waivers,
+// with those IDs removed from BlockingFailures. When all blocking failures are
+// cleared and the original action was ActionRetry, RecommendedAction is
+// promoted to ActionAccept so the reconciler does not reject at the
+// recommendation gate.
+func applyWaivers(vr *schema.VerifierResult, waivers map[string]string) *schema.VerifierResult {
+	vrCopy := *vr
+	modifiedResults := make([]schema.ObligationVerdict, len(vr.ObligationResults))
+	for i, v := range vr.ObligationResults {
+		if v.Verdict == schema.VerdictFailed {
+			if decID := strings.TrimSpace(waivers[v.ObligationID]); decID != "" {
+				v.Verdict = schema.VerdictWaived
+				v.WaivedBy = decID
+				v.EvidenceIDs = nil
+			}
+		}
+		modifiedResults[i] = v
+	}
+	vrCopy.ObligationResults = modifiedResults
+	remaining := make([]string, 0, len(vr.BlockingFailures))
+	for _, f := range vr.BlockingFailures {
+		if strings.TrimSpace(waivers[f]) == "" {
+			remaining = append(remaining, f)
+		}
+	}
+	vrCopy.BlockingFailures = remaining
+	if len(vrCopy.BlockingFailures) == 0 && vrCopy.RecommendedAction == schema.ActionRetry {
+		vrCopy.RecommendedAction = schema.ActionAccept
+		vrCopy.RecommendationRationale = "all blocking failures waived by human gate decision"
+	}
+	return &vrCopy
 }
 
 func (s *Reconciler) appendEvent(ctx context.Context, eventType schema.EventType, goalID, artifactID string, payload any) (schema.Event, error) {
