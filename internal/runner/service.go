@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -47,6 +48,9 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 	registry := make(map[schema.AgentType]Adapter, len(adapters))
 	for _, adapter := range adapters {
 		if adapter == nil {
+			continue
+		}
+		if v := reflect.ValueOf(adapter); v.Kind() == reflect.Pointer && v.IsNil() {
 			continue
 		}
 		registry[adapter.AgentType()] = adapter

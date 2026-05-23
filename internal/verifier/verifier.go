@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -89,6 +90,8 @@ func New(st *store.FileStore, cfg config.VerifierConfig, runner GateRunner) *Eng
 // NewWithConfig returns an Engine with verifier-local options.
 func NewWithConfig(st *store.FileStore, cfg Config, runner GateRunner) *Engine {
 	if runner == nil {
+		runner = execGateRunner{}
+	} else if v := reflect.ValueOf(runner); v.Kind() == reflect.Pointer && v.IsNil() {
 		runner = execGateRunner{}
 	}
 	return &Engine{
