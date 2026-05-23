@@ -187,7 +187,12 @@ func (l *FileLog) Append(ctx context.Context, e schema.Event) (schema.Event, err
 	l.seq++
 	e.SequenceNum = l.seq
 	if e.EventID == "" {
-		e.EventID = newEventID()
+		id, err := newEventID()
+		if err != nil {
+			l.seq--
+			return schema.Event{}, fmt.Errorf("eventlog: generate event ID: %w", err)
+		}
+		e.EventID = id
 	}
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
@@ -334,13 +339,13 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 }
 
 // newEventID returns a random UUID v4 using crypto/rand.
-func newEventID() string {
+func newEventID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic("eventlog: crypto/rand unavailable: " + err.Error())
+		return "", fmt.Errorf("eventlog: crypto/rand unavailable: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
