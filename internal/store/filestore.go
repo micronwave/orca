@@ -82,6 +82,9 @@ type FileStore struct {
 // New creates or opens the FileStore at root, building the required directory
 // hierarchy. root is typically the .orca directory for the repository.
 func New(root string, log *eventlog.FileLog) (*FileStore, error) {
+	if log == nil {
+		return nil, fmt.Errorf("store: event log is required")
+	}
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirPatches, dirEvidence, dirClaims,
@@ -434,6 +437,9 @@ func projectionDir(role schema.ProjectionRole) (string, error) {
 // ── Goal IR ──────────────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
+	if g == nil {
+		return fmt.Errorf("store: goal is required")
+	}
 	if err := validateArtifactID("goal", g.GoalID); err != nil {
 		return err
 	}
@@ -521,6 +527,9 @@ func (s *FileStore) LoadGoalCondition(ctx context.Context, conditionID string) (
 // ── Obligations ──────────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) error {
+	if o == nil {
+		return fmt.Errorf("store: obligation is required")
+	}
 	if err := validateArtifactID("obligation", o.ObligationID); err != nil {
 		return err
 	}
@@ -607,6 +616,9 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 // ── Execution Capsules ───────────────────────────────────────────────────────
 
 func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule) error {
+	if c == nil {
+		return fmt.Errorf("store: capsule is required")
+	}
 	if err := validateArtifactID("capsule", c.CapsuleID); err != nil {
 		return err
 	}
@@ -687,6 +699,9 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 // ── Context Projections ──────────────────────────────────────────────────────
 
 func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProjection) error {
+	if p == nil {
+		return fmt.Errorf("store: context projection is required")
+	}
 	if err := validateArtifactID("context projection", p.ContextProjectionID); err != nil {
 		return err
 	}
@@ -712,6 +727,9 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 }
 
 func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error {
+	if p == nil {
+		return fmt.Errorf("store: human summary projection is required")
+	}
 	if err := validateArtifactID("context projection", p.ContextProjectionID); err != nil {
 		return err
 	}
@@ -777,6 +795,9 @@ func (s *FileStore) LoadHumanSummaryProjectionForCapsule(ctx context.Context, ca
 // ── Patch Artifacts ──────────────────────────────────────────────────────────
 
 func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) error {
+	if p == nil {
+		return fmt.Errorf("store: patch is required")
+	}
 	if err := validateArtifactID("patch", p.PatchID); err != nil {
 		return err
 	}
@@ -854,6 +875,9 @@ func (s *FileStore) LoadPatchesForObligation(ctx context.Context, obligationID s
 // ── Evidence Artifacts ───────────────────────────────────────────────────────
 
 func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact) error {
+	if e == nil {
+		return fmt.Errorf("store: evidence is required")
+	}
 	if err := validateArtifactID("evidence", e.EvidenceID); err != nil {
 		return err
 	}
@@ -924,6 +948,9 @@ func (s *FileStore) LoadReusableEvidenceForObligation(ctx context.Context, oblig
 // ── Claim Artifacts ──────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) error {
+	if c == nil {
+		return fmt.Errorf("store: claim is required")
+	}
 	if err := validateArtifactID("claim", c.ClaimID); err != nil {
 		return err
 	}
@@ -1100,6 +1127,9 @@ func (s *FileStore) UpdateClaimValidation(ctx context.Context, claimID string, s
 // ── Failure Fingerprints ─────────────────────────────────────────────────────
 
 func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprint) error {
+	if f == nil {
+		return fmt.Errorf("store: failure fingerprint is required")
+	}
 	if err := validateArtifactID("failure", f.FailureID); err != nil {
 		return err
 	}
@@ -1274,6 +1304,9 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 // ── Verifier Results ─────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierResult) error {
+	if r == nil {
+		return fmt.Errorf("store: verifier result is required")
+	}
 	if err := validateArtifactID("verifier result", r.VerifierResultID); err != nil {
 		return err
 	}
@@ -1317,6 +1350,9 @@ func (s *FileStore) LoadVerifierResultForPatch(ctx context.Context, patchID stri
 // ── Decision Records ─────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) error {
+	if d == nil {
+		return fmt.Errorf("store: decision record is required")
+	}
 	if err := validateArtifactID("decision", d.DecisionID); err != nil {
 		return err
 	}
@@ -1345,6 +1381,9 @@ func (s *FileStore) LoadDecision(ctx context.Context, decisionID string) (*schem
 // ── Topology Outcomes ────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveTopologyOutcome(ctx context.Context, r *schema.TopologyOutcomeRecord) error {
+	if r == nil {
+		return fmt.Errorf("store: topology outcome is required")
+	}
 	if err := validateArtifactID("topology outcome", r.OutcomeID); err != nil {
 		return err
 	}
@@ -1403,6 +1442,9 @@ func (s *FileStore) LoadTopologyOutcomes(ctx context.Context, topology schema.To
 // ── Budget Records ───────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord) error {
+	if b == nil {
+		return fmt.Errorf("store: budget record is required")
+	}
 	if err := validateArtifactID("budget", b.BudgetID); err != nil {
 		return err
 	}
@@ -1446,6 +1488,9 @@ func (s *FileStore) LoadBudgetForGoal(ctx context.Context, goalID string) ([]*sc
 // UpdateBudgetRecord overwrites the stored BudgetRecord with b after appending
 // a replayable budget_record_updated event.
 func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetRecord) error {
+	if b == nil {
+		return fmt.Errorf("store: budget record is required")
+	}
 	if err := validateArtifactID("budget", b.BudgetID); err != nil {
 		return err
 	}
@@ -1471,6 +1516,9 @@ func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetReco
 // reconstruct checkpoint metadata. The snapshot's SequenceNum remains the last
 // domain event included in the snapshot, not the sequence assigned to this save.
 func (s *FileStore) SaveSnapshot(ctx context.Context, snap *schema.StateSnapshot) error {
+	if snap == nil {
+		return fmt.Errorf("store: snapshot is required")
+	}
 	if err := validateArtifactID("snapshot", snap.SnapshotID); err != nil {
 		return err
 	}

@@ -27,6 +27,12 @@ import (
 // etc.) fail if the target artifact is missing. That catches out-of-order or
 // malformed histories instead of silently materializing stale state.
 func Replay(ctx context.Context, log *eventlog.FileLog, s *FileStore, afterSeq int64) error {
+	if log == nil {
+		return fmt.Errorf("replay: event log is required")
+	}
+	if s == nil {
+		return fmt.Errorf("replay: store is required")
+	}
 	const batchSize = 200
 	seq := afterSeq
 	for {
