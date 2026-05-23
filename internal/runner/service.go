@@ -64,6 +64,9 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 	}
 }
 
+// NoLearning reports whether this runner was constructed with learning disabled.
+func (s *Runner) NoLearning() bool { return s.noLearning }
+
 func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, err error) {
 	if s.store == nil {
 		return RunResult{}, fmt.Errorf("runner: store is required")

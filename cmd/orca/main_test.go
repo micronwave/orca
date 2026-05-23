@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -282,8 +281,8 @@ func TestEmitCycleStartSnapshotPersistsLatestGoalEvent(t *testing.T) {
 	}
 }
 
-// TestRunGoal_NoLearningFlag verifies that --no-learning=true reaches the runtime
-// and that newPlanner passes nil OutcomeReader (not the store) when disabled.
+// TestRunGoal_NoLearningFlag verifies that --no-learning=true is wired through
+// the runtime to each sub-component that gates learning.
 func TestRunGoal_NoLearningFlag(t *testing.T) {
 	orcaDir := seedOrcaDir(t, false)
 	rt, closeFn, err := openRuntime(orcaDir, true)
@@ -294,16 +293,11 @@ func TestRunGoal_NoLearningFlag(t *testing.T) {
 	if !rt.noLearning {
 		t.Fatal("runtime.noLearning = false, want true when --no-learning is passed")
 	}
-	runnerValue := reflect.ValueOf(rt.runner)
-	if runnerValue.Kind() != reflect.Pointer || runnerValue.IsNil() {
-		t.Fatalf("runtime runner = %T, want non-nil pointer", rt.runner)
+	if rt.runner == nil {
+		t.Fatal("runtime.runner is nil")
 	}
-	field := runnerValue.Elem().FieldByName("noLearning")
-	if !field.IsValid() || field.Kind() != reflect.Bool {
-		t.Fatalf("runtime runner %T has no noLearning bool field", rt.runner)
-	}
-	if !field.Bool() {
-		t.Fatal("runner.noLearning = false, want true when --no-learning is passed")
+	if !rt.runner.NoLearning() {
+		t.Fatal("runner.NoLearning() = false, want true when --no-learning is passed")
 	}
 }
 

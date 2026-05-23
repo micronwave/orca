@@ -672,22 +672,27 @@ func TestFileLog_ConcurrentAppends(t *testing.T) {
 }
 
 func TestFileLog_ConcurrentReadWrite(t *testing.T) {
+	const writes = 50
 	l := openLog(t)
 
-	// Writer goroutine.
+	// Writer goroutine: collect append errors.
+	writeErrs := make(chan error, writes)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 50; i++ {
-			_, _ = l.Append(context.Background(), schema.Event{
+		for i := 0; i < writes; i++ {
+			if _, err := l.Append(context.Background(), schema.Event{
 				Type:   schema.EventGoalCreated,
 				GoalID: "G-1",
-			})
+			}); err != nil {
+				writeErrs <- err
+			}
 		}
 	}()
 
-	// Concurrent readers.
+	// Concurrent readers: collect read errors.
 	var wg sync.WaitGroup
+	readErrs := make(chan error, 4*writes)
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
@@ -697,11 +702,31 @@ func TestFileLog_ConcurrentReadWrite(t *testing.T) {
 				case <-done:
 					return
 				default:
-					_, _ = l.ReadAfter(context.Background(), 0, 10)
+					if _, err := l.ReadAfter(context.Background(), 0, 10); err != nil {
+						readErrs <- err
+					}
 				}
 			}
 		}()
 	}
 	<-done
 	wg.Wait()
+	close(writeErrs)
+	close(readErrs)
+
+	for err := range writeErrs {
+		t.Errorf("concurrent write error: %v", err)
+	}
+	for err := range readErrs {
+		t.Errorf("concurrent read error: %v", err)
+	}
+
+	// All 50 events must be durably present after concurrent access.
+	events, err := l.ReadAfter(context.Background(), 0, writes+1)
+	if err != nil {
+		t.Fatalf("final ReadAfter: %v", err)
+	}
+	if len(events) != writes {
+		t.Errorf("final event count = %d, want %d", len(events), writes)
+	}
 }
