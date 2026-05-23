@@ -19,6 +19,9 @@ type Controller struct {
 
 // New returns an event-log-only budget Controller.
 func New(log *eventlog.FileLog) *Controller {
+	if log == nil {
+		panic("budget: event log is required")
+	}
 	return &Controller{log: log}
 }
 

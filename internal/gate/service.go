@@ -54,6 +54,9 @@ func New(st *store.FileStore) *Gatekeeper {
 
 // NewWithIO returns a Gatekeeper with injected streams for tests and embedding.
 func NewWithIO(st *store.FileStore, in io.Reader, out io.Writer) *Gatekeeper {
+	if st == nil {
+		panic("gate: store is required")
+	}
 	if in == nil {
 		in = os.Stdin
 	}
