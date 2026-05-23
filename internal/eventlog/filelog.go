@@ -157,9 +157,9 @@ func (l *FileLog) Close() error {
 		return nil
 	}
 	if err := l.f.Sync(); err != nil {
-		_ = l.f.Close()
+		closeErr := l.f.Close()
 		l.done = true
-		return fmt.Errorf("eventlog: sync on close: %w", err)
+		return errors.Join(fmt.Errorf("eventlog: sync on close: %w", err), closeErr)
 	}
 	l.done = true
 	return l.f.Close()

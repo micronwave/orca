@@ -133,8 +133,7 @@ func (s *FileStore) writeFile(path string, v any) error {
 		return fmt.Errorf("store: write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: rename to %s: %w", path, err)
+		return errors.Join(fmt.Errorf("store: rename to %s: %w", path, err), os.Remove(tmp))
 	}
 	return nil
 }
