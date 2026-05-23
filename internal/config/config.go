@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// maxDurationSeconds is the upper bound for any config field that will be
+// multiplied by time.Second to produce a time.Duration.  Values above this
+// would overflow int64 nanoseconds (math.MaxInt64 / 1e9 ≈ 292 years; we cap
+// at one year for operational sanity).
+const maxDurationSeconds = 365 * 24 * 3600 // 31_536_000
+
 // Config is the minimum viable Phase 1 configuration.
 type Config struct {
 	Verifier VerifierConfig
@@ -220,6 +226,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Budget.DefaultMaxWallTimeSeconds == 0 {
 		return nil, fmt.Errorf("config: budget.default_max_wall_time_seconds must be greater than 0")
+	}
+	if cfg.Budget.DefaultMaxWallTimeSeconds > maxDurationSeconds {
+		return nil, fmt.Errorf("config: budget.default_max_wall_time_seconds %d exceeds maximum %d", cfg.Budget.DefaultMaxWallTimeSeconds, maxDurationSeconds)
+	}
+	if cfg.Gate.ReviewWindowSeconds > maxDurationSeconds {
+		return nil, fmt.Errorf("config: gate.review_window_seconds %d exceeds maximum %d", cfg.Gate.ReviewWindowSeconds, maxDurationSeconds)
 	}
 	return cfg, nil
 }
