@@ -102,7 +102,8 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 		result.FailureIDs = append(result.FailureIDs, failureID)
 	}()
 
-	if err = s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStarted, schema.CapsuleStateWorktreeCreated); err != nil {
+	startEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStarted, schema.CapsuleStateWorktreeCreated)
+	if err != nil {
 		return result, err
 	}
 	// Set transitioned immediately after the capsule_started event is logged so
@@ -110,7 +111,7 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	// any subsequent step fails — even if UpdateCapsuleState itself fails below.
 	transitioned = true
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateWorktreeCreated); err != nil {
-		return result, fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateWorktreeCreated, err)
+		return result, &store.MaterializationError{Event: startEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateWorktreeCreated, err)}
 	}
 
 	if err = ensureWorktree(ctx, capsule.Sandbox.WorktreePath); err != nil {
@@ -202,11 +203,12 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	}
 	result.ClaimIDs = claimIDs
 
-	if err = s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleCompleted, schema.CapsuleStateCompleted); err != nil {
+	completeEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleCompleted, schema.CapsuleStateCompleted)
+	if err != nil {
 		return result, err
 	}
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateCompleted); err != nil {
-		return result, fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateCompleted, err)
+		return result, &store.MaterializationError{Event: completeEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateCompleted, err)}
 	}
 	return result, nil
 }
@@ -262,23 +264,24 @@ func (s *Runner) appendCapsuleTransition(
 	capsuleID string,
 	eventType schema.EventType,
 	state schema.CapsuleState,
-) error {
+) (schema.Event, error) {
 	payload, err := json.Marshal(schema.CapsuleTransitionPayload{
 		CapsuleID: capsuleID,
 		State:     state,
 	})
 	if err != nil {
-		return fmt.Errorf("runner: marshal %s payload for capsule %s: %w", eventType, capsuleID, err)
+		return schema.Event{}, fmt.Errorf("runner: marshal %s payload for capsule %s: %w", eventType, capsuleID, err)
 	}
-	if _, err = s.log.Append(ctx, schema.Event{
+	ev, err := s.log.Append(ctx, schema.Event{
 		Type:       eventType,
 		GoalID:     goalID,
 		ArtifactID: capsuleID,
 		Payload:    payload,
-	}); err != nil {
-		return fmt.Errorf("runner: append %s for capsule %s: %w", eventType, capsuleID, err)
+	})
+	if err != nil {
+		return schema.Event{}, fmt.Errorf("runner: append %s for capsule %s: %w", eventType, capsuleID, err)
 	}
-	return nil
+	return ev, nil
 }
 
 func (s *Runner) failCapsule(
@@ -300,11 +303,12 @@ func (s *Runner) failCapsule(
 	if err := s.store.SaveFailure(ctx, failure); err != nil {
 		return "", fmt.Errorf("runner: save failure for capsule %s: %w", capsule.CapsuleID, err)
 	}
-	if err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleCompleted, schema.CapsuleStateFailed); err != nil {
+	failEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleCompleted, schema.CapsuleStateFailed)
+	if err != nil {
 		return "", err
 	}
 	if err := s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateFailed); err != nil {
-		return "", fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateFailed, err)
+		return "", &store.MaterializationError{Event: failEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateFailed, err)}
 	}
 	return failure.FailureID, nil
 }

@@ -627,16 +627,17 @@ func (rt *runtime) updateGoalStatus(ctx context.Context, goalID string, status s
 	if err != nil {
 		return fmt.Errorf("orca: marshal goal_status_updated payload: %w", err)
 	}
-	if _, err := rt.eventLog.Append(ctx, schema.Event{
+	ev, err := rt.eventLog.Append(ctx, schema.Event{
 		Type:       schema.EventGoalStatusUpdated,
 		GoalID:     goalID,
 		ArtifactID: goalID,
 		Payload:    payload,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("orca: append goal_status_updated: %w", err)
 	}
 	if err := rt.store.UpdateGoalStatus(ctx, goalID, status); err != nil {
-		return fmt.Errorf("orca: update goal status: %w", err)
+		return &store.MaterializationError{Event: ev, Err: fmt.Errorf("orca: update goal status: %w", err)}
 	}
 	return nil
 }

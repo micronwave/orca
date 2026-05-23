@@ -248,15 +248,17 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileRe
 		if status != schema.ObligationSatisfied {
 			ids = nil
 		}
-		if _, err := s.appendEvent(ctx, schema.EventObligationStatusUpdated, goal.GoalID, obl.ObligationID, schema.ObligationStatusPayload{
+		var ev schema.Event
+		ev, err = s.appendEvent(ctx, schema.EventObligationStatusUpdated, goal.GoalID, obl.ObligationID, schema.ObligationStatusPayload{
 			ObligationID: obl.ObligationID,
 			Status:       status,
 			SatisfiedBy:  ids,
-		}); err != nil {
+		})
+		if err != nil {
 			return ReconcileResult{}, err
 		}
 		if err := s.store.UpdateObligationStatus(ctx, obl.ObligationID, status, ids); err != nil {
-			return ReconcileResult{}, fmt.Errorf("reconciler: update obligation %s: %w", obl.ObligationID, err)
+			return ReconcileResult{}, &store.MaterializationError{Event: ev, Err: fmt.Errorf("reconciler: update obligation %s: %w", obl.ObligationID, err)}
 		}
 	}
 
@@ -266,13 +268,14 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string) (ReconcileRe
 		patchStatus = schema.PatchRejected
 		patchEventType = schema.EventPatchRejected
 	}
-	if _, err := s.appendEvent(ctx, patchEventType, goal.GoalID, patch.PatchID, schema.PatchStatusPayload{
+	patchEv, err := s.appendEvent(ctx, patchEventType, goal.GoalID, patch.PatchID, schema.PatchStatusPayload{
 		PatchID: patch.PatchID,
-	}); err != nil {
+	})
+	if err != nil {
 		return ReconcileResult{}, err
 	}
 	if err := s.store.UpdatePatchStatus(ctx, patch.PatchID, patchStatus); err != nil {
-		return ReconcileResult{}, fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)
+		return ReconcileResult{}, &store.MaterializationError{Event: patchEv, Err: fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)}
 	}
 
 	// verifyClaims must only run for accepted patches. Promoting proposed claims
@@ -474,15 +477,17 @@ func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string)
 		if !allPresent {
 			continue
 		}
-		if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+		var claimEv schema.Event
+		claimEv, err = s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
 			ClaimID:              claim.ClaimID,
 			Status:               schema.ClaimVerified,
 			LastValidatedAgainst: snapshotID,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
 		if err := s.store.UpdateClaimValidation(ctx, claim.ClaimID, schema.ClaimVerified, snapshotID); err != nil {
-			return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
+			return &store.MaterializationError{Event: claimEv, Err: fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)}
 		}
 	}
 	return nil
@@ -587,17 +592,18 @@ func (s *Reconciler) markClaimDisputed(ctx context.Context, goalID string, claim
 	if claim.Status == status && sameStrings(claim.ContradictedBy, contradicted) && sameStrings(claim.InvalidatedBy, invalidated) {
 		return nil
 	}
-	if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+	disputeEv, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
 		ClaimID:              claim.ClaimID,
 		Status:               status,
 		LastValidatedAgainst: claim.LastValidatedAgainst,
 		ContradictedBy:       contradicted,
 		InvalidatedBy:        invalidated,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	if err := s.store.UpdateClaimDispute(ctx, claim.ClaimID, status, contradicted, invalidated); err != nil {
-		return fmt.Errorf("reconciler: update claim dispute %s: %w", claim.ClaimID, err)
+		return &store.MaterializationError{Event: disputeEv, Err: fmt.Errorf("reconciler: update claim dispute %s: %w", claim.ClaimID, err)}
 	}
 	claim.Status = status
 	claim.ContradictedBy = contradicted
@@ -690,17 +696,18 @@ func (s *Reconciler) markClaimStatus(ctx context.Context, goalID string, claim *
 	if claim.Status == status {
 		return nil
 	}
-	if _, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
+	statusEv, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
 		ClaimID:              claim.ClaimID,
 		Status:               status,
 		LastValidatedAgainst: claim.LastValidatedAgainst,
 		ContradictedBy:       claim.ContradictedBy,
 		InvalidatedBy:        claim.InvalidatedBy,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, status); err != nil {
-		return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
+		return &store.MaterializationError{Event: statusEv, Err: fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)}
 	}
 	claim.Status = status
 	return nil
