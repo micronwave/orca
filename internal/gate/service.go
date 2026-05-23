@@ -84,6 +84,11 @@ func (s *service) startReader() {
 			// while the read is in progress, the epoch will increment after this
 			// snapshot, so the result is tagged with the pre-timeout epoch and the
 			// next gate correctly discards it as stale.
+			//
+			// ReadString on a terminal blocks until the next newline; it cannot be
+			// interrupted by context cancellation or Close(). The goroutine exits
+			// only after the next line arrives and send() observes s.stop is closed.
+			// This is an inherent limitation of blocking terminal I/O in Go.
 			epoch := s.epoch.Load()
 			line, err := r.ReadString('\n')
 			if err == io.EOF && line == "" {
