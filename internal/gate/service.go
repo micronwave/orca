@@ -36,6 +36,9 @@ type Gatekeeper struct {
 	in        io.Reader
 	out       io.Writer
 	startOnce sync.Once
+	// reviewMu serializes concurrent Review* calls. Without it, concurrent callers
+	// could interleave writes to s.out and steal each other's responses from s.lines.
+	reviewMu sync.Mutex
 	// epoch is incremented whenever a timed gate auto-proceeds. Lines tagged with
 	// an older epoch are stale (typed during a window that already timed out) and
 	// must be discarded by the next gate.
@@ -157,6 +160,8 @@ func (s *Gatekeeper) ReviewWaiver(ctx context.Context, obligationID string, reas
 
 func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow time.Duration, allowTimeout bool) (bool, bool, string, error) {
 	s.startOnce.Do(s.startReader)
+	s.reviewMu.Lock()
+	defer s.reviewMu.Unlock()
 	currentEpoch := s.epoch.Load()
 	if _, err := fmt.Fprint(s.out, display); err != nil {
 		return false, false, "", err
