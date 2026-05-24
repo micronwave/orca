@@ -23,7 +23,6 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 )
 
-
 // BudgetCheck is the result of a pre-run budget evaluation.
 type BudgetCheck struct {
 	// Allowed is false when accumulated spend plus estimated capsule cost

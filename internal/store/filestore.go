@@ -1669,4 +1669,3 @@ func sortTopologyOutcomes(records []*schema.TopologyOutcomeRecord) {
 		return records[i].OutcomeID < records[j].OutcomeID
 	})
 }
-

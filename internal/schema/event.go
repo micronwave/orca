@@ -17,16 +17,16 @@ const (
 	// It captures the full capsule contract at creation time (state=pending),
 	// which is needed for deterministic replay and for the BudgetController to
 	// read capsule budget limits from the event stream. orca.md §9, §12.
-	EventCapsuleCreated            EventType = "capsule_created"
-	EventCapsuleStarted            EventType = "capsule_started"
+	EventCapsuleCreated EventType = "capsule_created"
+	EventCapsuleStarted EventType = "capsule_started"
 	// EventCapsuleStateUpdated is emitted by the runner before every intermediate
 	// lifecycle state mutation (workspace_attached, setup_run, agent_running) so
 	// crash+replay reconstructs the exact state the capsule had reached.
-	EventCapsuleStateUpdated       EventType = "capsule_state_updated"
-	EventCapsuleCompleted          EventType = "capsule_completed"
+	EventCapsuleStateUpdated EventType = "capsule_state_updated"
+	EventCapsuleCompleted    EventType = "capsule_completed"
 	// EventCapsuleProjectionLinked is emitted by FileStore.UpdateCapsuleProjectionID
 	// before mutating the capsule file, making the projection link replayable.
-	EventCapsuleProjectionLinked EventType = "capsule_projection_linked"
+	EventCapsuleProjectionLinked   EventType = "capsule_projection_linked"
 	EventPatchArtifactCreated      EventType = "patch_artifact_created"
 	EventEvidenceArtifactCreated   EventType = "evidence_artifact_created"
 	EventClaimCreated              EventType = "claim_created"

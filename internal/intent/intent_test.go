@@ -136,7 +136,7 @@ func TestCompile_scopeConstraintsMultiPath(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	log, err := eventlog.Open(root+`\events.log`)
+	log, err := eventlog.Open(root + `\events.log`)
 	if err != nil {
 		t.Fatalf("eventlog.Open: %v", err)
 	}

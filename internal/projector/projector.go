@@ -34,5 +34,3 @@
 //	Must NOT merge:   executor_projection and human_summary_projection into one
 //	                  document — they are always two separate artifacts (§5.4)
 package projector
-
-
