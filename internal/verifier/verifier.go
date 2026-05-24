@@ -458,6 +458,11 @@ func (s *Engine) runMutationGate(
 	if timedOut {
 		summary = "mutation testing timed out"
 		warnings = append(warnings, "[mutation] mutation gate timed out")
+		if s.advanced.MutationBlocking {
+			if _, err := s.saveGateFailure(ctx, goalID, capsuleID, schema.FailureTest, command, summary, changedFiles); err != nil {
+				return nil, false, err
+			}
+		}
 	} else if exitCode != 0 {
 		summary = fmt.Sprintf("mutation testing found survivors (exit_code=%d): %s", exitCode, summarizeAdvancedOutput(output, 200))
 		warnings = append(warnings, fmt.Sprintf("[mutation] survivor found: test gap candidate for %s", advancedGateFiles(changedFiles)))
