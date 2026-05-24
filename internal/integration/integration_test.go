@@ -2325,6 +2325,133 @@ func containsPrefix(values []string, prefix string) bool {
 	return false
 }
 
+// timeoutGateRunner simulates a gate timeout by returning context.DeadlineExceeded
+// for the configured command, and passing all other commands.
+type timeoutGateRunner struct {
+	timeoutCommand string
+}
+
+func (r timeoutGateRunner) Run(_ context.Context, command, _ string) (int, string, error) {
+	if command == r.timeoutCommand {
+		return -1, "", context.DeadlineExceeded
+	}
+	return 0, "gate passed", nil
+}
+
+func TestPhase4_Mutation_Blocking_SurvivorReturnsRetry(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MUT-BLOCK", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	result, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Mutation: true, MutationCommand: "mutation-fail", MutationBlocking: true,
+	}, map[string]int{"mutation-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionRetry {
+		t.Fatalf("RecommendedAction = %s, want retry; blocking mutation survivor should trigger retry", result.RecommendedAction)
+	}
+	if !containsPrefix(result.Warnings, "[mutation]") {
+		t.Fatalf("warnings = %#v, want [mutation] warning", result.Warnings)
+	}
+}
+
+func TestPhase4_Mutation_NonBlocking_SurvivorNoRetry(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MUT-NONBLOCK", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	result, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Mutation: true, MutationCommand: "mutation-fail", MutationBlocking: false,
+	}, map[string]int{"mutation-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction == schema.ActionRetry {
+		t.Fatalf("RecommendedAction = retry, want accept; non-blocking mutation survivor must not reject the patch")
+	}
+	if !containsPrefix(result.Warnings, "[mutation]") {
+		t.Fatalf("warnings = %#v, want [mutation] warning even for non-blocking", result.Warnings)
+	}
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 1)
+}
+
+func TestPhase4_Adversarial_Blocking_FailureReturnsHumanReview(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "ADV-BLOCK", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	result, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, AdversarialTests: true, AdversarialCommand: "adversarial-fail", AdversarialBlocking: true,
+	}, map[string]int{"adversarial-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want human_review; blocking adversarial failure must trigger human review", result.RecommendedAction)
+	}
+	if !containsPrefix(result.Warnings, "[adversarial]") {
+		t.Fatalf("warnings = %#v, want [adversarial] warning", result.Warnings)
+	}
+}
+
+func TestPhase4_Adversarial_NonBlocking_FailureWarningOnly(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "ADV-NONBLOCK", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	result, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, AdversarialTests: true, AdversarialCommand: "adversarial-fail", AdversarialBlocking: false,
+	}, map[string]int{"adversarial-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction == schema.ActionHumanReview || result.RecommendedAction == schema.ActionRetry {
+		t.Fatalf("RecommendedAction = %s, want accept; non-blocking adversarial failure must not reject the patch", result.RecommendedAction)
+	}
+	if !containsPrefix(result.Warnings, "[adversarial]") {
+		t.Fatalf("warnings = %#v, want [adversarial] warning even for non-blocking", result.Warnings)
+	}
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 1)
+}
+
+func TestPhase4_Mutation_Timeout_Blocking_SavesFailureFingerprint(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MUT-TIMEOUT", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	eng := verifier.NewWithConfig(env.st, verifier.Config{
+		Gates:      []config.VerifierGate{{Name: "go_test", Command: "go version", Blocking: true}},
+		WorkingDir: env.root,
+		Advanced: config.AdvancedConfig{
+			Enabled: true, Mutation: true, MutationCommand: "mutation-timeout-cmd", MutationBlocking: true,
+		},
+	}, timeoutGateRunner{timeoutCommand: "mutation-timeout-cmd"})
+	result, err := eng.Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !containsPrefix(result.Warnings, "[mutation]") {
+		t.Fatalf("warnings = %#v, want [mutation] timeout warning", result.Warnings)
+	}
+	failures, err := env.st.LoadFailuresForCapsule(env.ctx, s.capsuleID)
+	if err != nil {
+		t.Fatalf("LoadFailuresForCapsule: %v", err)
+	}
+	var found bool
+	for _, f := range failures {
+		if strings.Contains(f.Summary, "timed out") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no timeout failure fingerprint saved for blocking mutation timeout; failures=%#v", failures)
+	}
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func mustMarshal(t *testing.T, v any) []byte {
