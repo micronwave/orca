@@ -90,6 +90,46 @@ func (e *gateEnv) seedProjection(t *testing.T) {
 	}
 }
 
+func TestReviewProjectionRendersAdvancedVerification(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	if err := e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+		ContextProjection: schema.ContextProjection{
+			ContextProjectionID: "CTX-ADV",
+			SourceArtifactIDs:   []string{"CAP-1"},
+			CreatedAt:           time.Now().UTC(),
+		},
+		GoalPlain:              "Test goal",
+		ImplementationApproach: "Change only the target code",
+		ObligationsAddressed: []schema.ObligationRef{{
+			ObligationID: "OB-1",
+			Description:  "prove behavior",
+			RiskLevel:    schema.RiskLow,
+		}},
+		Topology: schema.TopologyDecision{Selected: schema.TopologySingle, Rationale: "low risk"},
+		EvidencePlan: schema.EvidencePlan{
+			AdvancedChecks: []string{"Advanced verification: MAVEN=on Mutation=off Adversarial=on"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveHumanSummaryProjection: %v", err)
+	}
+
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	var out bytes.Buffer
+	g := gate.NewWithIO(e.st, reader, &out, gate.WithTimerFunc(func(time.Duration) *time.Timer {
+		return time.NewTimer(0)
+	}))
+	if _, err := g.ReviewProjection(e.ctx, "CAP-1", time.Millisecond); err != nil {
+		t.Fatalf("ReviewProjection: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Advanced verification:") ||
+		!strings.Contains(got, "MAVEN=on Mutation=off Adversarial=on") {
+		t.Fatalf("projection output missing advanced verification:\n%s", got)
+	}
+}
+
 func TestReviewProjection_AutoProceedsAfterWindow(t *testing.T) {
 	e := newGateEnv(t)
 	e.seedCore(t)

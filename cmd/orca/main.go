@@ -228,7 +228,7 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 		intentCompiler: newIntentCompiler(st),
 		verifierEngine: newVerifierEngine(st, cfg.Verifier, cfg.Advanced, noLearning),
 		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, orcaDir, noLearning),
-		projector:      newProjector(st, cfg.Verifier),
+		projector:      newProjector(st, cfg.Verifier, cfg.Advanced),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
 		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, noLearning),
@@ -628,6 +628,14 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 		}
 		fmt.Fprintln(out)
 	}
+	writeAdvancedStatus(out, rt.cfg.Advanced, latestVerifier)
+	falsePositives, totalFindings, err := rt.computeAdvancedFalsePositiveRate(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	if totalFindings > 0 {
+		fmt.Fprintf(out, "Advanced false positives: %d/%d findings\n", falsePositives, totalFindings)
+	}
 	fmt.Fprintf(out, "Merge readiness: %s\n", readiness)
 	fmt.Fprintln(out, "Blocking human decisions:")
 	if len(humanDecisions) == 0 {
@@ -646,6 +654,112 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 		roi.VerifiedValuePer1KTokens,
 	)
 	return nil
+}
+
+func writeAdvancedStatus(out io.Writer, adv config.AdvancedConfig, latest *schema.VerifierResult) {
+	status := "disabled"
+	if adv.Enabled {
+		status = "enabled"
+	}
+	fmt.Fprintf(out, "Advanced checks: %s\n", status)
+	fmt.Fprintf(out, "  MAVEN: %s  Mutation: %s  Adversarial: %s  Reviewer diversity: %s\n",
+		onOff(adv.Enabled && adv.Maven),
+		onOff(adv.Enabled && adv.Mutation),
+		onOff(adv.Enabled && adv.AdversarialTests),
+		onOff(adv.Enabled && adv.ReviewerDiversity),
+	)
+	findings := advancedWarnings(latest)
+	if len(findings) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Advanced findings:")
+	for _, warning := range findings {
+		fmt.Fprintf(out, "  %s\n", warning)
+	}
+}
+
+func advancedWarnings(result *schema.VerifierResult) []string {
+	if result == nil {
+		return nil
+	}
+	var findings []string
+	for _, warning := range result.Warnings {
+		if hasAdvancedPrefix(warning) {
+			findings = append(findings, warning)
+		}
+	}
+	return findings
+}
+
+func hasAdvancedPrefix(s string) bool {
+	return strings.HasPrefix(s, "[maven]") ||
+		strings.HasPrefix(s, "[mutation]") ||
+		strings.HasPrefix(s, "[adversarial]")
+}
+
+func onOff(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
+}
+
+func (rt *runtime) computeAdvancedFalsePositiveRate(ctx context.Context, goalID string) (int, int, error) {
+	findingsByPatch := make(map[string]bool)
+	approvedByPatch := make(map[string]bool)
+	var seq int64
+	for {
+		events, err := rt.eventLog.ReadForGoal(ctx, goalID, seq, 200)
+		if err != nil {
+			return 0, 0, fmt.Errorf("orca status: read events for advanced false positives: %w", err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		for _, event := range events {
+			switch event.Type {
+			case schema.EventVerifierResultCreated:
+				var result schema.VerifierResult
+				if err := json.Unmarshal(event.Payload, &result); err != nil {
+					return 0, 0, fmt.Errorf("orca status: unmarshal verifier result %s: %w", event.ArtifactID, err)
+				}
+				if result.RecommendedAction == schema.ActionHumanReview &&
+					strings.TrimSpace(result.PatchID) != "" &&
+					hasAdvancedFinding(result.RecommendationRationale) {
+					findingsByPatch[result.PatchID] = true
+				}
+			case schema.EventDecisionRecordCreated:
+				var decision schema.DecisionRecord
+				if err := json.Unmarshal(event.Payload, &decision); err != nil {
+					return 0, 0, fmt.Errorf("orca status: unmarshal decision %s: %w", event.ArtifactID, err)
+				}
+				if decision.Context != "merge_review" ||
+					(decision.Decision != "approved" && decision.Decision != "auto_proceeded") {
+					continue
+				}
+				for _, relatedID := range decision.RelatedIDs {
+					if relatedID != "" {
+						approvedByPatch[relatedID] = true
+					}
+				}
+			}
+		}
+		seq = events[len(events)-1].SequenceNum
+	}
+	total := len(findingsByPatch)
+	var falsePositives int
+	for patchID := range findingsByPatch {
+		if approvedByPatch[patchID] {
+			falsePositives++
+		}
+	}
+	return falsePositives, total, nil
+}
+
+func hasAdvancedFinding(s string) bool {
+	return strings.Contains(s, "[maven]") ||
+		strings.Contains(s, "[mutation]") ||
+		strings.Contains(s, "[adversarial]")
 }
 
 func (rt *runtime) cancelActiveGoal(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -1064,8 +1178,8 @@ func newPlanner(
 	}, outcomes)
 }
 
-func newProjector(st *store.FileStore, cfg config.VerifierConfig) *projector.Compiler {
-	return projector.New(st, cfg)
+func newProjector(st *store.FileStore, cfg config.VerifierConfig, adv config.AdvancedConfig) *projector.Compiler {
+	return projector.NewWithConfig(st, cfg, adv)
 }
 
 func newGatekeeper(st *store.FileStore, _ config.GateConfig) *gate.Gatekeeper {

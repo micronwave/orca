@@ -327,6 +327,12 @@ func renderProjection(p *schema.HumanSummaryProjection) string {
 	writeList(&b, "read", p.ExpectedFileScope.ToRead)
 	writeList(&b, "write", p.ExpectedFileScope.ToWrite)
 	writeList(&b, "create", p.ExpectedFileScope.ToCreate)
+	if len(p.EvidencePlan.AdvancedChecks) > 0 {
+		fmt.Fprintln(&b)
+		for _, check := range p.EvidencePlan.AdvancedChecks {
+			fmt.Fprintf(&b, "%s\n", check)
+		}
+	}
 	if len(p.PreExecutionRisks) > 0 {
 		fmt.Fprintf(&b, "\nRisks:\n")
 		for _, risk := range p.PreExecutionRisks {

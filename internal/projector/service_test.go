@@ -311,6 +311,55 @@ func TestCompileHumanSummary_buildsImplementationApproachAndTopologyRationale(t 
 	}
 }
 
+func TestCompileHumanSummaryAddsAdvancedChecksToEvidencePlan(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-advanced"
+		conditionID = "GC-proj-advanced"
+		obligation  = "OB-proj-advanced"
+		capsuleID   = "CAP-proj-advanced"
+		decisionID  = "DEC-proj-advanced"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decisionID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk",
+		MadeBy:     "system",
+		RelatedIDs: []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000, MaxWallTimeSeconds: 300},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: decisionID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	compiler := NewWithConfig(env.st, config.VerifierConfig{}, config.AdvancedConfig{
+		Enabled:          true,
+		Maven:            true,
+		Mutation:         true,
+		AdversarialTests: false,
+	})
+	summary, err := compiler.CompileHumanSummary(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileHumanSummary: %v", err)
+	}
+	want := "Advanced verification: MAVEN=on Mutation=on Adversarial=off"
+	if len(summary.EvidencePlan.AdvancedChecks) != 1 || summary.EvidencePlan.AdvancedChecks[0] != want {
+		t.Fatalf("AdvancedChecks = %#v, want %q", summary.EvidencePlan.AdvancedChecks, want)
+	}
+}
+
 func TestCompileHumanSummaryAddsContestedClaimRisk(t *testing.T) {
 	t.Parallel()
 

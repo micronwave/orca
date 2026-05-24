@@ -183,6 +183,98 @@ func TestStatusDoesNotReportReadyWithOpenBlockingObligation(t *testing.T) {
 	}
 }
 
+func TestStatusPrintsAdvancedFindingsAndFalsePositiveRate(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	if err := os.WriteFile(filepath.Join(orcaDir, "config.yaml"), []byte(`
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+      blocking: true
+  working_dir: ""
+gate:
+  review_window_seconds: 30
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+  default_max_retries: 3
+adapters:
+  codex_path: ""
+  claude_path: ""
+advanced:
+  enabled: true
+  maven: true
+  mutation: true
+  adversarial_tests: true
+  reviewer_diversity: false
+`), 0o644); err != nil {
+		t.Fatalf("write advanced config: %v", err)
+	}
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	ctx := context.Background()
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-1",
+		CapsuleID:            "CAP-1",
+		ObligationIDsClaimed: []string{"OB-1"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := st.SaveVerifierResult(ctx, &schema.VerifierResult{
+		VerifierResultID: "VR-ADV",
+		PatchID:          "PATCH-1",
+		CapsuleID:        "CAP-1",
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: "OB-1",
+			Verdict:      schema.VerdictFailed,
+		}},
+		Warnings:                []string{"[maven] factual: obligation OB-1 missing evidence type test_result"},
+		RecommendedAction:       schema.ActionHumanReview,
+		RecommendationRationale: "[maven] findings require human review",
+		CreatedAt:               time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	if err := st.SaveDecision(ctx, &schema.DecisionRecord{
+		DecisionID: "DEC-MERGE-ADV",
+		Context:    "merge_review",
+		Decision:   "approved",
+		Rationale:  "approved after review",
+		MadeBy:     "human",
+		RelatedIDs: []string{"PATCH-1"},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close setup log: %v", err)
+	}
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer closeFn()
+
+	var out bytes.Buffer
+	if err := rt.printStatus(context.Background(), &out); err != nil {
+		t.Fatalf("printStatus: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Advanced checks: enabled",
+		"MAVEN: on  Mutation: on  Adversarial: on  Reviewer diversity: off",
+		"Advanced findings:",
+		"[maven] factual: obligation OB-1 missing evidence type test_result",
+		"Advanced false positives: 1/1 findings",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestStatusReportsOutstandingMergeReviewForAcceptedHighRiskPatch(t *testing.T) {
 	orcaDir := seedOrcaDir(t, true)
 	savePatchAndVerifierResult(t, orcaDir, "OB-1", schema.RiskHigh, schema.PatchAccepted)

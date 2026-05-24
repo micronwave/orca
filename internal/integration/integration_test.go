@@ -2027,6 +2027,304 @@ func TestDeterministicStateReconstruction_Phase3(t *testing.T) {
 	assertPhase3Fields("after replay")
 }
 
+// ── Phase 4 integration tests ────────────────────────────────────────────────
+
+type phase4GateRunner struct {
+	exitByCommand map[string]int
+}
+
+func (r phase4GateRunner) Run(_ context.Context, command, _ string) (int, string, error) {
+	if r.exitByCommand != nil {
+		if exit, ok := r.exitByCommand[command]; ok {
+			if exit == 0 {
+				return 0, "phase4 gate passed", nil
+			}
+			return exit, "phase4 gate failed", nil
+		}
+	}
+	return 0, "phase4 gate passed", nil
+}
+
+type phase4Scenario struct {
+	goalID, conditionID, obligationID string
+	capsuleID, patchID, evidenceID    string
+}
+
+func buildPhase4Scenario(t *testing.T, env *integEnv, suffix string, required []string, blocking bool) phase4Scenario {
+	t.Helper()
+	now := time.Now().UTC()
+	s := phase4Scenario{
+		goalID:       "G-PHASE4-" + suffix,
+		conditionID:  "GC-PHASE4-" + suffix,
+		obligationID: "OB-PHASE4-" + suffix,
+		capsuleID:    "CAP-PHASE4-" + suffix,
+		patchID:      "PATCH-PHASE4-" + suffix,
+		evidenceID:   "EV-PHASE4-" + suffix,
+	}
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         s.goalID,
+		OriginalIntent: "phase4 " + suffix,
+		GoalConditions: []schema.GoalCondition{{
+			ID: s.conditionID, Description: "condition", EffectiveDescription: "condition",
+			Status: schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow, Status: schema.GoalStatusActive, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     s.obligationID,
+		GoalConditionID:  s.conditionID,
+		Description:      "phase4 obligation",
+		EvidenceRequired: required,
+		Blocking:         blocking,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+		ExpectedFiles:    []string{"internal/foo.go"},
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     s.capsuleID,
+		ObligationIDs: []string{s.obligationID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+		AllowedPaths:  []string{"internal"},
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              s.patchID,
+		CapsuleID:            s.capsuleID,
+		BaseCommit:           "abc123",
+		ChangedFiles:         []string{"internal/foo.go"},
+		ObligationIDsClaimed: []string{s.obligationID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	return s
+}
+
+func savePhase4TestEvidence(t *testing.T, env *integEnv, s phase4Scenario) {
+	t.Helper()
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: s.evidenceID,
+		Type:       schema.EvidenceTestResult,
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{s.obligationID},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+}
+
+func phase4Verifier(env *integEnv, advanced config.AdvancedConfig, exits map[string]int, noLearning bool) *verifier.Engine {
+	return verifier.NewWithConfig(env.st, verifier.Config{
+		Gates:      []config.VerifierGate{{Name: "go_test", Command: "go version", Blocking: true}},
+		WorkingDir: env.root,
+		NoLearning: noLearning,
+		Advanced:   advanced,
+	}, phase4GateRunner{exitByCommand: exits})
+}
+
+func TestPhase4_AdvancedChecksDisabled_BaselineBehaviorUnchanged(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "BASELINE", []string{string(schema.EvidenceTestResult)}, true)
+	result, err := phase4Verifier(env, config.AdvancedConfig{}, nil, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	for _, warning := range result.Warnings {
+		if strings.HasPrefix(warning, "[maven]") || strings.HasPrefix(warning, "[mutation]") || strings.HasPrefix(warning, "[adversarial]") {
+			t.Fatalf("advanced warning present with defaults disabled: %q", warning)
+		}
+	}
+}
+
+func TestPhase4_MAVEN_Enabled_FindingTriggersHumanReview(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MAVEN", []string{string(schema.EvidenceDiffRiskReport), string(schema.EvidenceStaticAnalysis)}, false)
+	result, err := phase4Verifier(env, config.AdvancedConfig{Enabled: true, Maven: true}, nil, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if result.RecommendedAction != schema.ActionHumanReview {
+		t.Fatalf("RecommendedAction = %s, want human_review", result.RecommendedAction)
+	}
+	if !containsPrefix(result.Warnings, "[maven]") {
+		t.Fatalf("warnings = %#v, want [maven] finding", result.Warnings)
+	}
+}
+
+func TestPhase4_Mutation_Enabled_SurvivorCreatesTestGapClaim(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MUT-SURVIVOR", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	result, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Mutation: true, MutationCommand: "mutation-fail",
+	}, map[string]int{"mutation-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertPhase4EvidenceType(t, env, s.obligationID, schema.EvidenceMutationResult)
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 1)
+	_ = result
+}
+
+func TestPhase4_Mutation_Enabled_CleanRun_NoTestGapClaim(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "MUT-CLEAN", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	if _, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Mutation: true, MutationCommand: "mutation-pass",
+	}, map[string]int{"mutation-pass": 0}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	ev := assertPhase4EvidenceType(t, env, s.obligationID, schema.EvidenceMutationResult)
+	if !strings.Contains(ev.Summary, "no survivors") {
+		t.Fatalf("mutation summary = %q, want zero-survivor summary", ev.Summary)
+	}
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 0)
+}
+
+func TestPhase4_Adversarial_Enabled_FailureCreatesTestGapClaim(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "ADV-FAIL", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	if _, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, AdversarialTests: true, AdversarialCommand: "adversarial-fail",
+	}, map[string]int{"adversarial-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertPhase4EvidenceSource(t, env, s.obligationID, "adversarial gate")
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 1)
+}
+
+func TestPhase4_Replay_NewArtifactsReconstructFromEventLog(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "REPLAY", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	if _, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Maven: true, Mutation: true, MutationCommand: "mutation-fail",
+	}, map[string]int{"mutation-fail": 1}, false).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if _, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(env.ctx, s.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	preEvCount := len(mustReadAllEvents(t, env))
+	wipeArtifactFiles(t, env)
+	if err := store.Replay(env.ctx, env.log, env.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if got := len(mustReadAllEvents(t, env)); got != preEvCount {
+		t.Fatalf("event count changed during replay: got %d want %d", got, preEvCount)
+	}
+	assertPhase4EvidenceType(t, env, s.obligationID, schema.EvidenceMutationResult)
+	assertPhase4TestGapClaims(t, env, s.capsuleID, 1)
+	records, err := env.st.LoadBudgetForGoal(env.ctx, s.goalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	var summary *schema.BudgetRecord
+	for _, record := range records {
+		if record.BudgetID == "BUD-"+s.capsuleID {
+			summary = record
+		}
+	}
+	if summary == nil || summary.ToolCalls < 2 {
+		t.Fatalf("summary budget after replay = %+v, want advanced tool call counted", summary)
+	}
+}
+
+func TestPhase4_NoLearning_AdvancedChecksCanStillRun(t *testing.T) {
+	env := newIntegEnv(t)
+	s := buildPhase4Scenario(t, env, "NOLEARN", []string{string(schema.EvidenceTestResult)}, true)
+	savePhase4TestEvidence(t, env, s)
+	if _, err := phase4Verifier(env, config.AdvancedConfig{
+		Enabled: true, Mutation: true, MutationCommand: "mutation-pass",
+	}, map[string]int{"mutation-pass": 0}, true).Verify(env.ctx, s.patchID, verifier.VerifyInput{SupplementalEvidenceIDs: []string{s.evidenceID}}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	assertPhase4EvidenceType(t, env, s.obligationID, schema.EvidenceMutationResult)
+	evidence, err := env.st.LoadEvidenceForObligation(env.ctx, s.obligationID)
+	if err != nil {
+		t.Fatalf("LoadEvidenceForObligation: %v", err)
+	}
+	for _, ev := range evidence {
+		if ev.ReusedFromID != "" {
+			t.Fatalf("NoLearning=true evidence %s has ReusedFromID=%q", ev.EvidenceID, ev.ReusedFromID)
+		}
+	}
+}
+
+func assertPhase4EvidenceType(t *testing.T, env *integEnv, obligationID string, evidenceType schema.EvidenceType) *schema.EvidenceArtifact {
+	t.Helper()
+	evidence, err := env.st.LoadEvidenceForObligation(env.ctx, obligationID)
+	if err != nil {
+		t.Fatalf("LoadEvidenceForObligation: %v", err)
+	}
+	for _, ev := range evidence {
+		if ev.Type == evidenceType {
+			return ev
+		}
+	}
+	t.Fatalf("missing evidence type %s in %#v", evidenceType, evidence)
+	return nil
+}
+
+func assertPhase4EvidenceSource(t *testing.T, env *integEnv, obligationID, source string) {
+	t.Helper()
+	evidence, err := env.st.LoadEvidenceForObligation(env.ctx, obligationID)
+	if err != nil {
+		t.Fatalf("LoadEvidenceForObligation: %v", err)
+	}
+	for _, ev := range evidence {
+		if ev.Source == source {
+			return
+		}
+	}
+	t.Fatalf("missing evidence source %q in %#v", source, evidence)
+}
+
+func assertPhase4TestGapClaims(t *testing.T, env *integEnv, capsuleID string, want int) {
+	t.Helper()
+	claims, err := env.st.LoadClaimsForCapsule(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadClaimsForCapsule: %v", err)
+	}
+	var got int
+	for _, claim := range claims {
+		if claim.ClaimType == schema.ClaimTestGap && claim.Status == schema.ClaimProposed {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("test-gap claims = %d, want %d; claims=%#v", got, want, claims)
+	}
+}
+
+func containsPrefix(values []string, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func mustMarshal(t *testing.T, v any) []byte {

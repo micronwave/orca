@@ -73,9 +73,10 @@ type PreExecutionRisk struct {
 
 // EvidencePlan describes what the verifier will check after the capsule completes.
 type EvidencePlan struct {
-	VerifierGates []string `json:"verifier_gates"`
-	TestsToRun    []string `json:"tests_to_run"`
-	StaticChecks  []string `json:"static_checks"`
+	VerifierGates  []string `json:"verifier_gates"`
+	TestsToRun     []string `json:"tests_to_run"`
+	StaticChecks   []string `json:"static_checks"`
+	AdvancedChecks []string `json:"advanced_checks,omitempty"`
 }
 
 // ProjectionBudget is the token and time budget declared in a human summary projection.

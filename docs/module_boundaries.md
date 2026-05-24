@@ -252,7 +252,7 @@ but it does not create new evidence by running agents.
 |---|---|
 | **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule` / `LoadClaimsForGoal` / `LoadClaimsByStatus`, `StateSnapshot` via `LoadLatestSnapshot` / `LoadSnapshot`, `BudgetRecords` via `LoadBudgetForGoal` |
 | **Reads (log)** | goal events via `ReadForGoal` during `FreshnessCheck` and explicit decision invalidation processing |
-| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; `TopologyOutcomeRecord` via `SaveTopologyOutcome` (skipped when `NoLearning` is true) |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, `ClaimArtifacts` via `SaveClaim` only for verifier advanced-check test-gap findings, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; `TopologyOutcomeRecord` via `SaveTopologyOutcome` (skipped when `NoLearning` is true) |
 | **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
@@ -266,6 +266,11 @@ symbol overlap alone does not imply a claim dispute without explicit structured
 `Contradicts` or `Invalidates` edges. `FreshnessCheck(ctx, goalID)` marks claims
 stale when their validation snapshot is older than the latest snapshot and
 accepted patches since validation touched their affected files.
+
+Advanced verifier checks may report test-gap candidates in `VerifierResult.Warnings`.
+The verifier must not write claim artifacts directly; the reconciler owns the
+narrow conversion from mutation/adversarial test-gap warnings into proposed
+`ClaimArtifact`s so replay and budget updates stay in the reconciliation boundary.
 
 ---
 

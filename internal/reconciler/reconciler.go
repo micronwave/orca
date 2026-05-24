@@ -20,6 +20,8 @@
 //	                  Patch status via UpdatePatchStatus,
 //	                  Claim status via UpdateClaimStatus (proposed → verified for
 //	                    claims whose evidence_ids all resolve to store artifacts),
+//	                  ClaimArtifacts via SaveClaim for verifier advanced-check
+//	                    test-gap findings only,
 //	                  new Obligations via SaveObligation (follow-ups from failures),
 //	                  DecisionRecords via SaveDecision,
 //	                  BudgetRecords via SaveBudgetRecord (on first reconcile for
@@ -39,7 +41,7 @@
 //	                  internal/budget, internal/gate
 //	Must NOT call:    store.SaveGoal, store.UpdateGoalStatus,
 //	                  store.SaveCapsule, store.UpdateCapsuleState,
-//	                  store.SaveEvidence, store.SaveClaim,
+//	                  store.SaveEvidence,
 //	                  store.SaveVerifierResult,
 //	                  store.SaveProjection, store.SaveHumanSummaryProjection,
 //	                  store.SaveFailure
@@ -64,7 +66,6 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
-
 
 // Config configures the Reconciler.
 type Config struct {
@@ -324,6 +325,9 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		if err := s.invalidateStaleClaims(ctx, goal.GoalID, patch); err != nil {
 			return ReconcileResult{}, err
 		}
+	}
+	if err := s.createAdvancedTestGapClaims(ctx, patch, vr); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	if !result.PatchAccepted {
@@ -957,6 +961,8 @@ func (s *Reconciler) saveBudgetRecords(
 	if err != nil {
 		return err
 	}
+	advancedToolCalls := advancedGateToolCalls(vr.Warnings)
+	metrics.toolCalls += advancedToolCalls
 	// The patch carries the authoritative token count set by the adapter at
 	// execution time. budgetMetricsForResult has no source for tokens, so we
 	// override here rather than threading it through evidence-based metrics.
@@ -1035,6 +1041,7 @@ func (s *Reconciler) saveBudgetRecords(
 		if err != nil {
 			return err
 		}
+		obligationMetrics.toolCalls += advancedToolCalls
 		obligationMetrics.tokensSpent = tokenShareByObligation[verdict.ObligationID]
 		obligationMetrics.wallTimeSeconds = wallTimeShareByObligation[verdict.ObligationID]
 		recordID := "BUD-" + patch.CapsuleID + "-" + verdict.ObligationID
@@ -1075,6 +1082,74 @@ func (s *Reconciler) saveBudgetRecords(
 		}
 	}
 	return nil
+}
+
+func (s *Reconciler) createAdvancedTestGapClaims(ctx context.Context, patch *schema.PatchArtifact, vr *schema.VerifierResult) error {
+	if patch == nil || vr == nil {
+		return fmt.Errorf("reconciler: patch and verifier result are required for advanced test-gap claims")
+	}
+	warnings := advancedTestGapWarnings(vr.Warnings)
+	if len(warnings) == 0 {
+		return nil
+	}
+	existing, err := s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		return fmt.Errorf("reconciler: load claims for capsule %s: %w", patch.CapsuleID, err)
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, claim := range existing {
+		seen[claim.SourceCapsuleID+"\x00"+claim.Text] = true
+	}
+	for _, warning := range warnings {
+		text := strings.TrimSpace(warning)
+		key := patch.CapsuleID + "\x00" + text
+		if seen[key] {
+			continue
+		}
+		claim := &schema.ClaimArtifact{
+			ClaimID:         advancedTestGapClaimID(patch.CapsuleID, text),
+			Text:            text,
+			ClaimType:       schema.ClaimTestGap,
+			SourceCapsuleID: patch.CapsuleID,
+			AffectedFiles:   append([]string(nil), patch.ChangedFiles...),
+			Status:          schema.ClaimProposed,
+		}
+		if err := s.store.SaveClaim(ctx, claim); err != nil {
+			return fmt.Errorf("reconciler: save advanced test-gap claim %s: %w", claim.ClaimID, err)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func advancedTestGapWarnings(warnings []string) []string {
+	var out []string
+	for _, warning := range warnings {
+		trimmed := strings.TrimSpace(warning)
+		if strings.HasPrefix(trimmed, "[mutation] survivor found: test gap candidate") ||
+			strings.HasPrefix(trimmed, "[adversarial] challenge failed: test gap candidate") {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func advancedTestGapClaimID(capsuleID, warning string) string {
+	sum := sha256.Sum256([]byte(capsuleID + "\x00" + warning))
+	return "CL-ADV-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func advancedGateToolCalls(warnings []string) int {
+	distinct := make(map[string]bool, 2)
+	for _, warning := range warnings {
+		switch {
+		case strings.HasPrefix(warning, "[mutation]"):
+			distinct["mutation"] = true
+		case strings.HasPrefix(warning, "[adversarial]"):
+			distinct["adversarial"] = true
+		}
+	}
+	return len(distinct)
 }
 
 func countDischarged(statuses map[string]schema.ObligationStatus) int {

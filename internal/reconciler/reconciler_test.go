@@ -1153,6 +1153,103 @@ func TestReconcile_DistributesTokensWithoutOvercount(t *testing.T) {
 	}
 }
 
+func TestReconcile_AdvancedWarningsIncrementToolCallsAndCreateTestGapClaims(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "ADV-CLAIM",
+		evidenceIDs:  []string{"EV-ADV-CLAIM"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/foo.go"},
+		warnings: []string{
+			"[mutation] survivor found: test gap candidate for internal/foo.go",
+			"[mutation] survivor found: another finding for internal/foo.go",
+			"[adversarial] challenge failed: test gap candidate",
+		},
+	})
+
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	claims, err := env.st.LoadClaimsForCapsule(env.ctx, ids.capsuleID)
+	if err != nil {
+		t.Fatalf("LoadClaimsForCapsule: %v", err)
+	}
+	var testGapClaims int
+	for _, claim := range claims {
+		if claim.ClaimType != schema.ClaimTestGap {
+			continue
+		}
+		testGapClaims++
+		if claim.Status != schema.ClaimProposed {
+			t.Fatalf("test-gap claim status = %s, want proposed", claim.Status)
+		}
+		if len(claim.AffectedFiles) != 1 || claim.AffectedFiles[0] != "internal/foo.go" {
+			t.Fatalf("test-gap claim affected files = %#v", claim.AffectedFiles)
+		}
+	}
+	if testGapClaims != 2 {
+		t.Fatalf("test-gap claims = %d, want 2", testGapClaims)
+	}
+
+	records, err := env.st.LoadBudgetForGoal(env.ctx, ids.goalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	recordsByID := make(map[string]*schema.BudgetRecord, len(records))
+	for _, record := range records {
+		recordsByID[record.BudgetID] = record
+	}
+	summary := recordsByID["BUD-"+ids.capsuleID]
+	if summary == nil {
+		t.Fatalf("missing summary budget record")
+	}
+	if summary.ToolCalls != 3 {
+		t.Fatalf("summary ToolCalls = %d, want base evidence call + 2 advanced gates", summary.ToolCalls)
+	}
+	perObligation := recordsByID["BUD-"+ids.capsuleID+"-"+ids.obligationID]
+	if perObligation == nil {
+		t.Fatalf("missing per-obligation budget record")
+	}
+	if perObligation.ToolCalls != 3 {
+		t.Fatalf("per-obligation ToolCalls = %d, want base evidence call + 2 advanced gates", perObligation.ToolCalls)
+	}
+}
+
+func TestReconcile_AdvancedTestGapClaimsAreDeduplicated(t *testing.T) {
+	env := newTestEnv(t)
+	warning := "[mutation] survivor found: test gap candidate for internal/foo.go"
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "ADV-DEDUP",
+		evidenceIDs:  []string{"EV-ADV-DEDUP"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/foo.go"},
+		warnings:     []string{warning, warning},
+	})
+
+	rec := New(env.st, env.log, Config{})
+	if _, err := rec.Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile first: %v", err)
+	}
+	if _, err := rec.Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile second: %v", err)
+	}
+
+	claims, err := env.st.LoadClaimsForCapsule(env.ctx, ids.capsuleID)
+	if err != nil {
+		t.Fatalf("LoadClaimsForCapsule: %v", err)
+	}
+	var testGapClaims int
+	for _, claim := range claims {
+		if claim.ClaimType == schema.ClaimTestGap {
+			testGapClaims++
+		}
+	}
+	if testGapClaims != 1 {
+		t.Fatalf("test-gap claims after repeated reconcile = %d, want 1", testGapClaims)
+	}
+}
+
 type scenarioOptions struct {
 	suffix               string
 	evidenceIDs          []string
@@ -1160,6 +1257,7 @@ type scenarioOptions struct {
 	evidenceReusedFromID string
 	omitVerdict          bool
 	changedFiles         []string
+	warnings             []string
 	recommendedAction    schema.RecommendedAction
 	recommendation       string
 	verifierInvalidates  []string
@@ -1259,6 +1357,7 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		CapsuleID:               ids.capsuleID,
 		ObligationResults:       verdicts,
 		Invalidates:             opts.verifierInvalidates,
+		Warnings:                append([]string(nil), opts.warnings...),
 		RecommendedAction:       pickRecommendedAction(opts.recommendedAction),
 		RecommendationRationale: pickRecommendationRationale(opts.recommendation),
 		CreatedAt:               now,

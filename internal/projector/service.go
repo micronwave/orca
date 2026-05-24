@@ -18,15 +18,22 @@ import (
 // Compiler builds role-specific context projections from the artifact graph.
 // Human summaries remain separate from agent projections. orca.md §5.4.
 type Compiler struct {
-	store  *store.FileStore
-	config config.VerifierConfig
+	store    *store.FileStore
+	config   config.VerifierConfig
+	advanced config.AdvancedConfig
 }
 
 // New returns a projector Compiler.
 func New(st *store.FileStore, cfg config.VerifierConfig) *Compiler {
+	return NewWithConfig(st, cfg, config.AdvancedConfig{})
+}
+
+// NewWithConfig returns a projector Compiler with advanced verification config.
+func NewWithConfig(st *store.FileStore, cfg config.VerifierConfig, advanced config.AdvancedConfig) *Compiler {
 	return &Compiler{
-		store:  st,
-		config: cfg,
+		store:    st,
+		config:   cfg,
+		advanced: advanced,
 	}
 }
 
@@ -598,7 +605,24 @@ func (s *Compiler) buildEvidencePlan() schema.EvidencePlan {
 		}
 		plan.StaticChecks = append(plan.StaticChecks, gate.Command)
 	}
+	if s.advanced.Enabled {
+		checks := []string{
+			"Advanced verification: MAVEN=" + onOff(s.advanced.Maven) +
+				" Mutation=" + onOff(s.advanced.Mutation) +
+				" Adversarial=" + onOff(s.advanced.AdversarialTests),
+		}
+		if s.advanced.Maven || s.advanced.Mutation || s.advanced.AdversarialTests {
+			plan.AdvancedChecks = checks
+		}
+	}
 	return plan
+}
+
+func onOff(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
 }
 
 func (s *Compiler) loadCapsuleBundle(
@@ -792,4 +816,3 @@ func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) boo
 	}
 	return false
 }
-
