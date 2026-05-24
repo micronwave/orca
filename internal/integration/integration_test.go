@@ -36,11 +36,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/micronwave/orca/internal/budget"
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/failurehistory"
@@ -48,6 +50,7 @@ import (
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/reconciler"
+	"github.com/micronwave/orca/internal/runner"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/verifier"
@@ -2027,7 +2030,308 @@ func TestDeterministicStateReconstruction_Phase3(t *testing.T) {
 	assertPhase3Fields("after replay")
 }
 
+func TestPhase1To4RuntimeScenario_ReplayReconstructsDeterministically(t *testing.T) {
+	env := newIntegEnv(t)
+	ctx := env.ctx
+
+	goal, err := intent.New(env.st).Compile(ctx, "Refactor proof runtime wiring; only touch internal/proof")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(goal.GoalConditions) == 0 {
+		t.Fatal("Compile produced no goal conditions")
+	}
+	if _, err := verifier.New(env.st, config.VerifierConfig{}, nil).ProposeObligations(ctx, goal.GoalID); err != nil {
+		t.Fatalf("ProposeObligations: %v", err)
+	}
+
+	plan, err := planner.New(env.st, planner.Config{
+		OrcaDir:            env.root,
+		ApprovalPolicy:     "auto",
+		DefaultMaxTokens:   32000,
+		DefaultMaxWallTime: 300,
+		DefaultMaxRetries:  2,
+	}, env.st).Plan(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Topology != schema.TopologyImplementerReviewer {
+		t.Fatalf("Topology = %s, want %s for medium-risk review-worthy work", plan.Topology, schema.TopologyImplementerReviewer)
+	}
+	if len(plan.CapsuleIDs) != 2 {
+		t.Fatalf("CapsuleIDs = %v, want implementer and reviewer capsules", plan.CapsuleIDs)
+	}
+	if _, err := env.log.Append(ctx, schema.Event{
+		Type:       schema.EventTopologySelected,
+		GoalID:     goal.GoalID,
+		ArtifactID: plan.DecisionID,
+		Payload: mustMarshal(t, schema.TopologySelectedPayload{
+			Topology:   plan.Topology,
+			DecisionID: plan.DecisionID,
+		}),
+	}); err != nil {
+		t.Fatalf("append topology_selected: %v", err)
+	}
+	events := mustReadAllEvents(t, env)
+	lastTopologyEvent := events[len(events)-1]
+	if err := env.st.SaveSnapshot(ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-XPHASE-START",
+		GoalID:      goal.GoalID,
+		EventID:     lastTopologyEvent.EventID,
+		SequenceNum: lastTopologyEvent.SequenceNum,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot start: %v", err)
+	}
+
+	verifierGates := []config.VerifierGate{
+		{Name: "lint", Command: "git --version", Blocking: true},
+		{Name: "typecheck", Command: "git --version", Blocking: true},
+		{Name: "test", Command: "git --version", Blocking: true},
+	}
+	proj := projector.NewWithConfig(env.st, config.VerifierConfig{Gates: verifierGates}, config.AdvancedConfig{
+		Enabled: true, Maven: true, Mutation: true, AdversarialTests: true,
+	})
+	run := runner.New(env.st, env.log, env.root,
+		&integrationAdapter{agent: schema.AgentCodex},
+		&integrationAdapter{agent: schema.AgentClaude},
+	)
+
+	var patchID string
+	var supplementalEvidenceIDs []string
+	var supplementalClaimIDs []string
+	for _, capsuleID := range plan.CapsuleIDs {
+		capsule := mustLoadCapsule(t, env, capsuleID)
+		initIntegrationGitRepo(t, capsule.Sandbox.WorktreePath)
+		if _, err := proj.CompileHumanSummary(ctx, capsuleID); err != nil {
+			t.Fatalf("CompileHumanSummary(%s): %v", capsuleID, err)
+		}
+		var agentProjection *schema.ContextProjection
+		if capsule.Role == schema.RoleReviewer {
+			agentProjection, err = proj.CompileReviewer(ctx, capsuleID)
+		} else {
+			agentProjection, err = proj.CompileExecutor(ctx, capsuleID)
+		}
+		if err != nil {
+			t.Fatalf("CompileAgentProjection(%s): %v", capsuleID, err)
+		}
+		if err := env.st.UpdateCapsuleProjectionID(ctx, capsuleID, agentProjection.ContextProjectionID); err != nil {
+			t.Fatalf("UpdateCapsuleProjectionID(%s): %v", capsuleID, err)
+		}
+		result, err := run.Run(ctx, capsuleID)
+		if err != nil {
+			t.Fatalf("Run(%s): %v", capsuleID, err)
+		}
+		if capsule.Role == schema.RoleReviewer {
+			if result.PatchID != "" {
+				t.Fatalf("reviewer capsule produced patch %q; reviewer must produce evidence/claims only", result.PatchID)
+			}
+			supplementalEvidenceIDs = append(supplementalEvidenceIDs, result.EvidenceIDs...)
+			supplementalClaimIDs = append(supplementalClaimIDs, result.ClaimIDs...)
+			continue
+		}
+		patchID = result.PatchID
+	}
+	if patchID == "" {
+		t.Fatal("executor capsule produced no patch")
+	}
+	if len(supplementalEvidenceIDs) == 0 || len(supplementalClaimIDs) == 0 {
+		t.Fatalf("reviewer supplements evidence=%v claims=%v, want both", supplementalEvidenceIDs, supplementalClaimIDs)
+	}
+
+	verifyResult, err := verifier.NewWithConfig(env.st, verifier.Config{
+		Gates: verifierGates,
+		Advanced: config.AdvancedConfig{
+			Enabled: true, Maven: true,
+			Mutation: true, MutationCommand: "mutation-fail", MutationBlocking: false,
+			AdversarialTests: true, AdversarialCommand: "adversarial-pass", AdversarialBlocking: false,
+		},
+	}, phase4GateRunner{exitByCommand: map[string]int{
+		"git --version":    0,
+		"mutation-fail":    1,
+		"adversarial-pass": 0,
+	}}).Verify(ctx, patchID, verifier.VerifyInput{
+		SupplementalEvidenceIDs: supplementalEvidenceIDs,
+		SupplementalClaimIDs:    supplementalClaimIDs,
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if verifyResult.RecommendedAction != schema.ActionAccept {
+		t.Fatalf("RecommendedAction = %s, want accept; non-blocking advanced findings must not bypass reconciler acceptance", verifyResult.RecommendedAction)
+	}
+	if !containsPrefix(verifyResult.Warnings, "[maven]") || !containsPrefix(verifyResult.Warnings, "[mutation]") || !containsPrefix(verifyResult.Warnings, "[adversarial]") {
+		t.Fatalf("warnings = %#v, want MAVEN, mutation, and adversarial advanced findings/results", verifyResult.Warnings)
+	}
+
+	reconcileResult, err := reconciler.New(env.st, env.log, reconciler.Config{}).Reconcile(ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !reconcileResult.PatchAccepted || !reconcileResult.MergeReady || reconcileResult.HumanGateRequired {
+		t.Fatalf("ReconcileResult = %+v, want accepted merge-ready patch without human gate", reconcileResult)
+	}
+	patch := mustLoadPatch(t, env, patchID)
+	assertPhase4TestGapClaims(t, env, patch.CapsuleID, 1)
+
+	roi, err := budget.New(env.log).ComputeROI(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("ComputeROI: %v", err)
+	}
+	if roi.TotalTokensSpent == 0 || roi.VerifiedValuePer1KTokens == 0 {
+		t.Fatalf("ROI = %+v, want token spend and verified value", roi)
+	}
+	budgetRecords, err := env.st.LoadBudgetForGoal(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal: %v", err)
+	}
+	if len(budgetRecords) == 0 {
+		t.Fatal("no budget records saved")
+	}
+	outcomes, err := env.st.LoadTopologyOutcomesForGoal(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Topology != schema.TopologyImplementerReviewer || !outcomes[0].PatchAccepted {
+		t.Fatalf("topology outcomes = %+v, want accepted implementer_reviewer outcome", outcomes)
+	}
+	preEvents := mustReadAllEvents(t, env)
+
+	wipeArtifactFiles(t, env)
+	if err := store.Replay(ctx, env.log, env.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if got := len(mustReadAllEvents(t, env)); got != len(preEvents) {
+		t.Fatalf("event count after replay = %d, want %d", got, len(preEvents))
+	}
+	assertPatchStatus(t, env, patchID, schema.PatchAccepted)
+	if _, err := env.st.LoadVerifierResult(ctx, verifyResult.VerifierResultID); err != nil {
+		t.Fatalf("LoadVerifierResult after replay: %v", err)
+	}
+	if _, err := env.st.LoadDecision(ctx, plan.DecisionID); err != nil {
+		t.Fatalf("LoadDecision topology after replay: %v", err)
+	}
+	if _, err := env.st.LoadDecision(ctx, reconcileResult.DecisionID); err != nil {
+		t.Fatalf("LoadDecision reconcile after replay: %v", err)
+	}
+	replayedBudgets, err := env.st.LoadBudgetForGoal(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("LoadBudgetForGoal after replay: %v", err)
+	}
+	if len(replayedBudgets) != len(budgetRecords) {
+		t.Fatalf("budget records after replay = %d, want %d", len(replayedBudgets), len(budgetRecords))
+	}
+	replayedOutcomes, err := env.st.LoadTopologyOutcomesForGoal(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("LoadTopologyOutcomesForGoal after replay: %v", err)
+	}
+	if len(replayedOutcomes) != len(outcomes) || replayedOutcomes[0].OutcomeID != outcomes[0].OutcomeID {
+		t.Fatalf("topology outcomes after replay = %+v, want %+v", replayedOutcomes, outcomes)
+	}
+}
+
 // ── Phase 4 integration tests ────────────────────────────────────────────────
+
+type integrationAdapter struct {
+	agent schema.AgentType
+}
+
+func (a *integrationAdapter) AgentType() schema.AgentType { return a.agent }
+
+func (a *integrationAdapter) Preflight(context.Context, *schema.ExecutionCapsule) error {
+	return nil
+}
+
+func (a *integrationAdapter) Execute(_ context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+	if capsule.Role == schema.RoleReviewer {
+		if projection.Role != schema.ProjectionRoleReviewer {
+			return nil, fmt.Errorf("reviewer projection role = %s, want %s", projection.Role, schema.ProjectionRoleReviewer)
+		}
+		return &schema.AgentSidecarOutput{
+			ObligationsAddressed: capsule.ObligationIDs,
+			CommandsRun:          []string{"review proof-carrying patch"},
+			Claims: []schema.SidecarClaim{{
+				Claim: "reviewer found the candidate evidence coherent",
+				Type:  schema.SidecarClaimVerified,
+			}},
+			EvidencePaths:   []string{filepath.Join(filepath.Dir(capsule.Sandbox.WorktreePath), "review_evidence.log")},
+			Summary:         "review evidence only",
+			TokensUsed:      700,
+			WallTimeSeconds: 1.5,
+		}, nil
+	}
+	if projection.Role != schema.ProjectionRoleExecutor {
+		return nil, fmt.Errorf("executor projection role = %s, want %s", projection.Role, schema.ProjectionRoleExecutor)
+	}
+	target := filepath.Join(capsule.Sandbox.WorktreePath, "internal", "proof", "runtime.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(target, []byte("package proof\n\nfunc RuntimeReady() bool { return true }\n"), 0o644); err != nil {
+		return nil, err
+	}
+	if err := integrationRunGit(capsule.Sandbox.WorktreePath, "add", filepath.Join("internal", "proof", "runtime.go")); err != nil {
+		return nil, err
+	}
+	return &schema.AgentSidecarOutput{
+		ObligationsAddressed: capsule.ObligationIDs,
+		FilesChanged:         []string{filepath.Join("internal", "proof", "runtime.go")},
+		CommandsRun:          []string{"go test ./...", "go vet ./...", "go build ./..."},
+		Claims: []schema.SidecarClaim{{
+			Claim: "proof runtime wiring remains deterministic",
+			Type:  schema.SidecarClaimVerified,
+		}},
+		EvidencePaths:   []string{filepath.Join(filepath.Dir(capsule.Sandbox.WorktreePath), "executor_evidence.log")},
+		Summary:         "implemented deterministic proof runtime wiring",
+		TokensUsed:      2400,
+		WallTimeSeconds: 3.25,
+	}, nil
+}
+
+func (a *integrationAdapter) ExtractFromTranscript(context.Context, *schema.ExecutionCapsule, string) (*schema.AgentSidecarOutput, error) {
+	return nil, runner.ErrNoSidecar
+}
+
+var _ runner.Adapter = (*integrationAdapter)(nil)
+
+func initIntegrationGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll repo: %v", err)
+	}
+	if err := integrationRunGit("", "init", dir); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := integrationRunGit(dir, "config", "user.email", "integration-tests@example.com"); err != nil {
+		t.Fatalf("git config email: %v", err)
+	}
+	if err := integrationRunGit(dir, "config", "user.name", "Integration Tests"); err != nil {
+		t.Fatalf("git config name: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.txt"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile README: %v", err)
+	}
+	if err := integrationRunGit(dir, "add", "README.txt"); err != nil {
+		t.Fatalf("git add README: %v", err)
+	}
+	if err := integrationRunGit(dir, "commit", "-m", "init"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+}
+
+func integrationRunGit(dir string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %v failed: %w: %s", args, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 type phase4GateRunner struct {
 	exitByCommand map[string]int
