@@ -2743,6 +2743,235 @@ func TestConcurrentSaves(t *testing.T) {
 	}
 }
 
+// ── PR Records ────────────────────────────────────────────────────────────────
+
+func TestPRRecord_SaveLoad(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	pr := &schema.PRRecord{
+		PRID:       "PR-1",
+		GoalID:     "G-1",
+		PatchID:    "PATCH-1",
+		PRURL:      "https://github.com/org/repo/pull/42",
+		BaseBranch: "main",
+		HeadBranch: "orca/feat-x",
+		Draft:      true,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := e.st.SavePRRecord(e.ctx, "G-1", pr); err != nil {
+		t.Fatalf("SavePRRecord: %v", err)
+	}
+	got, err := e.st.LoadPRRecord(e.ctx, "G-1", "PR-1")
+	if err != nil {
+		t.Fatalf("LoadPRRecord: %v", err)
+	}
+	if got.PRID != "PR-1" || got.PatchID != "PATCH-1" || got.BaseBranch != "main" || !got.Draft {
+		t.Errorf("PR record mismatch: %+v", got)
+	}
+}
+
+func TestPRRecord_SaveEmitsEvent(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SavePRRecord(e.ctx, "G-1", &schema.PRRecord{
+		PRID: "PR-1", GoalID: "G-1", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePRRecord: %v", err)
+	}
+	if n := e.countEvents(t, schema.EventPRCreated); n != 1 {
+		t.Errorf("expected 1 pr_created event, got %d", n)
+	}
+	events, _ := e.log.ReadByType(e.ctx, schema.EventPRCreated, 0, 0)
+	if len(events) == 0 || events[0].GoalID != "G-1" || events[0].ArtifactID != "PR-1" {
+		t.Errorf("pr_created event missing GoalID or ArtifactID: %+v", events)
+	}
+}
+
+func TestPRRecord_SaveRejectsUnknownGoal(t *testing.T) {
+	e := newEnv(t)
+	err := e.st.SavePRRecord(e.ctx, "G-404", &schema.PRRecord{
+		PRID: "PR-1", GoalID: "G-404", CreatedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SavePRRecord accepted unknown goal, want error")
+	}
+}
+
+func TestPRRecord_SaveRejectsDuplicate(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	pr := &schema.PRRecord{PRID: "PR-1", GoalID: "G-1", CreatedAt: time.Now().UTC()}
+	if err := e.st.SavePRRecord(e.ctx, "G-1", pr); err != nil {
+		t.Fatalf("first SavePRRecord: %v", err)
+	}
+	if err := e.st.SavePRRecord(e.ctx, "G-1", pr); err == nil {
+		t.Fatal("second SavePRRecord did not reject duplicate ID")
+	}
+}
+
+func TestPRRecord_SaveRejectsGoalMismatchAndLoadFiltersByGoal(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
+
+	if err := e.st.SavePRRecord(e.ctx, "G-1", &schema.PRRecord{
+		PRID: "PR-mismatch", GoalID: "G-2", CreatedAt: time.Now().UTC(),
+	}); err == nil {
+		t.Fatal("SavePRRecord accepted a record whose GoalID differs from the goalID argument")
+	}
+	if err := e.st.SavePRRecord(e.ctx, "G-1", &schema.PRRecord{
+		PRID: "PR-1", GoalID: "G-1", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePRRecord: %v", err)
+	}
+	if _, err := e.st.LoadPRRecord(e.ctx, "G-2", "PR-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("LoadPRRecord with wrong goal err = %v, want ErrNotFound", err)
+	}
+}
+
+// ── CI Status Records ─────────────────────────────────────────────────────────
+
+func TestCIStatusRecord_SaveEmitsEvent(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SaveCIStatusRecord(e.ctx, "G-1", &schema.CIStatusRecord{
+		RecordID: "CI-1", GoalID: "G-1", Provider: "github",
+		Branch: "feat/x", Status: "success", RecordedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveCIStatusRecord: %v", err)
+	}
+	if n := e.countEvents(t, schema.EventCIStatusReceived); n != 1 {
+		t.Errorf("expected 1 ci_status_received event, got %d", n)
+	}
+	events, _ := e.log.ReadByType(e.ctx, schema.EventCIStatusReceived, 0, 0)
+	if len(events) == 0 || events[0].GoalID != "G-1" || events[0].ArtifactID != "CI-1" {
+		t.Errorf("ci_status_received event missing fields: %+v", events)
+	}
+}
+
+func TestCIStatusRecord_SaveRejectsUnknownGoal(t *testing.T) {
+	e := newEnv(t)
+	err := e.st.SaveCIStatusRecord(e.ctx, "G-404", &schema.CIStatusRecord{
+		RecordID: "CI-1", GoalID: "G-404", RecordedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveCIStatusRecord accepted unknown goal, want error")
+	}
+}
+
+func TestCIStatusRecord_SaveRejectsGoalMismatch(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
+	err := e.st.SaveCIStatusRecord(e.ctx, "G-1", &schema.CIStatusRecord{
+		RecordID: "CI-1", GoalID: "G-2", RecordedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveCIStatusRecord accepted a record whose GoalID differs from the goalID argument")
+	}
+}
+
+// ── Intake Records ────────────────────────────────────────────────────────────
+
+func TestIntakeRecord_SaveEmitsEvent(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SaveIntakeRecord(e.ctx, "G-1", &schema.IntakeRecord{
+		RecordID: "INT-1", GoalID: "G-1", Source: "github",
+		ExternalID: "issue-42", ExternalURL: "https://github.com/org/repo/issues/42",
+		IngestedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveIntakeRecord: %v", err)
+	}
+	if n := e.countEvents(t, schema.EventIntakeIssueIngested); n != 1 {
+		t.Errorf("expected 1 intake_issue_ingested event, got %d", n)
+	}
+	events, _ := e.log.ReadByType(e.ctx, schema.EventIntakeIssueIngested, 0, 0)
+	if len(events) == 0 || events[0].GoalID != "G-1" || events[0].ArtifactID != "INT-1" {
+		t.Errorf("intake_issue_ingested event missing fields: %+v", events)
+	}
+}
+
+func TestIntakeRecord_SaveRejectsUnknownGoal(t *testing.T) {
+	e := newEnv(t)
+	err := e.st.SaveIntakeRecord(e.ctx, "G-404", &schema.IntakeRecord{
+		RecordID: "INT-1", GoalID: "G-404", IngestedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveIntakeRecord accepted unknown goal, want error")
+	}
+}
+
+func TestIntakeRecord_SaveRejectsGoalMismatch(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedCompletedGoal(t, "G-2", "GC-2")
+	err := e.st.SaveIntakeRecord(e.ctx, "G-1", &schema.IntakeRecord{
+		RecordID: "INT-1", GoalID: "G-2", IngestedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveIntakeRecord accepted a record whose GoalID differs from the goalID argument")
+	}
+}
+
+// ── External Records Replay ───────────────────────────────────────────────────
+
+func TestExternalRecords_ReplayReconstructsArtifacts(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+
+	if err := e.st.SavePRRecord(e.ctx, "G-1", &schema.PRRecord{
+		PRID: "PR-1", GoalID: "G-1", PatchID: "PATCH-1",
+		BaseBranch: "main", Draft: true, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePRRecord: %v", err)
+	}
+	if err := e.st.SaveCIStatusRecord(e.ctx, "G-1", &schema.CIStatusRecord{
+		RecordID: "CI-1", GoalID: "G-1", Provider: "github",
+		Status: "pending", RecordedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveCIStatusRecord: %v", err)
+	}
+	if err := e.st.SaveIntakeRecord(e.ctx, "G-1", &schema.IntakeRecord{
+		RecordID: "INT-1", GoalID: "G-1", Source: "github",
+		ExternalID: "99", IngestedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveIntakeRecord: %v", err)
+	}
+
+	wipeArtifacts(t, e)
+
+	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	pr, err := e.st.LoadPRRecord(e.ctx, "G-1", "PR-1")
+	if err != nil {
+		t.Fatalf("LoadPRRecord after replay: %v", err)
+	}
+	if pr.PatchID != "PATCH-1" || !pr.Draft {
+		t.Errorf("replayed PRRecord = %+v", pr)
+	}
+
+	// CI and Intake records are reconstructed into their directories; read directly.
+	ciPath := filepath.Join(e.root, "artifacts", "ci_status", "CI-1.json")
+	ci, err := readJSONFile[schema.CIStatusRecord](ciPath)
+	if err != nil {
+		t.Fatalf("read replayed CIStatusRecord: %v", err)
+	}
+	if ci.GoalID != "G-1" || ci.Provider != "github" || ci.Status != "pending" {
+		t.Errorf("replayed CIStatusRecord = %+v", ci)
+	}
+	intakePath := filepath.Join(e.root, "artifacts", "intake", "INT-1.json")
+	intake, err := readJSONFile[schema.IntakeRecord](intakePath)
+	if err != nil {
+		t.Fatalf("read replayed IntakeRecord: %v", err)
+	}
+	if intake.GoalID != "G-1" || intake.Source != "github" || intake.ExternalID != "99" {
+		t.Errorf("replayed IntakeRecord = %+v", intake)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func wipeArtifacts(t *testing.T, e *testEnv) {
@@ -2755,6 +2984,18 @@ func wipeArtifacts(t *testing.T, e *testEnv) {
 			t.Fatalf("MkdirAll %s: %v", p, err)
 		}
 	}
+}
+
+func readJSONFile[T any](path string) (*T, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out T
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func claimIDs(cs []*schema.ClaimArtifact) []string {

@@ -210,6 +210,36 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.writeFile(s.artifactPath(dirTopologyOutcomes, v.OutcomeID), &v)
 
+	case schema.EventPRCreated:
+		var v schema.PRRecord
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal PRRecord: %w", err)
+		}
+		if err := validateArtifactID("pr", v.PRID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirPRs, v.PRID), &v)
+
+	case schema.EventCIStatusReceived:
+		var v schema.CIStatusRecord
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal CIStatusRecord: %w", err)
+		}
+		if err := validateArtifactID("ci status", v.RecordID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirCIStatus, v.RecordID), &v)
+
+	case schema.EventIntakeIssueIngested:
+		var v schema.IntakeRecord
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal IntakeRecord: %w", err)
+		}
+		if err := validateArtifactID("intake", v.RecordID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirIntake, v.RecordID), &v)
+
 	// ── state transitions: update existing files ─────────────────────────────
 
 	case schema.EventGoalStatusUpdated:
@@ -412,6 +442,7 @@ func ReplayDir(root string) []string {
 		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
 		dirPatches, dirEvidence, dirClaims, dirBudgets,
 		dirFailures, dirDecisions, dirVerifierResults, dirTopologyOutcomes,
+		dirPRs, dirCIStatus, dirIntake,
 	}
 	out := make([]string, len(dirs))
 	for i, d := range dirs {

@@ -59,6 +59,9 @@ const (
 	dirBudgets          = "artifacts/budgets"
 	dirVerifierResults  = "artifacts/verifier_results"
 	dirTopologyOutcomes = "artifacts/topology_outcomes"
+	dirPRs              = "artifacts/prs"
+	dirCIStatus         = "artifacts/ci_status"
+	dirIntake           = "artifacts/intake"
 )
 
 // FileStore is the file-backed JSON implementation of ArtifactStore.
@@ -89,6 +92,7 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 		dirPatches, dirEvidence, dirClaims,
 		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
 		dirFailures, dirDecisions, dirBudgets, dirVerifierResults, dirTopologyOutcomes,
+		dirPRs, dirCIStatus, dirIntake,
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
