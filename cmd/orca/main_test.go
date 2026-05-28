@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -805,4 +806,83 @@ func readAllEvents(t *testing.T, orcaDir string) []schema.Event {
 		t.Fatalf("read events: %v", err)
 	}
 	return events
+}
+
+func writeMCPConfig(t *testing.T, path string, mcpEnabled bool, mcpAddr string) {
+	t.Helper()
+	cfg := `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+      blocking: true
+  working_dir: ""
+gate:
+  review_window_seconds: 30
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+  default_max_retries: 3
+adapters:
+  codex_path: ""
+  claude_path: ""
+`
+	if mcpEnabled {
+		cfg += "mcp:\n  enabled: true\n  listen: \"" + mcpAddr + "\"\n"
+	} else {
+		cfg += "mcp:\n  enabled: false\n"
+	}
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write mcp config: %v", err)
+	}
+}
+
+func TestOpenRuntime_MCPEnabled_Binds(t *testing.T) {
+	orcaDir := t.TempDir()
+
+	// Pick an available port before init so we know it's free.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+
+	if err := run([]string{"init", "--orca-dir", orcaDir}); err != nil {
+		t.Fatalf("orca init: %v", err)
+	}
+	writeMCPConfig(t, filepath.Join(orcaDir, "config.yaml"), true, addr)
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime with MCP enabled: %v", err)
+	}
+	defer closeFn()
+	_ = rt
+}
+
+func TestOpenRuntime_MCPEnabled_BindFailure_Propagates(t *testing.T) {
+	orcaDir := t.TempDir()
+
+	// Pre-bind the port so openRuntime's net.Listen will fail.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pre-bind: %v", err)
+	}
+	defer blocker.Close()
+	addr := blocker.Addr().String()
+
+	if err := run([]string{"init", "--orca-dir", orcaDir}); err != nil {
+		t.Fatalf("orca init: %v", err)
+	}
+	writeMCPConfig(t, filepath.Join(orcaDir, "config.yaml"), true, addr)
+
+	_, closeFn, err := openRuntime(orcaDir, false)
+	if err == nil {
+		closeFn()
+		t.Fatal("expected error from openRuntime when MCP port already in use, got nil")
+	}
+	if !strings.Contains(err.Error(), "mcp server") {
+		t.Errorf("error %q does not mention mcp server", err)
+	}
 }
