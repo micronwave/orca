@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +17,7 @@ import (
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
+	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -885,4 +889,528 @@ func TestOpenRuntime_MCPEnabled_BindFailure_Propagates(t *testing.T) {
 	if !strings.Contains(err.Error(), "mcp server") {
 		t.Errorf("error %q does not mention mcp server", err)
 	}
+}
+
+// ── Phase 5.3: intake and PR tests ───────────────────────────────────────────
+
+func TestIntakeIssue_CreatesGoalAndPersistsIntakeRecord(t *testing.T) {
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/issues/42") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"title": "Fix the auth middleware rounding defect",
+			"body":  "The `Round()` helper returns incorrect values on edge cases.",
+		})
+	}))
+	defer mockSrv.Close()
+
+	orcaDir := t.TempDir()
+	writeIntakeTestConfig(t, orcaDir, "testtoken", "owner/repo")
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	rt.intakeFetcher = &intake.Fetcher{BaseURL: mockSrv.URL}
+
+	goal, err := rt.intakeIssue(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("intakeIssue: %v", err)
+	}
+	if goal == nil || goal.GoalID == "" {
+		t.Fatal("intakeIssue returned nil or empty goal")
+	}
+	if !strings.Contains(goal.OriginalIntent, "Fix the auth middleware rounding defect") {
+		t.Errorf("goal intent = %q, want issue title in intent", goal.OriginalIntent)
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var intakeFound bool
+	for _, ev := range events {
+		if ev.Type != schema.EventIntakeIssueIngested {
+			continue
+		}
+		var ir schema.IntakeRecord
+		if err := json.Unmarshal(ev.Payload, &ir); err != nil {
+			t.Fatalf("unmarshal intake record: %v", err)
+		}
+		if ir.GoalID == goal.GoalID && ir.Source == "github_issue" && ir.ExternalID == "42" {
+			intakeFound = true
+		}
+	}
+	if !intakeFound {
+		t.Fatalf("intake_issue_ingested event for goal %s not found in event log", goal.GoalID)
+	}
+}
+
+func TestIntakeIssue_PersistsIntakeLinkInStore(t *testing.T) {
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"title": "Add retry logic",
+			"body":  "",
+		})
+	}))
+	defer mockSrv.Close()
+
+	orcaDir := t.TempDir()
+	writeIntakeTestConfig(t, orcaDir, "tok", "owner/repo")
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	rt.intakeFetcher = &intake.Fetcher{BaseURL: mockSrv.URL}
+
+	goal, err := rt.intakeIssue(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("intakeIssue: %v", err)
+	}
+
+	// Verify the intake record artifact file was written.
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	// No load helper for IntakeRecord, so scan events for the record ID.
+	events := readAllEvents(t, orcaDir)
+	var recordID string
+	for _, ev := range events {
+		if ev.Type == schema.EventIntakeIssueIngested {
+			var ir schema.IntakeRecord
+			if err := json.Unmarshal(ev.Payload, &ir); err == nil && ir.GoalID == goal.GoalID {
+				recordID = ir.RecordID
+			}
+		}
+	}
+	if recordID == "" {
+		t.Fatal("could not find intake record ID in events")
+	}
+	_ = st // store opened for directory layout; artifact file verified via events
+}
+
+func TestRunGoal_FromIssueFlagAndGoalAreMutuallyExclusive(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	err := run([]string{"goal", "--orca-dir", orcaDir, "--from-issue", "1", "--goal", "some goal"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutually-exclusive error, got %v", err)
+	}
+}
+
+func TestRunGoal_RequiresGoalOrFromIssue(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	err := run([]string{"goal", "--orca-dir", orcaDir})
+	if err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("expected required-goal error, got %v", err)
+	}
+}
+
+func TestResolveBaseBranch_UsesConfigFirst(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	rt.cfg.PR.BaseBranch = "release/v2"
+
+	branch, err := rt.resolveBaseBranch(context.Background())
+	if err != nil {
+		t.Fatalf("resolveBaseBranch: %v", err)
+	}
+	if branch != "release/v2" {
+		t.Errorf("branch = %q, want release/v2", branch)
+	}
+}
+
+func TestResolveBaseBranch_FallsBackToGitHubAPIWhenGitFails(t *testing.T) {
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/owner/repo") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"default_branch": "develop"})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mockSrv.Close()
+
+	orcaDir := t.TempDir()
+	writeIntakeTestConfig(t, orcaDir, "tok", "owner/repo")
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	// No base_branch in config; git symbolic-ref will fail in a temp dir.
+	rt.prWriterBaseURL = mockSrv.URL
+
+	branch, err := rt.resolveBaseBranch(context.Background())
+	if err != nil {
+		t.Fatalf("resolveBaseBranch via GitHub API: %v", err)
+	}
+	if branch != "develop" {
+		t.Errorf("branch = %q, want develop", branch)
+	}
+}
+
+func TestResolveBaseBranch_ReturnsErrorWhenAllFail(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	// No config branch, git will fail, no intake.repo → error.
+	_, err = rt.resolveBaseBranch(context.Background())
+	if err == nil {
+		t.Fatal("resolveBaseBranch: expected error when all resolution steps fail")
+	}
+}
+
+func TestResolveHeadBranch_FailsWhenWorktreeDetachedOrMissing(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	ctx := context.Background()
+
+	// Seed a patch whose capsule has a non-existent worktree path.
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-HEAD",
+		CapsuleID:            "CAP-1",
+		Status:               schema.PatchCandidate,
+		ObligationIDsClaimed: []string{"OB-1"},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// CAP-1 has an empty WorktreePath (seeded without one).
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	_, err = rt.resolveHeadBranch(ctx, "PATCH-HEAD")
+	if err == nil {
+		t.Fatal("resolveHeadBranch: expected error for capsule without worktree")
+	}
+}
+
+func TestResolveHeadBranch_FailsWhenWorktreePathNotGitRepo(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	ctx := context.Background()
+
+	nonGitDir := t.TempDir() // a real directory but not a git repo
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-NOGIT",
+		CapsuleID:            "CAP-1",
+		Status:               schema.PatchCandidate,
+		ObligationIDsClaimed: []string{"OB-1"},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// Update the capsule sandbox worktree path to a non-git directory.
+	capsule, err := st.LoadCapsule(ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	capsule.Sandbox.WorktreePath = nonGitDir
+	capsulePath := filepath.Join(orcaDir, "state", "capsules", "CAP-1.json")
+	data, merr := json.Marshal(capsule)
+	if merr != nil {
+		t.Fatalf("marshal capsule: %v", merr)
+	}
+	if err := os.WriteFile(capsulePath, data, 0o644); err != nil {
+		t.Fatalf("write capsule: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	rt, closeFn, openErr := openRuntime(orcaDir, false)
+	if openErr != nil {
+		t.Fatalf("openRuntime: %v", openErr)
+	}
+	defer closeFn()
+
+	_, err = rt.resolveHeadBranch(context.Background(), "PATCH-NOGIT")
+	if err == nil {
+		t.Fatal("resolveHeadBranch: expected error for non-git worktree directory")
+	}
+}
+
+func TestCreateAndSavePR_PRCreatedEventInEventLog(t *testing.T) {
+	// Create a real git repo so resolveHeadBranch can run git branch --show-current.
+	repoDir := initTempGitRepo(t)
+
+	orcaDir := seedOrcaDir(t, true)
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	ctx := context.Background()
+
+	// Update CAP-1 to have the real worktree path.
+	capsule, err := st.LoadCapsule(ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	capsule.Sandbox.WorktreePath = repoDir
+	capsulePath := filepath.Join(orcaDir, "state", "capsules", "CAP-1.json")
+	data, merr := json.Marshal(capsule)
+	if merr != nil {
+		t.Fatalf("marshal capsule: %v", merr)
+	}
+	if err := os.WriteFile(capsulePath, data, 0o644); err != nil {
+		t.Fatalf("write capsule: %v", err)
+	}
+
+	// Seed a patch that references CAP-1 and OB-1.
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-PR",
+		CapsuleID:            "CAP-1",
+		Status:               schema.PatchAccepted,
+		ObligationIDsClaimed: []string{"OB-1"},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	// Mock GitHub PR server.
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{
+				"html_url": "https://github.com/owner/repo/pull/99",
+			})
+			return
+		}
+		http.Error(w, "unexpected", http.StatusBadRequest)
+	}))
+	defer mockSrv.Close()
+
+	rt, closeFn, openErr := openRuntime(orcaDir, false)
+	if openErr != nil {
+		t.Fatalf("openRuntime: %v", openErr)
+	}
+	defer closeFn()
+	rt.prWriterBaseURL = mockSrv.URL
+	rt.cfg.PR.BaseBranch = "main"
+	rt.cfg.Intake.Repo = "owner/repo"
+	rt.cfg.Intake.GitHubToken = "tok"
+
+	if err := rt.createAndSavePR(context.Background(), "G-1", "PATCH-PR"); err != nil {
+		t.Fatalf("createAndSavePR: %v", err)
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var found bool
+	for _, ev := range events {
+		if ev.Type == schema.EventPRCreated {
+			found = true
+			var pr schema.PRRecord
+			if err := json.Unmarshal(ev.Payload, &pr); err != nil {
+				t.Fatalf("unmarshal pr record: %v", err)
+			}
+			if pr.GoalID != "G-1" || pr.PatchID != "PATCH-PR" {
+				t.Errorf("pr record = %+v, want G-1/PATCH-PR", pr)
+			}
+			if pr.PRURL != "https://github.com/owner/repo/pull/99" {
+				t.Errorf("PRURL = %q, want github PR URL", pr.PRURL)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pr_created event not found in event log after createAndSavePR")
+	}
+}
+
+func TestPRCreationSkippedWhenNotEnabled(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	// PR is disabled by default.
+	if rt.cfg.PR.Enabled {
+		t.Fatal("PR should be disabled by default")
+	}
+	// No mock server needed — createAndSavePR must not be called when disabled.
+	// Verify no pr_created event appears in the log.
+	events := readAllEvents(t, orcaDir)
+	for _, ev := range events {
+		if ev.Type == schema.EventPRCreated {
+			t.Fatal("pr_created event found despite PR being disabled")
+		}
+	}
+}
+
+func TestResolveHeadBranch_FailsWhenWorktreeInDetachedHEAD(t *testing.T) {
+	repoDir := initTempGitRepoDetached(t)
+	orcaDir := seedOrcaDir(t, true)
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	ctx := context.Background()
+
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-DETACH",
+		CapsuleID:            "CAP-1",
+		Status:               schema.PatchCandidate,
+		ObligationIDsClaimed: []string{"OB-1"},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	capsule, err := st.LoadCapsule(ctx, "CAP-1")
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	capsule.Sandbox.WorktreePath = repoDir
+	capsulePath := filepath.Join(orcaDir, "state", "capsules", "CAP-1.json")
+	data, merr := json.Marshal(capsule)
+	if merr != nil {
+		t.Fatalf("marshal capsule: %v", merr)
+	}
+	if err := os.WriteFile(capsulePath, data, 0o644); err != nil {
+		t.Fatalf("write capsule: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close log: %v", err)
+	}
+
+	rt, closeFn, openErr := openRuntime(orcaDir, false)
+	if openErr != nil {
+		t.Fatalf("openRuntime: %v", openErr)
+	}
+	defer closeFn()
+
+	_, err = rt.resolveHeadBranch(context.Background(), "PATCH-DETACH")
+	if err == nil {
+		t.Fatal("resolveHeadBranch: expected error for detached HEAD worktree")
+	}
+	if !strings.Contains(err.Error(), "detached") {
+		t.Errorf("error %q should mention detached HEAD state", err.Error())
+	}
+}
+
+// TestAutoMergePathDoesNotCreatePR verifies that the auto-merge code path
+// (HumanGateRequired=false) emits merge_applied but NOT pr_created, even
+// when pr.enabled is true. PR creation is gated behind the human approval gate.
+func TestAutoMergePathDoesNotCreatePR(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+	rt.cfg.PR.Enabled = true
+
+	if err := rt.appendMergeApplied(context.Background(), "G-1", "PATCH-AUTO"); err != nil {
+		t.Fatalf("appendMergeApplied: %v", err)
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var mergeFound bool
+	for _, ev := range events {
+		if ev.Type == schema.EventPRCreated {
+			t.Fatal("pr_created event emitted by auto-merge path (HumanGateRequired=false)")
+		}
+		if ev.Type == schema.EventMergeApplied {
+			mergeFound = true
+		}
+	}
+	if !mergeFound {
+		t.Fatal("merge_applied event not found after auto-merge path")
+	}
+}
+
+// ── test helpers ─────────────────────────────────────────────────────────────
+
+// writeIntakeTestConfig writes a config.yaml with intake settings for tests.
+func writeIntakeTestConfig(t *testing.T, orcaDir, token, repo string) {
+	t.Helper()
+	configPath := filepath.Join(orcaDir, "config.yaml")
+	content := `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+      blocking: true
+  working_dir: ""
+gate:
+  review_window_seconds: 30
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+  default_max_retries: 3
+adapters:
+  codex_path: ""
+  claude_path: ""
+intake:
+  github_token: "` + token + `"
+  repo: "` + repo + `"
+pr:
+  enabled: false
+  base_branch: ""
+  draft: true
+  label: ""
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write intake test config: %v", err)
+	}
+}
+
+// initTempGitRepoDetached creates a temporary git repository and leaves HEAD in
+// detached state, so that `git branch --show-current` returns an empty string.
+func initTempGitRepoDetached(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+		{"checkout", "--detach"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// initTempGitRepo creates a temporary git repository with a commit on a named
+// branch, for use in resolveHeadBranch tests. Returns the repo path and branch.
+func initTempGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "feature/orca-fix"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
 }

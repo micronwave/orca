@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,10 +21,12 @@ import (
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/idgen"
+	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/intent"
 	"github.com/micronwave/orca/internal/mcp"
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
+	"github.com/micronwave/orca/internal/prwriter"
 	"github.com/micronwave/orca/internal/reconciler"
 	"github.com/micronwave/orca/internal/runner"
 	"github.com/micronwave/orca/internal/runner/adapters/claude"
@@ -100,6 +103,7 @@ func runGoal(args []string) (err error) {
 	goalFlag := fs.String("goal", "", "user goal to execute")
 	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
 	noLearning := fs.Bool("no-learning", false, "disable adaptive reuse (learning layer)")
+	fromIssue := fs.Int("from-issue", 0, "GitHub issue number to use as goal input")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -107,8 +111,11 @@ func runGoal(args []string) (err error) {
 	if goalText == "" {
 		goalText = strings.TrimSpace(strings.Join(fs.Args(), " "))
 	}
-	if goalText == "" {
-		return fmt.Errorf("orca goal: goal text is required")
+	if *fromIssue > 0 && goalText != "" {
+		return fmt.Errorf("orca goal: --from-issue and --goal are mutually exclusive")
+	}
+	if *fromIssue <= 0 && goalText == "" {
+		return fmt.Errorf("orca goal: goal text is required (or use --from-issue)")
 	}
 	rt, closeFn, err := openRuntime(*orcaDir, *noLearning)
 	if err != nil {
@@ -126,6 +133,9 @@ func runGoal(args []string) (err error) {
 	}
 	if active != nil {
 		return activeGoalError(active)
+	}
+	if *fromIssue > 0 {
+		return rt.runFromIssue(context.Background(), *fromIssue)
 	}
 	return rt.runControlLoop(context.Background(), goalText)
 }
@@ -233,6 +243,13 @@ type runtime struct {
 	budget         *budget.Controller
 	runner         *runner.Runner
 	reconciler     *reconciler.Reconciler
+
+	// intakeFetcher is the GitHub issue fetcher. Tests replace it with a
+	// Fetcher pointing at a mock HTTP server.
+	intakeFetcher *intake.Fetcher
+	// prWriterBaseURL overrides the GitHub API base URL used by prwriter.
+	// Empty in production; set to a mock server URL in tests.
+	prWriterBaseURL string
 }
 
 func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventlog.FileLog, st *store.FileStore) (*runtime, error) {
@@ -260,20 +277,77 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 		budget:         newBudgetController(log, cfg.Budget),
 		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, noLearning),
 		reconciler:     newReconciler(st, log, noLearning),
+		intakeFetcher:  &intake.Fetcher{},
 	}, nil
 }
 
-func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
+// compileGoal compiles the raw intent into a GoalIR and proposes initial obligations.
+// It does not run the planning loop.
+func (rt *runtime) compileGoal(ctx context.Context, rawIntent string) (*schema.GoalIR, error) {
 	fmt.Fprintf(os.Stderr, "[orca] compiling intent\n")
 	goal, err := rt.intentCompiler.Compile(ctx, rawIntent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Fprintf(os.Stderr, "[orca] goal %s: proposing obligations\n", goal.GoalID)
 	if _, err := rt.verifierEngine.ProposeObligations(ctx, goal.GoalID); err != nil {
+		return nil, err
+	}
+	return goal, nil
+}
+
+// runFromIssue fetches the GitHub issue, compiles it as a goal, saves the
+// intake record linking the issue to the goal, and then runs the planning loop.
+func (rt *runtime) runFromIssue(ctx context.Context, issueNumber int) error {
+	goal, err := rt.intakeIssue(ctx, issueNumber)
+	if err != nil {
 		return err
 	}
+	return rt.runPlanLoop(ctx, goal.GoalID)
+}
 
+// intakeIssue fetches a GitHub issue, compiles it as a goal, saves the intake
+// record, and returns the created GoalIR. It does not run the planning loop.
+// Tests call this directly to verify intake behavior without running agents.
+func (rt *runtime) intakeIssue(ctx context.Context, issueNumber int) (*schema.GoalIR, error) {
+	fmt.Fprintf(os.Stderr, "[orca] fetching github issue #%d\n", issueNumber)
+	text, err := rt.intakeFetcher.Fetch(ctx, rt.cfg.Intake, issueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("orca: fetch issue %d: %w", issueNumber, err)
+	}
+	goal, err := rt.compileGoal(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	externalURL := fmt.Sprintf("https://github.com/%s/issues/%d", rt.cfg.Intake.Repo, issueNumber)
+	ir := &schema.IntakeRecord{
+		RecordID:    idgen.New("INTAKE"),
+		GoalID:      goal.GoalID,
+		Source:      "github_issue",
+		ExternalID:  fmt.Sprintf("%d", issueNumber),
+		ExternalURL: externalURL,
+		IngestedAt:  time.Now().UTC(),
+	}
+	if err := rt.store.SaveIntakeRecord(ctx, goal.GoalID, ir); err != nil {
+		return nil, fmt.Errorf("orca: save intake record for issue %d: %w", issueNumber, err)
+	}
+	fmt.Fprintf(os.Stderr, "[orca] goal %s created from issue #%d\n", goal.GoalID, issueNumber)
+	return goal, nil
+}
+
+func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
+	goal, err := rt.compileGoal(ctx, rawIntent)
+	if err != nil {
+		return err
+	}
+	return rt.runPlanLoop(ctx, goal.GoalID)
+}
+
+func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
+	goal, err := rt.store.LoadGoal(ctx, goalID)
+	if err != nil {
+		return fmt.Errorf("orca: load goal %s: %w", goalID, err)
+	}
 	for {
 		if err := rt.reconciler.FreshnessCheck(ctx, goal.GoalID); err != nil {
 			return fmt.Errorf("orca: freshness check for goal %s: %w", goal.GoalID, err)
@@ -424,6 +498,13 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 				if !decision.Approved {
 					return fmt.Errorf("orca: merge gate rejected patch %s: %s", readyPatchID, decision.Notes)
 				}
+				// PR creation only runs after explicit human gate approval.
+				// There is no auto-PR path in Phase 5.
+				if rt.cfg.PR.Enabled {
+					if err := rt.createAndSavePR(ctx, goal.GoalID, readyPatchID); err != nil {
+						return fmt.Errorf("orca: create pr for patch %s: %w", readyPatchID, err)
+					}
+				}
 				for _, pid := range acceptedPatchIDs {
 					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
 						return err
@@ -449,6 +530,180 @@ func (rt *runtime) runControlLoop(ctx context.Context, rawIntent string) error {
 		}
 		return fmt.Errorf("orca: reconciliation stopped: %s", blockingReason)
 	}
+}
+
+// ── PR creation helpers ──────────────────────────────────────────────────────
+
+// createAndSavePR resolves branches, builds the PR body, calls prwriter.Create,
+// and persists the returned PRRecord via store.SavePRRecord.
+// Called only when pr.enabled is true and the human gate has approved the merge.
+func (rt *runtime) createAndSavePR(ctx context.Context, goalID, patchID string) error {
+	baseBranch, err := rt.resolveBaseBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve base branch: %w", err)
+	}
+	headBranch, err := rt.resolveHeadBranch(ctx, patchID)
+	if err != nil {
+		return fmt.Errorf("resolve head branch: %w", err)
+	}
+	title, body, err := rt.buildPRContent(ctx, goalID, patchID)
+	if err != nil {
+		return fmt.Errorf("build pr content: %w", err)
+	}
+
+	token := rt.cfg.Intake.GitHubToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	prCfg := prwriter.Config{
+		Repo:        rt.cfg.Intake.Repo,
+		GitHubToken: token,
+		Draft:       rt.cfg.PR.Draft,
+		Label:       rt.cfg.PR.Label,
+		BaseURL:     rt.prWriterBaseURL,
+	}
+	in := prwriter.CreateInput{
+		GoalID:     goalID,
+		PatchID:    patchID,
+		BaseBranch: baseBranch,
+		HeadBranch: headBranch,
+		Title:      title,
+		Body:       body,
+		Draft:      rt.cfg.PR.Draft,
+	}
+	record, err := prwriter.Create(ctx, prCfg, in)
+	if err != nil {
+		return fmt.Errorf("create github pr: %w", err)
+	}
+	if err := rt.store.SavePRRecord(ctx, goalID, record); err != nil {
+		return fmt.Errorf("save pr record: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[orca] pr created: %s\n", record.PRURL)
+	return nil
+}
+
+// resolveBaseBranch resolves the PR base branch using the following priority:
+//  1. pr.base_branch config value
+//  2. git symbolic-ref refs/remotes/origin/HEAD
+//  3. GitHub API GET /repos/{owner}/{repo} default_branch
+//  4. error
+func (rt *runtime) resolveBaseBranch(ctx context.Context) (string, error) {
+	if rt.cfg.PR.BaseBranch != "" {
+		return rt.cfg.PR.BaseBranch, nil
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = filepath.Dir(rt.orcaDir)
+	if out, gitErr := cmd.Output(); gitErr == nil {
+		ref := strings.TrimSpace(string(out))
+		if branch, ok := strings.CutPrefix(ref, "refs/remotes/origin/"); ok && branch != "" {
+			return branch, nil
+		}
+	}
+
+	token := rt.cfg.Intake.GitHubToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if rt.cfg.Intake.Repo != "" && token != "" {
+		prCfg := prwriter.Config{
+			Repo:        rt.cfg.Intake.Repo,
+			GitHubToken: token,
+			BaseURL:     rt.prWriterBaseURL,
+		}
+		if branch, apiErr := prwriter.FetchDefaultBranch(ctx, prCfg); apiErr == nil && branch != "" {
+			return branch, nil
+		}
+	}
+
+	return "", fmt.Errorf("cannot resolve base branch: set pr.base_branch or configure intake.repo with a github token")
+}
+
+// resolveHeadBranch finds the current branch in the capsule's worktree.
+// Returns an error when the worktree is missing, the path is not a git
+// repository, or the HEAD is detached (git branch --show-current returns "").
+func (rt *runtime) resolveHeadBranch(ctx context.Context, patchID string) (string, error) {
+	patch, err := rt.store.LoadPatch(ctx, patchID)
+	if err != nil {
+		return "", fmt.Errorf("load patch %s: %w", patchID, err)
+	}
+	capsule, err := rt.store.LoadCapsule(ctx, patch.CapsuleID)
+	if err != nil {
+		return "", fmt.Errorf("load capsule %s: %w", patch.CapsuleID, err)
+	}
+	if capsule.Sandbox.WorktreePath == "" {
+		return "", fmt.Errorf("capsule %s has no worktree path", capsule.CapsuleID)
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", capsule.Sandbox.WorktreePath, "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("get current branch in capsule %s worktree: %w", capsule.CapsuleID, err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("capsule %s worktree is in detached HEAD state or has no current branch", capsule.CapsuleID)
+	}
+	return branch, nil
+}
+
+// buildPRContent derives the PR title and body from the goal, patch, and
+// verifier result artifacts. No transcript content is used.
+func (rt *runtime) buildPRContent(ctx context.Context, goalID, patchID string) (title, body string, err error) {
+	goal, loadErr := rt.store.LoadGoal(ctx, goalID)
+	if loadErr != nil {
+		return "", "", fmt.Errorf("load goal %s: %w", goalID, loadErr)
+	}
+	patch, loadErr := rt.store.LoadPatch(ctx, patchID)
+	if loadErr != nil {
+		return "", "", fmt.Errorf("load patch %s: %w", patchID, loadErr)
+	}
+
+	t := goal.OriginalIntent
+	if len(t) > 72 {
+		t = t[:69] + "..."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Goal\n\n")
+	sb.WriteString(goal.OriginalIntent)
+	sb.WriteString("\n\n")
+
+	if len(patch.ObligationIDsClaimed) > 0 {
+		sb.WriteString("## Obligations Addressed\n\n")
+		for _, oblID := range patch.ObligationIDsClaimed {
+			obl, oblErr := rt.store.LoadObligation(ctx, oblID)
+			if oblErr != nil {
+				fmt.Fprintf(&sb, "- %s\n", oblID)
+				continue
+			}
+			fmt.Fprintf(&sb, "- %s\n", obl.Description)
+		}
+		sb.WriteString("\n")
+	}
+
+	vr, vrErr := rt.store.LoadVerifierResultForPatch(ctx, patchID)
+	if vrErr != nil && !errors.Is(vrErr, store.ErrNotFound) {
+		return "", "", fmt.Errorf("load verifier result for patch %s: %w", patchID, vrErr)
+	}
+	if vrErr == nil && len(vr.ObligationResults) > 0 {
+		sb.WriteString("## Evidence\n\n")
+		for _, verdict := range vr.ObligationResults {
+			if len(verdict.EvidenceIDs) > 0 {
+				fmt.Fprintf(&sb, "- %s (%s): %s\n", verdict.ObligationID, verdict.Verdict, strings.Join(verdict.EvidenceIDs, ", "))
+			} else {
+				fmt.Fprintf(&sb, "- %s (%s)\n", verdict.ObligationID, verdict.Verdict)
+			}
+		}
+		sb.WriteString("\n")
+		if vr.RecommendationRationale != "" {
+			sb.WriteString("## Merge Rationale\n\n")
+			sb.WriteString(vr.RecommendationRationale)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	sb.WriteString("---\n*Generated by Orca*\n")
+	return t, sb.String(), nil
 }
 
 func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string, lastEvent schema.Event) error {
