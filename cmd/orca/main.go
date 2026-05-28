@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/intent"
+	"github.com/micronwave/orca/internal/mcp"
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/reconciler"
@@ -184,7 +186,32 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func() error, error
 	if err != nil {
 		return nil, nil, errors.Join(err, log.Close())
 	}
+
+	var mcpCancel context.CancelFunc
+	if cfg.MCP.Enabled {
+		addr := cfg.MCP.Listen
+		if addr == "" {
+			addr = "127.0.0.1:7070"
+		}
+		ln, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			return nil, nil, errors.Join(fmt.Errorf("orca: mcp server: %w", listenErr), log.Close())
+		}
+		mcpServer := mcp.New(artifactStore, log)
+		mcpCtx, cancel := context.WithCancel(context.Background())
+		mcpCancel = cancel
+		go func() {
+			if serveErr := mcpServer.Serve(mcpCtx, ln); serveErr != nil {
+				fmt.Fprintf(os.Stderr, "[orca] mcp server: %v\n", serveErr)
+			}
+		}()
+		fmt.Fprintf(os.Stderr, "[orca] mcp server listening on %s\n", addr)
+	}
+
 	return rt, func() error {
+		if mcpCancel != nil {
+			mcpCancel()
+		}
 		rt.gatekeeper.Close()
 		return log.Close()
 	}, nil
