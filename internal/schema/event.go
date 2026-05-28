@@ -44,6 +44,9 @@ const (
 	EventPatchRejected             EventType = "patch_rejected"
 	EventMergeApplied              EventType = "merge_applied"
 	EventArtifactInvalidated       EventType = "artifact_invalidated"
+	EventPRCreated                 EventType = "pr_created"
+	EventCIStatusReceived          EventType = "ci_status_received"
+	EventIntakeIssueIngested       EventType = "intake_issue_ingested"
 )
 
 // Event is one entry in the append-only event log.

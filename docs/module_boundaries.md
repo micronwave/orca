@@ -64,7 +64,16 @@ event to the event log on every `Save*` call. This means:
 - `SaveProjection` / `SaveHumanSummaryProjection` → appends `context_projection_created`
 - `SaveDecision` → appends `decision_record_created`
 - `SaveTopologyOutcome` → appends `topology_outcome_recorded`
+- `SavePRRecord` → appends `pr_created`
+- `SaveCIStatusRecord` → appends `ci_status_received`
+- `SaveIntakeRecord` → appends `intake_issue_ingested`
 - etc.
+
+Phase 5 external records (`PRRecord`, `CIStatusRecord`, `IntakeRecord`) are
+persisted under `artifacts/prs/`, `artifacts/ci_status/`, and `artifacts/intake/`.
+Replay reconstructs them from the three corresponding event types.
+Integration adapters (MCP, GitHub, CI providers, remote runners) are
+consumers of the store API and must not dictate core artifact or event schemas.
 
 Replay reconstructs topology outcomes from `topology_outcome_recorded` into
 `.orca/artifacts/topology_outcomes/<OutcomeID>.json`, matching the per-artifact

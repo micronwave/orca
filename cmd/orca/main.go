@@ -505,7 +505,7 @@ func ensureInitTarget(orcaDir string) error {
 }
 
 func defaultConfigYAML() string {
-	return `# Orca Phase 4 local runtime configuration.
+	return `# Orca Phase 5 local runtime configuration.
 # Keep this file in the simple shape supported by internal/config.Load:
 # sections, scalar values, and verifier.gates list items only.
 
@@ -549,6 +549,31 @@ advanced:
   adversarial_timeout_seconds: 60
   adversarial_blocking: false
   reviewer_diversity: false
+
+mcp:
+  enabled: false
+  listen: "127.0.0.1:7070"
+
+intake:
+  github_token: ""
+  repo: ""
+
+pr:
+  enabled: false
+  base_branch: ""
+  draft: true
+  label: "orca-generated"
+
+ci:
+  provider: ""
+  poll_interval_seconds: 30
+  branch: ""
+
+remote:
+  enabled: false
+  host: ""
+  workspace: ""
+  ssh_key_path: ""
 `
 }
 

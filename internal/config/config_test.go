@@ -284,6 +284,136 @@ advanced:
 	}
 }
 
+// minimalValidYAML returns a minimal valid config YAML prepended to extra.
+// Used to avoid duplicating the required verifier/budget sections in every test.
+func minimalValidYAML(extra string) string {
+	return `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+` + extra
+}
+
+func TestPhase5SectionsAbsentDefaultToZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(minimalValidYAML("")), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCP.Enabled || cfg.MCP.Listen != "" {
+		t.Fatalf("MCP not zero: %+v", cfg.MCP)
+	}
+	if cfg.Intake.GitHubToken != "" || cfg.Intake.Repo != "" {
+		t.Fatalf("Intake not zero: %+v", cfg.Intake)
+	}
+	if cfg.PR.Enabled || cfg.PR.BaseBranch != "" || cfg.PR.Draft || cfg.PR.Label != "" {
+		t.Fatalf("PR not zero: %+v", cfg.PR)
+	}
+	if cfg.CI.Provider != "" || cfg.CI.PollIntervalSeconds != 0 || cfg.CI.Branch != "" {
+		t.Fatalf("CI not zero: %+v", cfg.CI)
+	}
+	if cfg.Remote.Enabled || cfg.Remote.Host != "" || cfg.Remote.Workspace != "" || cfg.Remote.SSHKeyPath != "" {
+		t.Fatalf("Remote not zero: %+v", cfg.Remote)
+	}
+}
+
+func TestPhase5SectionsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(minimalValidYAML(`
+mcp:
+  enabled: true
+  listen: "127.0.0.1:9090"
+
+intake:
+  github_token: "ghp_secret"
+  repo: "org/repo"
+
+pr:
+  enabled: true
+  base_branch: "main"
+  draft: true
+  label: "orca-generated"
+
+ci:
+  provider: "github"
+  poll_interval_seconds: 60
+  branch: "feat/x"
+
+remote:
+  enabled: true
+  host: "builder.internal"
+  workspace: "/home/orca"
+  ssh_key_path: "/home/user/.ssh/id_ed25519"
+`)), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MCP.Enabled || cfg.MCP.Listen != "127.0.0.1:9090" {
+		t.Fatalf("MCP = %+v", cfg.MCP)
+	}
+	if cfg.Intake.GitHubToken != "ghp_secret" || cfg.Intake.Repo != "org/repo" {
+		t.Fatalf("Intake = %+v", cfg.Intake)
+	}
+	if !cfg.PR.Enabled || cfg.PR.BaseBranch != "main" || !cfg.PR.Draft || cfg.PR.Label != "orca-generated" {
+		t.Fatalf("PR = %+v", cfg.PR)
+	}
+	if cfg.CI.Provider != "github" || cfg.CI.PollIntervalSeconds != 60 || cfg.CI.Branch != "feat/x" {
+		t.Fatalf("CI = %+v", cfg.CI)
+	}
+	if !cfg.Remote.Enabled || cfg.Remote.Host != "builder.internal" ||
+		cfg.Remote.Workspace != "/home/orca" || cfg.Remote.SSHKeyPath != "/home/user/.ssh/id_ed25519" {
+		t.Fatalf("Remote = %+v", cfg.Remote)
+	}
+}
+
+func TestPhase5SectionsRejectUnknownKeys(t *testing.T) {
+	cases := []struct {
+		section string
+		yaml    string
+	}{
+		{"mcp", "mcp:\n  enabled: false\n  unknown_key: foo\n"},
+		{"intake", "intake:\n  repo: \"\"\n  bogus: bar\n"},
+		{"pr", "pr:\n  enabled: false\n  typo_field: x\n"},
+		{"ci", "ci:\n  provider: \"\"\n  no_such: true\n"},
+		{"remote", "remote:\n  enabled: false\n  extra_key: baz\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.section, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(minimalValidYAML(tc.yaml)), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatalf("Load succeeded with unknown key in %s section, want error", tc.section)
+			}
+		})
+	}
+}
+
+func TestCIPollIntervalExceedsMaxReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(minimalValidYAML(`
+ci:
+  poll_interval_seconds: 99999999
+`)), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with poll_interval_seconds overflow, want error")
+	}
+}
+
 func TestStripCommentQuoteAware(t *testing.T) {
 	cases := []struct {
 		input string

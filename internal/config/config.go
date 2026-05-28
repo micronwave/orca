@@ -18,13 +18,53 @@ import (
 // at one year for operational sanity).
 const maxDurationSeconds = 365 * 24 * 3600 // 31_536_000
 
-// Config is the minimum viable Phase 1 configuration.
+// Config is the runtime configuration.
 type Config struct {
 	Verifier VerifierConfig
 	Gate     GateConfig
 	Budget   BudgetConfig
 	Adapters AdapterConfig
 	Advanced AdvancedConfig
+	MCP      MCPConfig
+	Intake   IntakeConfig
+	PR       PRConfig
+	CI       CIConfig
+	Remote   RemoteConfig
+}
+
+// MCPConfig holds the optional MCP server settings. Zero value disables the feature.
+type MCPConfig struct {
+	Enabled bool
+	Listen  string
+}
+
+// IntakeConfig holds settings for ingesting external issues. Zero value disables.
+type IntakeConfig struct {
+	GitHubToken string
+	Repo        string
+}
+
+// PRConfig holds settings for automated pull request creation. Zero value disables.
+type PRConfig struct {
+	Enabled    bool
+	BaseBranch string
+	Draft      bool
+	Label      string
+}
+
+// CIConfig holds settings for CI status polling. Zero value disables.
+type CIConfig struct {
+	Provider            string
+	PollIntervalSeconds int
+	Branch              string
+}
+
+// RemoteConfig holds settings for remote execution. Zero value disables.
+type RemoteConfig struct {
+	Enabled    bool
+	Host       string
+	Workspace  string
+	SSHKeyPath string
 }
 
 // AdvancedConfig holds optional Phase 4 verification features. All fields
@@ -293,6 +333,104 @@ func Load(path string) (*Config, error) {
 				cfg.Advanced.ReviewerDiversity = b
 			default:
 				return nil, fmt.Errorf("config: unknown advanced field %q on line %d", key, lineNum)
+			}
+		case "mcp":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "enabled":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.MCP.Enabled = b
+			case "listen":
+				cfg.MCP.Listen = value
+			default:
+				return nil, fmt.Errorf("config: unknown mcp field %q on line %d", key, lineNum)
+			}
+		case "intake":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "github_token":
+				cfg.Intake.GitHubToken = value
+			case "repo":
+				cfg.Intake.Repo = value
+			default:
+				return nil, fmt.Errorf("config: unknown intake field %q on line %d", key, lineNum)
+			}
+		case "pr":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "enabled":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.PR.Enabled = b
+			case "base_branch":
+				cfg.PR.BaseBranch = value
+			case "draft":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.PR.Draft = b
+			case "label":
+				cfg.PR.Label = value
+			default:
+				return nil, fmt.Errorf("config: unknown pr field %q on line %d", key, lineNum)
+			}
+		case "ci":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "provider":
+				cfg.CI.Provider = value
+			case "poll_interval_seconds":
+				n, err := parseNonNegativeInt(value, lineNum)
+				if err != nil {
+					return nil, err
+				}
+				if n > maxDurationSeconds {
+					return nil, fmt.Errorf("config: poll_interval_seconds %d exceeds maximum %d", n, maxDurationSeconds)
+				}
+				cfg.CI.PollIntervalSeconds = n
+			case "branch":
+				cfg.CI.Branch = value
+			default:
+				return nil, fmt.Errorf("config: unknown ci field %q on line %d", key, lineNum)
+			}
+		case "remote":
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			switch key {
+			case "enabled":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
+				}
+				cfg.Remote.Enabled = b
+			case "host":
+				cfg.Remote.Host = value
+			case "workspace":
+				cfg.Remote.Workspace = value
+			case "ssh_key_path":
+				cfg.Remote.SSHKeyPath = value
+			default:
+				return nil, fmt.Errorf("config: unknown remote field %q on line %d", key, lineNum)
 			}
 		default:
 			return nil, fmt.Errorf("config: unknown section %q on line %d", section, lineNum)
