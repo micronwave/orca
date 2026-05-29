@@ -713,15 +713,34 @@ func (s *Compiler) loadPatchesByObligation(
 
 func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID string, files []string, freshnessBase string) ([]*schema.ClaimArtifact, []string, error) {
 	_ = freshnessBase
-	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
+	goalClaims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("projector: load claims: %w", err)
+		return nil, nil, fmt.Errorf("projector: load goal claims: %w", err)
 	}
+	repoClaims, err := s.store.LoadRepoScopedClaims(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("projector: load repo-scoped claims: %w", err)
+	}
+	candidates := make([]*schema.ClaimArtifact, 0, len(goalClaims)+len(repoClaims))
+	candidates = append(candidates, goalClaims...)
+	candidates = append(candidates, repoClaims...)
+
 	fileSet := normalizedProjectionFiles(files)
-	out := make([]*schema.ClaimArtifact, 0, len(claims))
-	ids := make([]string, 0, len(claims))
-	for _, claim := range claims {
-		if claim.Status == schema.ClaimInvalidated || !claimMatchesFiles(claim, fileSet) {
+	out := make([]*schema.ClaimArtifact, 0, len(candidates))
+	ids := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for _, claim := range candidates {
+		if seen[claim.ClaimID] {
+			continue
+		}
+		seen[claim.ClaimID] = true
+		if claim.Status == schema.ClaimInvalidated {
+			continue
+		}
+		if strings.TrimSpace(claim.SupersededBy) != "" {
+			continue
+		}
+		if !claimMatchesFiles(claim, fileSet) {
 			continue
 		}
 		out = append(out, claim)

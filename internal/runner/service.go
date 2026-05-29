@@ -205,6 +205,7 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 			ScopeViolations:      scopeViolations,
 			TokensUsed:           output.TokensUsed,
 			WallTimeSeconds:      output.WallTimeSeconds,
+			SupersededClaimIDs:   append([]string(nil), output.ContradictedClaimIDs...),
 		}
 		if patch.Summary == "" {
 			patch.Summary = "capsule output recorded by runner"

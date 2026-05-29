@@ -501,6 +501,106 @@ func TestCompileReviewerAndTesterUseRoleSpecificBriefings(t *testing.T) {
 	}
 }
 
+// ── Repo-scoped claims and supersession (item 9) ─────────────────────────────
+
+func TestCompileExecutor_includesRepoScopedClaims(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-repo"
+		conditionID = "GC-proj-repo"
+		obligation  = "OB-proj-repo"
+		capsuleID   = "CAP-proj-repo"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		AllowedPaths:       []string{"internal/schema/common.go"},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: "DEC-unused",
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// Repo-scoped claim: no GoalID or SourceCapsuleID, but file overlaps with capsule scope.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:       "CL-repo-scope",
+		Text:          "errors.As is the preferred error inspection idiom",
+		ClaimType:     schema.ClaimInvariant,
+		AffectedFiles: []string{"internal/schema/common.go"},
+		Status:        schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim repo-scoped: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "CL-repo-scope") {
+		t.Fatalf("projection missing repo-scoped claim: %+v", projection.IncludedSections)
+	}
+}
+
+func TestCompileExecutor_excludesSupersededClaims(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-sup"
+		conditionID = "GC-proj-sup"
+		obligation  = "OB-proj-sup"
+		capsuleID   = "CAP-proj-sup"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		AllowedPaths:       []string{"internal/schema"},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: "DEC-unused",
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// Goal-scoped claim that has been superseded.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-superseded",
+		Text:            "old fact that was replaced",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		SupersededBy:    "PATCH-new",
+	}); err != nil {
+		t.Fatalf("SaveClaim superseded: %v", err)
+	}
+	// Goal-scoped claim that is NOT superseded — must appear.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-active",
+		Text:            "current active fact",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim active: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if projectionIncludes(projection, "CL-superseded") {
+		t.Fatal("projection must not include superseded claim")
+	}
+	if !projectionIncludes(projection, "CL-active") {
+		t.Fatalf("projection missing active claim: %+v", projection.IncludedSections)
+	}
+}
+
 func projectionIncludes(p *schema.ContextProjection, want string) bool {
 	for _, section := range p.IncludedSections {
 		if strings.Contains(section, want) {
