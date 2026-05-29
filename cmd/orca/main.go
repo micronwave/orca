@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/budget"
+	"github.com/micronwave/orca/internal/cigate"
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
@@ -31,6 +32,7 @@ import (
 	"github.com/micronwave/orca/internal/runner"
 	"github.com/micronwave/orca/internal/runner/adapters/claude"
 	"github.com/micronwave/orca/internal/runner/adapters/codex"
+	"github.com/micronwave/orca/internal/runner/adapters/remote"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/verifier"
@@ -62,6 +64,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "cancel":
 		return runCancel(args[1:], os.Stdin, os.Stdout)
+	case "ci":
+		return runCI(args[1:])
 	default:
 		return fmt.Errorf("orca: unknown command %q", args[0])
 	}
@@ -176,6 +180,130 @@ func runCancel(args []string, in io.Reader, out io.Writer) (err error) {
 	return rt.cancelActiveGoal(context.Background(), in, out)
 }
 
+// ── CI subcommands ────────────────────────────────────────────────────────────
+
+func runCI(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("orca ci: command is required (wait)")
+	}
+	switch args[0] {
+	case "wait":
+		return runCIWait(args[1:])
+	default:
+		return fmt.Errorf("orca ci: unknown command %q", args[0])
+	}
+}
+
+func runCIWait(args []string) (err error) {
+	fs := flag.NewFlagSet("orca ci wait", flag.ContinueOnError)
+	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	timeoutSec := fs.Int("timeout", 600, "poll timeout in seconds")
+	branch := fs.String("branch", "", "branch to poll (overrides config branch)")
+	goalID := fs.String("goal-id", "", "goal ID (auto-resolved from active goal if empty)")
+	capsuleID := fs.String("capsule-id", "", "capsule ID for the CI status record")
+	if parseErr := fs.Parse(args); parseErr != nil {
+		return parseErr
+	}
+
+	cfg, err := config.Load(filepath.Join(*orcaDir, "config.yaml"))
+	if err != nil {
+		return err
+	}
+	if cfg.CI.Provider == "" {
+		return fmt.Errorf("orca ci wait: ci.provider is not configured")
+	}
+	if cfg.CI.Provider != "github_actions" {
+		return fmt.Errorf("orca ci wait: unsupported ci.provider %q (only \"github_actions\" is supported)", cfg.CI.Provider)
+	}
+	if strings.TrimSpace(cfg.Intake.Repo) == "" {
+		return fmt.Errorf("orca ci wait: intake.repo must be set for CI polling (format: owner/repo)")
+	}
+
+	log, err := eventlog.Open(filepath.Join(*orcaDir, "events.log"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := log.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	st, err := store.New(*orcaDir, log)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	gID := strings.TrimSpace(*goalID)
+	if gID == "" {
+		goal, loadErr := st.LoadActiveGoal(ctx)
+		if loadErr != nil {
+			return fmt.Errorf("orca ci wait: load active goal: %w", loadErr)
+		}
+		if goal != nil {
+			gID = goal.GoalID
+		}
+	}
+
+	token := cfg.Intake.GitHubToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+
+	poller := cigate.New(cfg.CI, token, cfg.Intake.Repo, log, st, ciPollerOpts...)
+	timeout := time.Duration(*timeoutSec) * time.Second
+	status, runURL, summary, rawLogPath, waitErr := poller.Wait(ctx, gID, *capsuleID, *branch, timeout)
+
+	if gID != "" {
+		record := &schema.CIStatusRecord{
+			RecordID:   idgen.New("CISTAT"),
+			GoalID:     gID,
+			CapsuleID:  *capsuleID,
+			Provider:   cfg.CI.Provider,
+			Branch:     *branch,
+			Status:     status,
+			RunURL:     runURL,
+			Summary:    summary,
+			RawLogPath: rawLogPath,
+			RecordedAt: time.Now().UTC(),
+		}
+		if saveErr := st.SaveCIStatusRecord(ctx, gID, record); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "[orca ci wait] save ci status record: %v\n", saveErr)
+		}
+	}
+
+	if waitErr != nil {
+		return fmt.Errorf("orca ci wait: %w", waitErr)
+	}
+	if status != "success" {
+		return fmt.Errorf("orca ci wait: CI %s: %s", status, summary)
+	}
+	return nil
+}
+
+// ciPollerOpts is set by tests to inject options into cigate.New inside
+// runCIWait (e.g., to redirect API calls to a mock HTTP server).
+var ciPollerOpts []cigate.Option
+
+// buildCIGateCommand returns the verifier gate command string that invokes
+// the CI wait helper. Paths with spaces are not supported by the verifier's
+// command parser (a known Phase 5 limitation).
+func buildCIGateCommand(orcaDir string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("ci gate: get executable path: %w", err)
+	}
+	absOrcaDir, absErr := filepath.Abs(orcaDir)
+	if absErr != nil {
+		absOrcaDir = orcaDir
+	}
+	if strings.ContainsAny(exe, " \t") {
+		exe = `"` + exe + `"`
+	}
+	return fmt.Sprintf("%s ci wait --orca-dir %s --timeout 600", exe, absOrcaDir), nil
+}
+
 func openRuntime(orcaDir string, noLearning bool) (*runtime, func() error, error) {
 	cfg, err := config.Load(filepath.Join(orcaDir, "config.yaml"))
 	if err != nil {
@@ -262,6 +390,23 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 	if st == nil {
 		return nil, fmt.Errorf("orca: artifact store is required")
 	}
+
+	// When ci.provider is configured, append a verifier gate that calls the
+	// orca ci wait helper. The gate uses the existing GateRunner flow so no
+	// verifier interfaces change.
+	verifierCfg := cfg.Verifier
+	if cfg.CI.Provider == "github_actions" {
+		ciCmd, err := buildCIGateCommand(orcaDir)
+		if err != nil {
+			return nil, fmt.Errorf("orca: %w", err)
+		}
+		verifierCfg.Gates = append(verifierCfg.Gates, config.VerifierGate{
+			Name:     "ci_status",
+			Command:  ciCmd,
+			Blocking: true,
+		})
+	}
+
 	return &runtime{
 		cfg:        cfg,
 		orcaDir:    orcaDir,
@@ -270,12 +415,12 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 		store:      st,
 
 		intentCompiler: newIntentCompiler(st),
-		verifierEngine: newVerifierEngine(st, cfg.Verifier, cfg.Advanced, noLearning),
+		verifierEngine: newVerifierEngine(st, verifierCfg, cfg.Advanced, noLearning),
 		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, orcaDir, noLearning),
-		projector:      newProjector(st, cfg.Verifier, cfg.Advanced),
+		projector:      newProjector(st, verifierCfg, cfg.Advanced),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
-		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, noLearning),
+		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, cfg.Remote, noLearning),
 		reconciler:     newReconciler(st, log, noLearning),
 		intakeFetcher:  &intake.Fetcher{},
 	}, nil
@@ -1497,14 +1642,25 @@ func newBudgetController(log *eventlog.FileLog, _ config.BudgetConfig) *budget.C
 	return budget.New(log)
 }
 
-func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, noLearning bool) *runner.Runner {
+func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, remoteCfg config.RemoteConfig, noLearning bool) *runner.Runner {
+	adapters := []runner.Adapter{
+		codex.New(orcaDir, cfg.CodexPath),
+		claude.New(orcaDir, cfg.ClaudePath),
+	}
+	if remoteCfg.Enabled {
+		// Remote adapters are appended last; the runner's registry takes the last
+		// registration per AgentType, so remote overrides local when enabled.
+		adapters = append(adapters,
+			remote.New(remoteCfg, schema.AgentCodex, orcaDir, nil),
+			remote.New(remoteCfg, schema.AgentClaude, orcaDir, nil),
+		)
+	}
 	return runner.NewWithConfig(
 		st,
 		log,
 		orcaDir,
 		runner.Config{NoLearning: noLearning},
-		codex.New(orcaDir, cfg.CodexPath),
-		claude.New(orcaDir, cfg.ClaudePath),
+		adapters...,
 	)
 }
 

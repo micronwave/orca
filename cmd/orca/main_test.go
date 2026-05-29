@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/micronwave/orca/internal/cigate"
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
@@ -1413,4 +1414,243 @@ func initTempGitRepo(t *testing.T) string {
 		}
 	}
 	return dir
+}
+
+// ── CI wait tests ─────────────────────────────────────────────────────────────
+
+// writeCITestConfig writes a config.yaml with CI and intake settings.
+func writeCITestConfig(t *testing.T, orcaDir, ciProvider, apiToken, repo string) {
+	t.Helper()
+	content := `
+verifier:
+  gates:
+    - name: "go_test"
+      command: "go test ./..."
+      blocking: true
+  working_dir: ""
+gate:
+  review_window_seconds: 30
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+  default_max_retries: 3
+adapters:
+  codex_path: ""
+  claude_path: ""
+ci:
+  provider: "` + ciProvider + `"
+  poll_interval_seconds: 1
+  branch: ""
+intake:
+  github_token: "` + apiToken + `"
+  repo: "` + repo + `"
+`
+	if err := os.WriteFile(filepath.Join(orcaDir, "config.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write ci test config: %v", err)
+	}
+}
+
+// ciRunsResponse builds a minimal GitHub Actions /actions/runs response JSON.
+func ciRunsResponse(status, conclusion, htmlURL string) map[string]any {
+	return map[string]any{
+		"total_count": 1,
+		"workflow_runs": []map[string]any{
+			{
+				"id":          42,
+				"status":      status,
+				"conclusion":  conclusion,
+				"html_url":    htmlURL,
+				"head_branch": "main",
+			},
+		},
+	}
+}
+
+func TestRunCIWait_Success_PersistsCIStatusRecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ciRunsResponse("completed", "success", "https://github.com/run/1"))
+	}))
+	defer srv.Close()
+
+	orcaDir := seedOrcaDir(t, false)
+	writeCITestConfig(t, orcaDir, "github_actions", "tok", "owner/repo")
+
+	ciPollerOpts = []cigate.Option{
+		cigate.WithAPIBase(srv.URL),
+		cigate.WithHTTPDo(srv.Client().Do),
+	}
+	t.Cleanup(func() { ciPollerOpts = nil })
+
+	if err := runCIWait([]string{"--orca-dir", orcaDir, "--timeout", "10", "--goal-id", "G-1"}); err != nil {
+		t.Fatalf("runCIWait = %v, want nil on success", err)
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var found bool
+	for _, ev := range events {
+		if ev.Type == schema.EventCIStatusReceived {
+			var r schema.CIStatusRecord
+			if err := json.Unmarshal(ev.Payload, &r); err == nil && r.Status == "success" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ci_status_received event with status=success not found")
+	}
+}
+
+func TestRunCIWait_Failure_PersistsAndReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ciRunsResponse("completed", "failure", "https://github.com/run/2"))
+	}))
+	defer srv.Close()
+
+	orcaDir := seedOrcaDir(t, false)
+	writeCITestConfig(t, orcaDir, "github_actions", "tok", "owner/repo")
+
+	ciPollerOpts = []cigate.Option{
+		cigate.WithAPIBase(srv.URL),
+		cigate.WithHTTPDo(srv.Client().Do),
+	}
+	t.Cleanup(func() { ciPollerOpts = nil })
+
+	err := runCIWait([]string{"--orca-dir", orcaDir, "--timeout", "10", "--goal-id", "G-1"})
+	if err == nil {
+		t.Fatal("runCIWait = nil, want non-nil error on CI failure")
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var found bool
+	for _, ev := range events {
+		if ev.Type == schema.EventCIStatusReceived {
+			var r schema.CIStatusRecord
+			if err := json.Unmarshal(ev.Payload, &r); err == nil && r.Status == "failure" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ci_status_received event with status=failure not found")
+	}
+}
+
+func TestRunCIWait_Timeout_PersistsTimeoutSummary(t *testing.T) {
+	// Always in_progress — forces timeout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ciRunsResponse("in_progress", "", ""))
+	}))
+	defer srv.Close()
+
+	orcaDir := seedOrcaDir(t, false)
+	writeCITestConfig(t, orcaDir, "github_actions", "tok", "owner/repo")
+
+	ciPollerOpts = []cigate.Option{
+		cigate.WithAPIBase(srv.URL),
+		cigate.WithHTTPDo(srv.Client().Do),
+	}
+	t.Cleanup(func() { ciPollerOpts = nil })
+
+	err := runCIWait([]string{"--orca-dir", orcaDir, "--timeout", "2", "--goal-id", "G-1"})
+	if err == nil {
+		t.Fatal("runCIWait = nil, want non-nil error on timeout")
+	}
+
+	events := readAllEvents(t, orcaDir)
+	var found bool
+	for _, ev := range events {
+		if ev.Type == schema.EventCIStatusReceived {
+			var r schema.CIStatusRecord
+			if err := json.Unmarshal(ev.Payload, &r); err == nil &&
+				r.Status == "failure" && r.Summary == "CI status poll timed out" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ci_status_received event with timeout summary not found")
+	}
+}
+
+func TestNewRuntime_InjectsCIGateWhenProviderConfigured(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeCITestConfig(t, orcaDir, "github_actions", "", "")
+	log, err := eventlog.Open(filepath.Join(orcaDir, "events.log"))
+	if err != nil {
+		t.Fatalf("open eventlog: %v", err)
+	}
+	defer log.Close()
+	st, err := store.New(orcaDir, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	cfg, err := config.Load(filepath.Join(orcaDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	rt, err := newRuntime(cfg, orcaDir, false, log, st)
+	if err != nil {
+		t.Fatalf("newRuntime = %v, want nil when ci.provider = \"github_actions\"", err)
+	}
+	rt.gatekeeper.Close()
+
+	// buildCIGateCommand is the function newRuntime uses to build the injected
+	// ci_status gate. Verify it produces a parseable command containing "ci wait".
+	ciCmd, err := buildCIGateCommand(orcaDir)
+	if err != nil {
+		t.Fatalf("buildCIGateCommand = %v, want nil", err)
+	}
+	if !strings.Contains(ciCmd, "ci wait") {
+		t.Errorf("buildCIGateCommand = %q, want string containing \"ci wait\"", ciCmd)
+	}
+	if !strings.Contains(ciCmd, "--orca-dir") {
+		t.Errorf("buildCIGateCommand = %q, want string containing \"--orca-dir\"", ciCmd)
+	}
+}
+
+func TestRunCIWait_MissingProvider_ReturnsError(t *testing.T) {
+	orcaDir := t.TempDir()
+	// Write config with empty provider — no eventlog or store needed; validation
+	// returns before opening them.
+	writeCITestConfig(t, orcaDir, "", "", "owner/repo")
+	err := runCIWait([]string{"--orca-dir", orcaDir})
+	if err == nil || !strings.Contains(err.Error(), "ci.provider") {
+		t.Errorf("runCIWait = %v, want error about ci.provider", err)
+	}
+}
+
+func TestRunCIWait_UnsupportedProvider_ReturnsError(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeCITestConfig(t, orcaDir, "jenkins", "", "owner/repo")
+	err := runCIWait([]string{"--orca-dir", orcaDir})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("runCIWait = %v, want error about unsupported provider", err)
+	}
+}
+
+func TestRunCIWait_MissingRepo_ReturnsError(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeCITestConfig(t, orcaDir, "github_actions", "tok", "")
+	err := runCIWait([]string{"--orca-dir", orcaDir})
+	if err == nil || !strings.Contains(err.Error(), "intake.repo") {
+		t.Errorf("runCIWait = %v, want error about intake.repo", err)
+	}
+}
+
+func TestRunCICommand_UsageErrors(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{}, "command is required"},
+		{[]string{"unknown"}, "unknown command"},
+	} {
+		err := runCI(tt.args)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("runCI(%v) = %v, want error containing %q", tt.args, err, tt.want)
+		}
+	}
 }
