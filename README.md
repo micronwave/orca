@@ -61,16 +61,29 @@ $ orca goal "refactor the storage layer to use SQLite"
 ## Quickstart
 
 ### 1. Build and Install
+
+**macOS / Linux:**
 ```bash
 go build -o orca ./cmd/orca
-# Move the binary to your PATH
-mv orca /usr/local/bin/
+sudo mv orca /usr/local/bin/
 ```
 
+**Windows (PowerShell):**
+```powershell
+go build -o orca.exe ./cmd/orca
+# To run from anywhere, add the folder to your PATH:
+$env:Path += ";$(Get-Location)" 
+```
+*Note: To make it permanent on Windows, add the directory containing `orca.exe` to your "System Environment Variables".*
+
 ### 2. Initialize a Repository
-Run this in the root of the project you want Orca to manage.
+Run this in the root of the project you want Orca to manage (e.g., `E:\my-project`).
 ```bash
+# If orca is in your PATH:
 orca init
+
+# If not (Windows example):
+E:\orca\orca.exe init
 ```
 This creates a `.orca/` directory. You'll find a `config.yaml` inside. **Open it and set your test commands** (e.g., `go test ./...` or `npm test`) so Orca knows how to verify the work.
 
