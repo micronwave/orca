@@ -1837,3 +1837,320 @@ func TestReconcile_TopologyOutcomeSkippedWhenNoTopologyDecisionID(t *testing.T) 
 		t.Fatalf("topology outcomes = %d, want 0 when capsule has no TopologyDecisionID", len(outcomes))
 	}
 }
+
+// ── Claim supersession (item 9) ───────────────────────────────────────────────
+
+func TestReconcile_EmitsClaimSupersededForAcceptedPatch(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-CLAIMSUP"
+		condID  = "GC-CLAIMSUP"
+		oblID   = "OB-CLAIMSUP"
+		capsID  = "CAP-CLAIMSUP"
+		patchID = "PATCH-CLAIMSUP"
+		vrID    = "VR-CLAIMSUP"
+		evID    = "EV-CLAIMSUP"
+		oldClID = "CL-CLAIMSUP-OLD"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test supersession",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// Old claim that the patch supersedes.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         oldClID,
+		Text:            "old claim to be replaced",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: evID,
+		Type:       schema.EvidenceTestResult,
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{oblID},
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+	// Patch lists the old claim as superseded.
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+		SupersededClaimIDs:   []string{oldClID},
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{evID},
+		}},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted = false, want true: %s", result.BlockingReason)
+	}
+
+	// The old claim must now have SupersededBy set.
+	old, err := env.st.LoadClaim(env.ctx, oldClID)
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if old.SupersededBy != patchID {
+		t.Errorf("SupersededBy = %q, want %q", old.SupersededBy, patchID)
+	}
+
+	// A claim_superseded event must have been emitted.
+	events, err := env.log.ReadByType(env.ctx, schema.EventClaimSuperseded, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType claim_superseded: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("claim_superseded events = %d, want 1", len(events))
+	}
+	if events[0].ArtifactID != oldClID {
+		t.Errorf("event ArtifactID = %q, want %q", events[0].ArtifactID, oldClID)
+	}
+	// Event ordering: claim_superseded must appear after patch_accepted in the log.
+	acceptedEvents, err := env.log.ReadByType(env.ctx, schema.EventPatchAccepted, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType patch_accepted: %v", err)
+	}
+	if len(acceptedEvents) == 0 {
+		t.Fatal("no patch_accepted event found")
+	}
+	if events[0].SequenceNum <= acceptedEvents[len(acceptedEvents)-1].SequenceNum {
+		t.Errorf("claim_superseded seq=%d must be > patch_accepted seq=%d",
+			events[0].SequenceNum, acceptedEvents[len(acceptedEvents)-1].SequenceNum)
+	}
+}
+
+func TestReconcile_NoClaimSupersededForRejectedPatch(t *testing.T) {
+	// Supersession must NOT happen when the patch is rejected.
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "SUPREJ",
+		evidenceIDs:  nil,
+		saveEvidence: false,
+	})
+
+	// Seed an old claim that the patch wants to supersede.
+	const oldClID = "CL-SUPREJ-OLD"
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         oldClID,
+		Text:            "should not be superseded on rejected patch",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	// Update the patch to include the superseded claim ID (without re-saving through store.SavePatch).
+	// We directly save a new patch with SupersededClaimIDs set.
+	rejPatchID := "PATCH-SUPREJ-WITH-SUP"
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              rejPatchID,
+		CapsuleID:            ids.capsuleID,
+		ObligationIDsClaimed: []string{ids.obligationID},
+		Status:               schema.PatchCandidate,
+		SupersededClaimIDs:   []string{oldClID},
+	}); err != nil {
+		t.Fatalf("SavePatch with superseded IDs: %v", err)
+	}
+	// The verifier result points at the new patch (no evidence → rejection).
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: "VR-SUPREJ-B",
+		PatchID:          rejPatchID,
+		CapsuleID:        ids.capsuleID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: ids.obligationID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  nil,
+		}},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, rejPatchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted = true, want false (no evidence)")
+	}
+
+	// Claim must still have empty SupersededBy — rejection must not trigger supersession.
+	old, err := env.st.LoadClaim(env.ctx, oldClID)
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if old.SupersededBy != "" {
+		t.Errorf("SupersededBy = %q on rejected patch, want empty", old.SupersededBy)
+	}
+	events, err := env.log.ReadByType(env.ctx, schema.EventClaimSuperseded, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType claim_superseded: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("claim_superseded events = %d on rejected patch, want 0", len(events))
+	}
+}
+
+func TestReconcileAcceptedPatch_MarksRepoScopedClaimsStale(t *testing.T) {
+	// Repo-scoped claims (GoalID="" and SourceCapsuleID="") whose AffectedFiles
+	// overlap with a newly accepted patch must be marked stale.
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "REPOSTALE",
+		evidenceIDs:  []string{"EV-REPOSTALE"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/schema/common.go"},
+	})
+
+	// Repo-scoped claim: no GoalID, no SourceCapsuleID.
+	const repoClaimID = "CL-REPO-STALE"
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:       repoClaimID,
+		Text:          "codebase uses errors.As for error inspection",
+		ClaimType:     schema.ClaimInvariant,
+		AffectedFiles: []string{"internal/schema/common.go"},
+		Status:        schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim repo-scoped: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted=false: %s", result.BlockingReason)
+	}
+
+	repoClaim, err := env.st.LoadClaim(env.ctx, repoClaimID)
+	if err != nil {
+		t.Fatalf("LoadClaim repo-scoped: %v", err)
+	}
+	if repoClaim.Status != schema.ClaimStale {
+		t.Errorf("repo-scoped claim status = %s, want stale", repoClaim.Status)
+	}
+}
+
+func TestFreshnessCheck_MarksRepoScopedClaimsStale(t *testing.T) {
+	// FreshnessCheck must mark repo-scoped verified claims stale when their
+	// LastValidatedAgainst snapshot predates an accepted patch that touched
+	// the claim's affected files.
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "REPOFRESH",
+		evidenceIDs:  []string{"EV-REPOFRESH"},
+		saveEvidence: true,
+		changedFiles: []string{"internal/schema/common.go"},
+	})
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-REPOFRESH-OLD",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-REPOFRESH-OLD",
+		SequenceNum: 1,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot old: %v", err)
+	}
+
+	// Repo-scoped claim validated against the old snapshot.
+	const repoClaimID = "CL-REPO-FRESH"
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:              repoClaimID,
+		Text:                 "repo-wide invariant about common.go",
+		ClaimType:            schema.ClaimInvariant,
+		AffectedFiles:        []string{"internal/schema/common.go"},
+		Status:               schema.ClaimVerified,
+		LastValidatedAgainst: "SNAP-REPOFRESH-OLD",
+	}); err != nil {
+		t.Fatalf("SaveClaim repo-scoped: %v", err)
+	}
+
+	// Simulate an accepted patch touching the same file via a log event.
+	if _, err := env.log.Append(env.ctx, schema.Event{
+		Type:       schema.EventPatchAccepted,
+		GoalID:     ids.goalID,
+		ArtifactID: ids.patchID,
+		Payload:    marshalJSON(t, schema.PatchStatusPayload{PatchID: ids.patchID}),
+	}); err != nil {
+		t.Fatalf("append patch accepted: %v", err)
+	}
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-REPOFRESH-CURRENT",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-REPOFRESH-CURRENT",
+		SequenceNum: 100,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot current: %v", err)
+	}
+
+	if err := New(env.st, env.log, Config{}).FreshnessCheck(env.ctx, ids.goalID); err != nil {
+		t.Fatalf("FreshnessCheck: %v", err)
+	}
+
+	repoClaim, err := env.st.LoadClaim(env.ctx, repoClaimID)
+	if err != nil {
+		t.Fatalf("LoadClaim repo-scoped: %v", err)
+	}
+	if repoClaim.Status != schema.ClaimStale {
+		t.Errorf("repo-scoped claim status = %s, want stale", repoClaim.Status)
+	}
+}

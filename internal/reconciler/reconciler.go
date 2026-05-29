@@ -317,6 +317,9 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
 			return ReconcileResult{}, err
 		}
+		if err := s.processSupersededClaims(ctx, goal.GoalID, patch); err != nil {
+			return ReconcileResult{}, err
+		}
 	}
 	if err := s.detectClaimDisputes(ctx, goal.GoalID, vr); err != nil {
 		return ReconcileResult{}, err

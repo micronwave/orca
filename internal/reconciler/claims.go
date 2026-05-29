@@ -11,6 +11,41 @@ import (
 	"github.com/micronwave/orca/internal/store"
 )
 
+// processSupersededClaims marks each claim listed in patch.SupersededClaimIDs as
+// superseded by the patch, emitting a claim_superseded event for each one.
+// Only called for accepted patches; skips claims that are already superseded or missing.
+func (s *Reconciler) processSupersededClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
+	if patch == nil || len(patch.SupersededClaimIDs) == 0 {
+		return nil
+	}
+	for _, claimID := range patch.SupersededClaimIDs {
+		if strings.TrimSpace(claimID) == "" {
+			continue
+		}
+		claim, err := s.store.LoadClaim(ctx, claimID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("reconciler: load claim %s for supersession: %w", claimID, err)
+		}
+		if strings.TrimSpace(claim.SupersededBy) != "" {
+			continue // already superseded by a prior patch
+		}
+		supEv, err := s.appendEvent(ctx, schema.EventClaimSuperseded, goalID, claimID, schema.ClaimSupersededPayload{
+			ClaimID:      claimID,
+			SupersededBy: patch.PatchID,
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpdateClaimSupersession(ctx, claimID, patch.PatchID); err != nil {
+			return &store.MaterializationError{Event: supEv, Err: fmt.Errorf("reconciler: update claim supersession %s: %w", claimID, err)}
+		}
+	}
+	return nil
+}
+
 func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string) error {
 	claims, err := s.store.LoadClaimsForCapsule(ctx, capsuleID)
 	if err != nil {
@@ -192,29 +227,45 @@ func (s *Reconciler) FreshnessCheck(ctx context.Context, goalID string) error {
 	if err != nil {
 		return fmt.Errorf("reconciler: load verified claims for goal %s: %w", goalID, err)
 	}
-	for _, claim := range claims {
-		if claim.LastValidatedAgainst == "" || claim.LastValidatedAgainst == current.SnapshotID {
-			continue
-		}
-		validation, err := s.store.LoadSnapshot(ctx, claim.LastValidatedAgainst)
-		if errors.Is(err, store.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("reconciler: load validation snapshot %s: %w", claim.LastValidatedAgainst, err)
-		}
-		stale, err := s.claimTouchedSince(ctx, goalID, claim, validation.SequenceNum, current.SequenceNum)
-		if err != nil {
-			return err
-		}
-		if !stale {
-			continue
-		}
-		if err := s.markClaimStatus(ctx, goalID, claim, schema.ClaimStale); err != nil {
-			return err
+	repoClaims, err := s.store.LoadRepoScopedClaims(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler: load repo-scoped claims: %w", err)
+	}
+	repoVerified := make([]*schema.ClaimArtifact, 0, len(repoClaims))
+	for _, c := range repoClaims {
+		if c.Status == schema.ClaimVerified {
+			repoVerified = append(repoVerified, c)
 		}
 	}
-	return nil
+	checkFreshness := func(claimsToCheck []*schema.ClaimArtifact, evGoalID string) error {
+		for _, claim := range claimsToCheck {
+			if claim.LastValidatedAgainst == "" || claim.LastValidatedAgainst == current.SnapshotID {
+				continue
+			}
+			validation, err := s.store.LoadSnapshot(ctx, claim.LastValidatedAgainst)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("reconciler: load validation snapshot %s: %w", claim.LastValidatedAgainst, err)
+			}
+			stale, err := s.claimTouchedSince(ctx, goalID, claim, validation.SequenceNum, current.SequenceNum)
+			if err != nil {
+				return err
+			}
+			if !stale {
+				continue
+			}
+			if err := s.markClaimStatus(ctx, evGoalID, claim, schema.ClaimStale); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := checkFreshness(claims, goalID); err != nil {
+		return err
+	}
+	return checkFreshness(repoVerified, "")
 }
 
 func (s *Reconciler) claimTouchedSince(ctx context.Context, goalID string, claim *schema.ClaimArtifact, afterSeq, throughSeq int64) (bool, error) {
@@ -291,11 +342,15 @@ func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, p
 	if patch == nil {
 		return nil
 	}
-	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
+	goalClaims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
 		return fmt.Errorf("reconciler: load claims for goal %s: %w", goalID, err)
 	}
-	if len(claims) == 0 {
+	repoClaims, err := s.store.LoadRepoScopedClaims(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler: load repo-scoped claims: %w", err)
+	}
+	if len(goalClaims) == 0 && len(repoClaims) == 0 {
 		return nil
 	}
 	currentCapsuleClaims, err := s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
@@ -316,18 +371,24 @@ func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, p
 			}
 		}
 	}
-	for _, claim := range claims {
-		if claim.Status != schema.ClaimVerified || claim.SourceCapsuleID == patch.CapsuleID {
-			continue
+	checkClaims := func(claims []*schema.ClaimArtifact, evGoalID string) error {
+		for _, claim := range claims {
+			if claim.Status != schema.ClaimVerified || claim.SourceCapsuleID == patch.CapsuleID {
+				continue
+			}
+			fileOverlap := hasOverlap(normalizedSet(claim.AffectedFiles), changedFiles)
+			symbolOverlap := hasOverlap(normalizedSymbols(claim.AffectedSymbols), changedSymbols)
+			if !fileOverlap && !symbolOverlap {
+				continue
+			}
+			if err := s.markClaimStatus(ctx, evGoalID, claim, schema.ClaimStale); err != nil {
+				return err
+			}
 		}
-		fileOverlap := hasOverlap(normalizedSet(claim.AffectedFiles), changedFiles)
-		symbolOverlap := hasOverlap(normalizedSymbols(claim.AffectedSymbols), changedSymbols)
-		if !fileOverlap && !symbolOverlap {
-			continue
-		}
-		if err := s.markClaimStatus(ctx, goalID, claim, schema.ClaimStale); err != nil {
-			return err
-		}
+		return nil
 	}
-	return nil
+	if err := checkClaims(goalClaims, goalID); err != nil {
+		return err
+	}
+	return checkClaims(repoClaims, "")
 }
