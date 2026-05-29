@@ -1,0 +1,17 @@
+# Build outputs
+*.exe
+build/
+
+# Frontend build output (populated by npm run build / wails build)
+frontend/dist/assets/
+
+# Wails generates real bindings that override the stubs in wailsjs/
+# Stubs are committed; generated .js/.d.ts files are not.
+frontend/wailsjs/go/**/*.js
+frontend/wailsjs/go/**/*.d.ts
+frontend/wailsjs/runtime/*.js
+frontend/wailsjs/runtime/*.d.ts
+
+# Node
+frontend/node_modules/
+frontend/package-lock.json
