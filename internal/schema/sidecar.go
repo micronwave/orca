@@ -57,4 +57,8 @@ type AgentSidecarOutput struct {
 	// WallTimeSeconds is measured by the adapter/runner around CLI execution.
 	// Zero means the duration could not be determined.
 	WallTimeSeconds float64 `json:"wall_time_seconds"`
+	// ContradictedClaimIDs lists existing claim IDs that this agent output
+	// completely supersedes. The reconciler sets SupersededBy on each listed
+	// claim and emits a claim_superseded event for each.
+	ContradictedClaimIDs []string `json:"contradicted_claim_ids,omitempty"`
 }

@@ -47,6 +47,9 @@ const (
 	EventPRCreated                 EventType = "pr_created"
 	EventCIStatusReceived          EventType = "ci_status_received"
 	EventIntakeIssueIngested       EventType = "intake_issue_ingested"
+	// EventClaimSuperseded is emitted by the reconciler when a claim's SupersededBy
+	// field is set, indicating it has been replaced by a newer artifact.
+	EventClaimSuperseded EventType = "claim_superseded"
 )
 
 // Event is one entry in the append-only event log.
@@ -121,4 +124,11 @@ type CapsuleProjectionPayload struct {
 type TopologySelectedPayload struct {
 	Topology   Topology `json:"topology"`
 	DecisionID string   `json:"decision_id"`
+}
+
+// ClaimSupersededPayload is the event payload for claim_superseded.
+// SupersededBy is the ID of the artifact (claim, patch, or capsule) that replaced this claim.
+type ClaimSupersededPayload struct {
+	ClaimID      string `json:"claim_id"`
+	SupersededBy string `json:"superseded_by"`
 }
