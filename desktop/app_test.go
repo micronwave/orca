@@ -357,7 +357,7 @@ func TestEvidenceSupportsClaimed(t *testing.T) {
 
 // ── loadActiveGoalScope tests ─────────────────────────────────────────────────
 
-func TestLoadActiveGoalScope_scopsObligationsToActiveGoal(t *testing.T) {
+func TestLoadActiveGoalScopeFromDir_scopsObligationsToActiveGoal(t *testing.T) {
 	orcaDir := t.TempDir()
 	goalDir := filepath.Join(orcaDir, "state", "goals")
 	oblDir := filepath.Join(orcaDir, "state", "obligations")
@@ -400,10 +400,9 @@ func TestLoadActiveGoalScope_scopsObligationsToActiveGoal(t *testing.T) {
 		Status:          "satisfied",
 	})
 
-	app := NewApp(orcaDir)
-	scope, err := app.loadActiveGoalScope()
+	scope, err := loadActiveGoalScopeFromDir(orcaDir)
 	if err != nil {
-		t.Fatalf("loadActiveGoalScope: %v", err)
+		t.Fatalf("loadActiveGoalScopeFromDir: %v", err)
 	}
 	if !scope.obligationIDs["OB-A"] {
 		t.Error("OB-A should be in scope")
@@ -413,6 +412,49 @@ func TestLoadActiveGoalScope_scopsObligationsToActiveGoal(t *testing.T) {
 	}
 	if len(scope.obligations) != 1 || scope.obligations[0].ObligationID != "OB-A" {
 		t.Errorf("scope.obligations: got %v, want [OB-A]", scope.obligations)
+	}
+}
+
+// ── filterVerifierResultsByScope tests ───────────────────────────────────────
+
+func TestFilterVerifierResultsByScope_noActiveGoal_returnsAll(t *testing.T) {
+	scope := goalScope{} // no conditionIDs → no active goal
+	vrs := []verifierResultDisk{
+		{VerifierResultID: "VR-1", CapsuleID: "CAP-OLD"},
+		{VerifierResultID: "VR-2", CapsuleID: "CAP-ALSO-OLD"},
+	}
+	got := filterVerifierResultsByScope(vrs, scope)
+	if len(got) != 2 {
+		t.Errorf("expected all 2 results returned when no active goal, got %d", len(got))
+	}
+}
+
+func TestFilterVerifierResultsByScope_activeGoalNoCapsules_returnsNone(t *testing.T) {
+	scope := goalScope{
+		conditionIDs:  map[string]bool{"GC-A": true},
+		capsuleIDs:    map[string]bool{}, // active goal exists but has no capsules yet
+	}
+	vrs := []verifierResultDisk{
+		{VerifierResultID: "VR-OLD", CapsuleID: "CAP-OLD"},
+	}
+	got := filterVerifierResultsByScope(vrs, scope)
+	if len(got) != 0 {
+		t.Errorf("expected empty slice when active goal has no capsules, got %d results", len(got))
+	}
+}
+
+func TestFilterVerifierResultsByScope_filtersToActiveGoalCapsules(t *testing.T) {
+	scope := goalScope{
+		conditionIDs:  map[string]bool{"GC-A": true},
+		capsuleIDs:    map[string]bool{"CAP-A": true},
+	}
+	vrs := []verifierResultDisk{
+		{VerifierResultID: "VR-A", CapsuleID: "CAP-A"},
+		{VerifierResultID: "VR-OLD", CapsuleID: "CAP-OLD"},
+	}
+	got := filterVerifierResultsByScope(vrs, scope)
+	if len(got) != 1 || got[0].VerifierResultID != "VR-A" {
+		t.Errorf("expected only VR-A, got %v", got)
 	}
 }
 

@@ -247,25 +247,25 @@ func (a *App) GetBudgetSummary() (*BudgetSummary, error) {
 // GetMergeReadiness derives the merge-readiness string from the current
 // artifact state. Mirrors the logic in cmd/orca.printStatus.
 func (a *App) GetMergeReadiness() (string, error) {
-	scope, err := a.loadActiveGoalScope()
+	dir := a.dir() // snapshot once for a consistent read across all scans
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return "unknown", err
 	}
-	obligations := filterObligationsByScope(scope.obligations, scope)
-	verifierResults, err := scanDir[verifierResultDisk](orcaPath(a.dir(), relVerifierResults))
+	verifierResults, err := scanDir[verifierResultDisk](orcaPath(dir, relVerifierResults))
 	if err != nil {
 		return "unknown", err
 	}
 	verifierResults = filterVerifierResultsByScope(verifierResults, scope)
-	patches, err := scanDir[patchDisk](orcaPath(a.dir(), relPatches))
+	patches, err := scanDir[patchDisk](orcaPath(dir, relPatches))
 	if err != nil {
 		return "unknown", err
 	}
-	decisions, err := scanDir[decisionDisk](orcaPath(a.dir(), relDecisions))
+	decisions, err := scanDir[decisionDisk](orcaPath(dir, relDecisions))
 	if err != nil {
 		return "unknown", err
 	}
-	return deriveMergeReadiness(obligations, verifierResults, patches, decisions), nil
+	return deriveMergeReadiness(scope.obligations, verifierResults, patches, decisions), nil
 }
 
 // deriveMergeReadiness is the pure merge-readiness logic, extracted for testing.
@@ -313,26 +313,25 @@ func deriveMergeReadiness(
 // GetBlockedDecisions derives the set of human-gate decisions that are needed
 // but have not yet been made.
 func (a *App) GetBlockedDecisions() ([]PendingGate, error) {
-	scope, err := a.loadActiveGoalScope()
+	dir := a.dir() // snapshot once for a consistent read across all scans
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	obligations := filterObligationsByScope(scope.obligations, scope)
-	capsules := filterCapsulesByScope(scope.capsules, scope)
-	patches, err := scanDir[patchDisk](orcaPath(a.dir(), relPatches))
+	patches, err := scanDir[patchDisk](orcaPath(dir, relPatches))
 	if err != nil {
 		return nil, err
 	}
-	verifierResults, err := scanDir[verifierResultDisk](orcaPath(a.dir(), relVerifierResults))
+	verifierResults, err := scanDir[verifierResultDisk](orcaPath(dir, relVerifierResults))
 	if err != nil {
 		return nil, err
 	}
 	verifierResults = filterVerifierResultsByScope(verifierResults, scope)
-	decisions, err := scanDir[decisionDisk](orcaPath(a.dir(), relDecisions))
+	decisions, err := scanDir[decisionDisk](orcaPath(dir, relDecisions))
 	if err != nil {
 		return nil, err
 	}
-	return deriveBlockedDecisions(obligations, capsules, patches, verifierResults, decisions), nil
+	return deriveBlockedDecisions(scope.obligations, scope.capsules, patches, verifierResults, decisions), nil
 }
 
 // ListDecisions returns all decision records, sorted by creation time descending.
@@ -534,11 +533,13 @@ type goalScope struct {
 	capsules    []capsuleDisk
 }
 
-// loadActiveGoalScope identifies the active (or most-recently-created) goal and
-// builds a goalScope from its conditions, obligations, and capsules.
+// loadActiveGoalScopeFromDir identifies the active (or most-recently-created)
+// goal from dir and builds a goalScope from its conditions, obligations, and
+// capsules. dir is the .orca/ root, snapshotted by the caller once per
+// operation to avoid mixed-directory reads if SetOrcaDir is called concurrently.
 // Returns a zero goalScope (empty maps, nil slices) when no goals exist.
-func (a *App) loadActiveGoalScope() (goalScope, error) {
-	goals, err := scanDir[goalDisk](orcaPath(a.dir(), relGoals))
+func loadActiveGoalScopeFromDir(dir string) (goalScope, error) {
+	goals, err := scanDir[goalDisk](orcaPath(dir, relGoals))
 	if err != nil {
 		return goalScope{}, err
 	}
@@ -554,7 +555,7 @@ func (a *App) loadActiveGoalScope() (goalScope, error) {
 	for _, c := range active.GoalConditions {
 		scope.conditionIDs[c.ID] = true
 	}
-	allObs, err := scanDir[obligationDisk](orcaPath(a.dir(), relObligations))
+	allObs, err := scanDir[obligationDisk](orcaPath(dir, relObligations))
 	if err != nil {
 		return goalScope{}, err
 	}
@@ -564,7 +565,7 @@ func (a *App) loadActiveGoalScope() (goalScope, error) {
 			scope.obligations = append(scope.obligations, o)
 		}
 	}
-	allCaps, err := scanDir[capsuleDisk](orcaPath(a.dir(), relCapsules))
+	allCaps, err := scanDir[capsuleDisk](orcaPath(dir, relCapsules))
 	if err != nil {
 		return goalScope{}, err
 	}
@@ -597,21 +598,17 @@ func findActiveGoalDisk(goals []goalDisk) *goalDisk {
 	return &goals[0]
 }
 
-// filterObligationsByScope returns the subset of obs whose GoalConditionID
-// belongs to the active goal. When scope has no conditions (no active goal),
-// all obligations are returned unchanged.
-func filterObligationsByScope(obs []obligationDisk, scope goalScope) []obligationDisk {
-	if len(scope.conditionIDs) == 0 {
-		return obs
-	}
-	return obs // already filtered by loadActiveGoalScope
-}
-
-// filterVerifierResultsByScope returns the subset of vrs whose CapsuleID
-// is in the active goal's capsule set.
+// filterVerifierResultsByScope returns the subset of vrs whose CapsuleID is in
+// the active goal's capsule set. When there is no active goal (conditionIDs is
+// empty), all results are returned. When there is an active goal but no capsules
+// have been created yet (capsuleIDs is empty), an empty slice is returned so
+// that historical verifier results from other goals are not mixed in.
 func filterVerifierResultsByScope(vrs []verifierResultDisk, scope goalScope) []verifierResultDisk {
+	if len(scope.conditionIDs) == 0 {
+		return vrs // no active goal — no filter
+	}
 	if len(scope.capsuleIDs) == 0 {
-		return vrs
+		return nil // active goal has no capsules yet; no valid results exist
 	}
 	out := vrs[:0:0]
 	for _, r := range vrs {
@@ -620,14 +617,5 @@ func filterVerifierResultsByScope(vrs []verifierResultDisk, scope goalScope) []v
 		}
 	}
 	return out
-}
-
-// filterCapsulesByScope returns the subset of caps whose CapsuleID is in the
-// active goal's capsule set.
-func filterCapsulesByScope(caps []capsuleDisk, scope goalScope) []capsuleDisk {
-	if len(scope.capsuleIDs) == 0 {
-		return caps
-	}
-	return caps // already filtered by loadActiveGoalScope
 }
 
