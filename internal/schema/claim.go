@@ -52,7 +52,7 @@ type ClaimArtifact struct {
 
 	// InjectionKeywords, if non-empty, gates injection: the claim is included
 	// only when at least one keyword appears in the current goal text or
-	// obligation descriptions. Empty falls back to file-path matching.
+	// obligation descriptions. Empty means no keyword gate.
 	InjectionKeywords []string `json:"injection_keywords,omitempty"`
 
 	// InjectionConditions are structured predicates evaluated against the current
