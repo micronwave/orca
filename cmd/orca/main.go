@@ -50,7 +50,10 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("orca: command is required (init, goal, status, cancel)")
+		if !isatty(os.Stdin) {
+			return fmt.Errorf("orca: command is required (init, goal, status, cancel)")
+		}
+		return runInteractive(".orca")
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return runGoal(args)
@@ -66,6 +69,8 @@ func run(args []string) error {
 		return runCancel(args[1:], os.Stdin, os.Stdout)
 	case "ci":
 		return runCI(args[1:])
+	case "ui":
+		return runUI(args[1:])
 	default:
 		return fmt.Errorf("orca: unknown command %q", args[0])
 	}
@@ -96,7 +101,8 @@ func runInit(args []string) (err error) {
 		return fmt.Errorf("orca init: create capsules dir: %w", err)
 	}
 	configPath := filepath.Join(*orcaDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o644); err != nil {
+	projectType := config.DetectProjectType(".")
+	if err := os.WriteFile(configPath, []byte(config.DefaultConfigYAML(projectType)), 0o644); err != nil {
 		return fmt.Errorf("orca init: write config.yaml: %w", err)
 	}
 	return nil
@@ -120,6 +126,9 @@ func runGoal(args []string) (err error) {
 	}
 	if *fromIssue <= 0 && goalText == "" {
 		return fmt.Errorf("orca goal: goal text is required (or use --from-issue)")
+	}
+	if err := autoInit(*orcaDir); err != nil {
+		return err
 	}
 	rt, closeFn, err := openRuntime(*orcaDir, *noLearning)
 	if err != nil {
@@ -931,77 +940,99 @@ func ensureInitTarget(orcaDir string) error {
 	return nil
 }
 
-func defaultConfigYAML() string {
-	return `# Orca Phase 5 local runtime configuration.
-# Keep this file in the simple shape supported by internal/config.Load:
-# sections, scalar values, and verifier.gates list items only.
+func isatty(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
 
-verifier:
-  # Gates run from working_dir when set; empty means the current process directory.
-  working_dir: ""
-  gates:
-    - name: "go_test"
-      command: "go test ./..."
-      blocking: true
-    - name: "go_vet"
-      command: "go vet ./..."
-      blocking: true
-    - name: "go_build"
-      command: "go build ./..."
-      blocking: true
+func mustAbs(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
 
-gate:
-  review_window_seconds: 30
+func printHelp() {
+	fmt.Println("Commands:")
+	fmt.Println("  <goal text>   run a goal")
+	fmt.Println("  /status       show active goal status")
+	fmt.Println("  /cancel       cancel active goal")
+	fmt.Println("  /help         show this help")
+	fmt.Println("  exit / quit   exit orca")
+}
 
-budget:
-  default_max_tokens: 32000
-  default_max_wall_time_seconds: 300
-  default_max_retries: 3
+func autoInit(orcaDir string) (err error) {
+	configPath := filepath.Join(orcaDir, "config.yaml")
+	if _, err := os.Stat(configPath); err == nil {
+		return nil
+	}
+	if err := ensureInitTarget(orcaDir); err != nil {
+		return err
+	}
+	log, err := eventlog.Open(filepath.Join(orcaDir, "events.log"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := log.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	if _, err := store.New(orcaDir, log); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(orcaDir, "capsules"), 0o755); err != nil {
+		return fmt.Errorf("autoInit: create capsules dir: %w", err)
+	}
+	projectType := config.DetectProjectType(".")
+	yaml := config.DefaultConfigYAML(projectType)
+	if err := os.WriteFile(configPath, []byte(yaml), 0o644); err != nil {
+		return fmt.Errorf("autoInit: write config.yaml: %w", err)
+	}
+	if projectType == "" {
+		fmt.Fprintf(os.Stderr, "Initialized %s/ (no project type detected; add gates to config.yaml).\n", orcaDir)
+	} else {
+		fmt.Fprintf(os.Stderr, "Initialized %s/ with %s defaults.\n", orcaDir, projectType)
+	}
+	return nil
+}
 
-adapters:
-  # Leave empty to resolve from PATH.
-  codex_path: ""
-  claude_path: ""
+func runInteractive(orcaDir string) error {
+	if err := autoInit(orcaDir); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case line == "":
+			continue
+		case line == "exit" || line == "quit":
+			return nil
+		case line == "/status":
+			_ = runStatus([]string{"--orca-dir", orcaDir})
+		case line == "/cancel":
+			_ = runCancel([]string{"--orca-dir", orcaDir}, os.Stdin, os.Stdout)
+		case line == "/help":
+			printHelp()
+		default:
+			_ = runGoal([]string{"--orca-dir", orcaDir, line})
+		}
+	}
+	return scanner.Err()
+}
 
-advanced:
-  # All advanced checks are off by default. Enable explicitly when needed.
-  enabled: false
-  maven: false
-  mutation: false
-  mutation_command: ""
-  mutation_timeout_seconds: 120
-  mutation_blocking: false
-  adversarial_tests: false
-  adversarial_command: ""
-  adversarial_timeout_seconds: 60
-  adversarial_blocking: false
-  reviewer_diversity: false
-
-mcp:
-  enabled: false
-  listen: "127.0.0.1:7070"
-
-intake:
-  github_token: ""
-  repo: ""
-
-pr:
-  enabled: false
-  base_branch: ""
-  draft: true
-  label: "orca-generated"
-
-ci:
-  provider: ""
-  poll_interval_seconds: 30
-  branch: ""
-
-remote:
-  enabled: false
-  host: ""
-  workspace: ""
-  ssh_key_path: ""
-`
+func runUI(args []string) error {
+	return fmt.Errorf("orca ui: not yet implemented")
 }
 
 func activeGoalError(goal *schema.GoalIR) error {
