@@ -20,8 +20,6 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/config"
-	"github.com/micronwave/orca/internal/eventlog"
-	"github.com/micronwave/orca/internal/store"
 )
 
 const (
@@ -35,8 +33,6 @@ type Poller struct {
 	cfg     config.CIConfig
 	token   string
 	repo    string
-	log     *eventlog.FileLog
-	store   *store.FileStore
 	apiBase string
 	httpDo  func(*http.Request) (*http.Response, error)
 }
@@ -56,15 +52,12 @@ func WithHTTPDo(fn func(*http.Request) (*http.Response, error)) Option {
 }
 
 // New returns a Poller. token is the GitHub API token (may be empty for
-// public repos); repo is "owner/repo". log and store are retained for future
-// intermediate-status writes and are not used in Phase 5.
-func New(cfg config.CIConfig, token, repo string, log *eventlog.FileLog, st *store.FileStore, opts ...Option) *Poller {
+// public repos); repo is "owner/repo".
+func New(cfg config.CIConfig, token, repo string, opts ...Option) *Poller {
 	p := &Poller{
 		cfg:     cfg,
 		token:   token,
 		repo:    repo,
-		log:     log,
-		store:   st,
 		apiBase: defaultAPIBase,
 		httpDo:  http.DefaultClient.Do,
 	}

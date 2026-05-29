@@ -15,7 +15,7 @@ import (
 // newTestPoller returns a Poller wired to server.
 func newTestPoller(t *testing.T, server *httptest.Server, cfg config.CIConfig) *cigate.Poller {
 	t.Helper()
-	return cigate.New(cfg, "tok", "owner/repo", nil, nil,
+	return cigate.New(cfg, "tok", "owner/repo",
 		cigate.WithAPIBase(server.URL),
 		cigate.WithHTTPDo(server.Client().Do),
 	)
