@@ -58,6 +58,26 @@ func (s *FileStore) LoadPRRecord(ctx context.Context, goalID string, prID string
 
 // ── CI Status Records ────────────────────────────────────────────────────────
 
+// LoadCIStatusRecord loads a CIStatusRecord by its record ID.
+func (s *FileStore) LoadCIStatusRecord(ctx context.Context, goalID string, recordID string) (*schema.CIStatusRecord, error) {
+	if err := validateArtifactID("goal", goalID); err != nil {
+		return nil, err
+	}
+	if err := validateArtifactID("ci status", recordID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, err := readFile[schema.CIStatusRecord](s.artifactPath(dirCIStatus, recordID))
+	if err != nil {
+		return nil, err
+	}
+	if r.GoalID != goalID {
+		return nil, ErrNotFound
+	}
+	return r, nil
+}
+
 // SaveCIStatusRecord persists a CIStatusRecord and appends a ci_status_received event.
 // goalID must match an existing goal.
 func (s *FileStore) SaveCIStatusRecord(ctx context.Context, goalID string, r *schema.CIStatusRecord) error {
@@ -86,6 +106,26 @@ func (s *FileStore) SaveCIStatusRecord(ctx context.Context, goalID string, r *sc
 }
 
 // ── Intake Records ───────────────────────────────────────────────────────────
+
+// LoadIntakeRecord loads an IntakeRecord by its record ID.
+func (s *FileStore) LoadIntakeRecord(ctx context.Context, goalID string, recordID string) (*schema.IntakeRecord, error) {
+	if err := validateArtifactID("goal", goalID); err != nil {
+		return nil, err
+	}
+	if err := validateArtifactID("intake", recordID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, err := readFile[schema.IntakeRecord](s.artifactPath(dirIntake, recordID))
+	if err != nil {
+		return nil, err
+	}
+	if r.GoalID != goalID {
+		return nil, ErrNotFound
+	}
+	return r, nil
+}
 
 // SaveIntakeRecord persists an IntakeRecord and appends an intake_issue_ingested event.
 // goalID must match an existing goal.
