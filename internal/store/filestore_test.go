@@ -1064,6 +1064,134 @@ func TestClaim_UpdateDisputeAndValidation(t *testing.T) {
 	}
 }
 
+// ── Repo-scoped Claims (item 9) ───────────────────────────────────────────────
+
+func TestClaim_RepoScoped_SaveLoad(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Repo-scoped claim: both GoalID and SourceCapsuleID are empty.
+	cl := &schema.ClaimArtifact{
+		ClaimID:   "CL-repo-1",
+		Text:      "errors.As is the preferred error inspection idiom",
+		ClaimType: schema.ClaimInvariant,
+		Status:    schema.ClaimVerified,
+	}
+	if err := e.st.SaveClaim(e.ctx, cl); err != nil {
+		t.Fatalf("SaveClaim repo-scoped: %v", err)
+	}
+	got, err := e.st.LoadClaim(e.ctx, "CL-repo-1")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if got.ClaimID != "CL-repo-1" || got.GoalID != "" || got.SourceCapsuleID != "" {
+		t.Errorf("unexpected claim: %+v", got)
+	}
+}
+
+func TestClaim_RepoScoped_EmitsEventWithoutGoalID(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	if err := e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+		ClaimID:   "CL-repo-1",
+		ClaimType: schema.ClaimInvariant,
+		Status:    schema.ClaimProposed,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	events, err := e.log.ReadByType(e.ctx, schema.EventClaimCreated, 0, 0)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ReadByType claim_created: %v, len=%d", err, len(events))
+	}
+	if events[0].GoalID != "" {
+		t.Errorf("repo-scoped claim event.GoalID = %q, want empty", events[0].GoalID)
+	}
+}
+
+func TestLoadRepoScopedClaims_returnsOnlyRepoScoped(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.seedGoal(t, "G-rs", "GC-rs")
+	e.seedObligation(t, "OB-rs", "GC-rs", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-rs", "OB-rs")
+
+	for _, cl := range []*schema.ClaimArtifact{
+		// Goal-scoped via SourceCapsuleID chain.
+		{ClaimID: "CL-goal", SourceCapsuleID: "CAP-rs", Status: schema.ClaimVerified},
+		// Repo-scoped: no GoalID or SourceCapsuleID.
+		{ClaimID: "CL-repo-a", Status: schema.ClaimVerified},
+		{ClaimID: "CL-repo-b", Status: schema.ClaimProposed},
+	} {
+		if err := e.st.SaveClaim(e.ctx, cl); err != nil {
+			t.Fatalf("SaveClaim %s: %v", cl.ClaimID, err)
+		}
+	}
+
+	out, err := e.st.LoadRepoScopedClaims(e.ctx)
+	if err != nil {
+		t.Fatalf("LoadRepoScopedClaims: %v", err)
+	}
+	ids := claimIDs(out)
+	if len(out) != 2 {
+		t.Fatalf("LoadRepoScopedClaims = %v, want [CL-repo-a CL-repo-b]", ids)
+	}
+	for _, id := range ids {
+		if id != "CL-repo-a" && id != "CL-repo-b" {
+			t.Errorf("unexpected claim ID %q in repo-scoped results", id)
+		}
+	}
+}
+
+func TestLoadClaimsForGoal_excludesRepoScopedClaims(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.seedGoal(t, "G-excl", "GC-excl")
+	e.seedObligation(t, "OB-excl", "GC-excl", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-excl", "OB-excl")
+
+	for _, cl := range []*schema.ClaimArtifact{
+		{ClaimID: "CL-goal-1", SourceCapsuleID: "CAP-excl", Status: schema.ClaimVerified},
+		// Repo-scoped must not appear in LoadClaimsForGoal.
+		{ClaimID: "CL-repo-x", Status: schema.ClaimVerified},
+	} {
+		if err := e.st.SaveClaim(e.ctx, cl); err != nil {
+			t.Fatalf("SaveClaim %s: %v", cl.ClaimID, err)
+		}
+	}
+
+	out, err := e.st.LoadClaimsForGoal(e.ctx, "G-excl")
+	if err != nil {
+		t.Fatalf("LoadClaimsForGoal: %v", err)
+	}
+	if len(out) != 1 || out[0].ClaimID != "CL-goal-1" {
+		t.Fatalf("LoadClaimsForGoal(G-excl) = %v, want [CL-goal-1]", claimIDs(out))
+	}
+}
+
+func TestUpdateClaimSupersession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.seedGoal(t, "G-sup", "GC-sup")
+	e.seedObligation(t, "OB-sup", "GC-sup", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-sup", "OB-sup")
+	if err := e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-old",
+		SourceCapsuleID: "CAP-sup",
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	if err := e.st.UpdateClaimSupersession(e.ctx, "CL-old", "PATCH-new"); err != nil {
+		t.Fatalf("UpdateClaimSupersession: %v", err)
+	}
+	got, err := e.st.LoadClaim(e.ctx, "CL-old")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if got.SupersededBy != "PATCH-new" {
+		t.Errorf("SupersededBy = %q, want %q", got.SupersededBy, "PATCH-new")
+	}
+}
+
 func TestGoal_LoadActiveGoal(t *testing.T) {
 	e := newEnv(t)
 
@@ -1854,6 +1982,41 @@ func TestReplay_AppliesClaimStatusUpdated(t *testing.T) {
 		len(got.ContradictedBy) != 1 || got.ContradictedBy[0] != "CL-2" ||
 		len(got.InvalidatedBy) != 1 || got.InvalidatedBy[0] != "CL-3" {
 		t.Errorf("claim after replay = %+v, want contested with dispute metadata", got)
+	}
+}
+
+func TestReplay_AppliesClaimSuperseded(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SaveClaim(e.ctx, &schema.ClaimArtifact{
+		ClaimID: "CL-sup", SourceCapsuleID: "CAP-1", Status: schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	if _, err := e.log.Append(e.ctx, schema.Event{
+		Type:       schema.EventClaimSuperseded,
+		GoalID:     "G-1",
+		ArtifactID: "CL-sup",
+		Payload: marshalJSON(t, schema.ClaimSupersededPayload{
+			ClaimID:      "CL-sup",
+			SupersededBy: "PATCH-new",
+		}),
+	}); err != nil {
+		t.Fatalf("Append claim_superseded: %v", err)
+	}
+
+	wipeArtifacts(t, e)
+	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	got, err := e.st.LoadClaim(e.ctx, "CL-sup")
+	if err != nil {
+		t.Fatalf("LoadClaim after replay: %v", err)
+	}
+	if got.SupersededBy != "PATCH-new" {
+		t.Errorf("SupersededBy after replay = %q, want %q", got.SupersededBy, "PATCH-new")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/micronwave/orca/internal/schema"
 )
@@ -25,10 +26,22 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 	if err := ensureArtifactAbsent("claim", s.artifactPath(dirClaims, c.ClaimID), c.ClaimID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
-	if err != nil {
-		return fmt.Errorf("store: SaveClaim: %w", err)
+	// Resolve goalID for the event log. Repo-scoped claims (GoalID == "" and
+	// SourceCapsuleID == "") are not bound to any goal; their event goalID is "".
+	var goalID string
+	if strings.TrimSpace(c.GoalID) != "" {
+		if err := s.requireExistingGoal(c.GoalID); err != nil {
+			return fmt.Errorf("store: SaveClaim: %w", err)
+		}
+		goalID = c.GoalID
+	} else if strings.TrimSpace(c.SourceCapsuleID) != "" {
+		resolved, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
+		if err != nil {
+			return fmt.Errorf("store: SaveClaim: %w", err)
+		}
+		goalID = resolved
 	}
+	// goalID == "" for repo-scoped claims; event is appended without a goal binding.
 	ev, err := s.appendEvent(ctx, schema.EventClaimCreated, goalID, c.ClaimID, c)
 	if err != nil {
 		return err
@@ -111,6 +124,18 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 	}
 	out := make([]*schema.ClaimArtifact, 0, len(all))
 	for _, claim := range all {
+		// Repo-scoped claims (both GoalID and SourceCapsuleID empty) are excluded
+		// from goal-scoped queries; use LoadRepoScopedClaims for those.
+		if strings.TrimSpace(claim.GoalID) == "" && strings.TrimSpace(claim.SourceCapsuleID) == "" {
+			continue
+		}
+		// Short-circuit: if GoalID is set directly, compare without capsule chain.
+		if strings.TrimSpace(claim.GoalID) != "" {
+			if claim.GoalID == goalID {
+				out = append(out, claim)
+			}
+			continue
+		}
 		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
@@ -147,6 +172,16 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 		if claim.Status != status {
 			continue
 		}
+		// Exclude repo-scoped claims from goal-scoped status queries.
+		if strings.TrimSpace(claim.GoalID) == "" && strings.TrimSpace(claim.SourceCapsuleID) == "" {
+			continue
+		}
+		if strings.TrimSpace(claim.GoalID) != "" {
+			if claim.GoalID == goalID {
+				out = append(out, claim)
+			}
+			continue
+		}
 		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
@@ -159,6 +194,40 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 		}
 	}
 	return out, nil
+}
+
+// LoadRepoScopedClaims returns all repo-scoped claims — those with both GoalID
+// and SourceCapsuleID empty. These claims persist across all goals.
+func (s *FileStore) LoadRepoScopedClaims(ctx context.Context) ([]*schema.ClaimArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.ClaimArtifact](ctx, filepath.Join(s.root, dirClaims))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*schema.ClaimArtifact, 0)
+	for _, claim := range all {
+		if strings.TrimSpace(claim.GoalID) == "" && strings.TrimSpace(claim.SourceCapsuleID) == "" {
+			out = append(out, claim)
+		}
+	}
+	return out, nil
+}
+
+// UpdateClaimSupersession sets the SupersededBy field on a claim artifact.
+// The caller must append a claim_superseded event to the event log before calling this.
+func (s *FileStore) UpdateClaimSupersession(ctx context.Context, claimID, supersededBy string) error {
+	if err := validateArtifactID("claim", claimID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, claimID))
+	if err != nil {
+		return err
+	}
+	c.SupersededBy = supersededBy
+	return s.writeFile(s.artifactPath(dirClaims, claimID), c)
 }
 
 func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error {

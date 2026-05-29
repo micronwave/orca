@@ -281,6 +281,19 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.updateClaimStatusNoLock(p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
 
+	case schema.EventClaimSuperseded:
+		var p schema.ClaimSupersededPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal claim_superseded payload: %w", err)
+		}
+		if p.ClaimID == "" || p.SupersededBy == "" {
+			return fmt.Errorf("invalid claim_superseded payload: claim_id and superseded_by are required")
+		}
+		if err := validateArtifactID("claim", p.ClaimID); err != nil {
+			return err
+		}
+		return s.updateClaimSupersessionNoLock(p.ClaimID, p.SupersededBy)
+
 	case schema.EventCapsuleStarted, schema.EventCapsuleStateUpdated, schema.EventCapsuleCompleted:
 		var p schema.CapsuleTransitionPayload
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
@@ -375,6 +388,18 @@ func (s *FileStore) updateObligationStatusNoLock(obligationID string, status sch
 		o.SatisfiedBy = *satisfiedBy
 	}
 	return s.writeFile(path, o)
+}
+
+// updateClaimSupersessionNoLock sets SupersededBy on a claim artifact file.
+// Caller must hold s.mu.Lock().
+func (s *FileStore) updateClaimSupersessionNoLock(claimID, supersededBy string) error {
+	path := s.artifactPath(dirClaims, claimID)
+	c, err := readFile[schema.ClaimArtifact](path)
+	if err != nil {
+		return err
+	}
+	c.SupersededBy = supersededBy
+	return s.writeFile(path, c)
 }
 
 // updateClaimStatusNoLock reads the claim file, applies status metadata, writes back.
