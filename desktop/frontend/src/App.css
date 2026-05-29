@@ -1,0 +1,211 @@
+:root {
+  --bg: #1b2636;
+  --bg-card: #243447;
+  --bg-card-alt: #1e2e40;
+  --border: #2e4562;
+  --text: #d0daea;
+  --text-muted: #7a95b0;
+  --accent: #4d9ef7;
+  --green: #3cb86a;
+  --yellow: #e8be44;
+  --red: #e05252;
+  --font: 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Consolas', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root { height: 100vh; display: flex; flex-direction: column; }
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.header h1 { font-size: 15px; font-weight: 600; }
+.header .intent {
+  flex: 1;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.badge-ready    { background: #1e4a2e; color: var(--green); }
+.badge-blocked  { background: #4a1e1e; color: var(--red); }
+.badge-review   { background: #4a3a1e; color: var(--yellow); }
+.badge-pending  { background: #1e2e4a; color: var(--accent); }
+.badge-unknown  { background: var(--bg-card-alt); color: var(--text-muted); }
+.badge-status   { background: var(--bg-card-alt); color: var(--text); }
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr 1fr;
+  gap: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 10px;
+  gap: 10px;
+}
+.col:last-child { border-right: none; }
+
+/* ── Card ──────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--bg-card-alt);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.card-header .count {
+  background: var(--bg);
+  color: var(--text-muted);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+}
+.card-body { padding: 8px 10px; }
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tbl td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #1c2e40;
+  vertical-align: top;
+  font-size: 12px;
+}
+.tbl tr:last-child td { border-bottom: none; }
+.tbl tr:hover td { background: rgba(255,255,255,0.03); }
+
+/* ── Risk / status chips ───────────────────────────────────────────────── */
+.chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.chip-high   { background: #4a1e1e; color: var(--red); }
+.chip-medium { background: #4a3a1e; color: var(--yellow); }
+.chip-low    { background: #1e3a2e; color: var(--green); }
+.chip-open       { color: var(--accent); }
+.chip-satisfied  { color: var(--green); }
+.chip-failed     { color: var(--red); }
+.chip-waived     { color: var(--text-muted); }
+.chip-pending    { color: var(--accent); }
+.chip-accepted   { color: var(--green); }
+.chip-rejected   { color: var(--red); }
+.chip-candidate  { color: var(--text-muted); }
+.chip-running    { color: var(--yellow); }
+.chip-completed  { color: var(--green); }
+.chip-failed-c   { color: var(--red); }
+
+/* ── Mono path ─────────────────────────────────────────────────────────── */
+.mono { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+
+/* ── Conditions ────────────────────────────────────────────────────────── */
+.condition-item {
+  display: flex;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid #1c2e40;
+  font-size: 12px;
+}
+.condition-item:last-child { border-bottom: none; }
+
+/* ── Evidence panel ────────────────────────────────────────────────────── */
+.evidence-item {
+  padding: 6px 0;
+  border-bottom: 1px solid #1c2e40;
+}
+.evidence-item:last-child { border-bottom: none; }
+.evidence-command { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+.evidence-summary { font-size: 12px; margin-top: 2px; }
+
+/* ── Blocked decisions ─────────────────────────────────────────────────── */
+.gate-item {
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: #4a1e1e;
+  border: 1px solid #7a2e2e;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.gate-item:last-child { margin-bottom: 0; }
+.gate-type { font-weight: 600; color: var(--red); font-size: 11px; }
+
+/* ── Budget ─────────────────────────────────────────────────────────────── */
+.budget-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid #1c2e40;
+}
+.budget-row:last-child { border-bottom: none; }
+.budget-val { color: var(--accent); font-family: var(--mono); }
+
+/* ── Patch selector ─────────────────────────────────────────────────────── */
+.patch-row { cursor: pointer; }
+.patch-row.selected td { background: rgba(77,158,247,0.08); }
+
+/* ── Loading / empty ────────────────────────────────────────────────────── */
+.empty { color: var(--text-muted); font-size: 12px; padding: 8px 0; }
+.loading { color: var(--text-muted); font-size: 12px; padding: 20px; text-align: center; }
+.error-bar {
+  background: #4a1e1e;
+  color: var(--red);
+  padding: 6px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid #7a2e2e;
+  flex-shrink: 0;
+}
