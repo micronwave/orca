@@ -140,7 +140,8 @@ func (a *App) ListEvidence(patchID string) ([]EvidenceView, error) {
 	if patchID == "" {
 		return []EvidenceView{}, nil
 	}
-	patch, err := readFile[patchDisk](filepath.Join(orcaPath(a.dir(), relPatches), patchID+".json"))
+	dir := a.dir() // snapshot once so both reads use the same directory
+	patch, err := readFile[patchDisk](filepath.Join(orcaPath(dir, relPatches), patchID+".json"))
 	if err != nil || patch == nil {
 		return []EvidenceView{}, nil
 	}
@@ -150,7 +151,7 @@ func (a *App) ListEvidence(patchID string) ([]EvidenceView, error) {
 		claimed[id] = true
 	}
 
-	allEvidence, err := scanDir[evidenceDisk](orcaPath(a.dir(), relEvidence))
+	allEvidence, err := scanDir[evidenceDisk](orcaPath(dir, relEvidence))
 	if err != nil {
 		return nil, err
 	}

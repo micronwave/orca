@@ -512,15 +512,25 @@ func TestGetMergeReadiness_ignoresObligationsFromOtherGoals(t *testing.T) {
 			{ObligationID: "OB-A", Verdict: "satisfied"},
 		},
 	})
+	// Historical VR from a different (old-goal) capsule with blocking failures —
+	// must not affect the active-goal readiness result.
+	writeJSON(t, filepath.Join(vrDir, "VR-OLD.json"), verifierResultDisk{
+		VerifierResultID: "VR-OLD",
+		PatchID:          "PATCH-OLD",
+		CapsuleID:        "CAP-OLD",
+		CreatedAt:        now.Add(-30 * time.Minute),
+		BlockingFailures: []string{"historical test failure"},
+	})
 
 	app := NewApp(orcaDir)
 	readiness, err := app.GetMergeReadiness()
 	if err != nil {
 		t.Fatalf("GetMergeReadiness: %v", err)
 	}
-	// Should be "ready"; without goal scoping it would return "blocked" due to OB-OLD.
+	// Should be "ready"; without VR scoping it would return "blocked" due to VR-OLD's
+	// blocking failures, and without obligation scoping it would also be blocked by OB-OLD.
 	if readiness != "ready" {
-		t.Errorf("got %q, want ready (old-goal obligation must not affect active-goal readiness)", readiness)
+		t.Errorf("got %q, want ready (old-goal VR and obligation must not affect active-goal readiness)", readiness)
 	}
 }
 
