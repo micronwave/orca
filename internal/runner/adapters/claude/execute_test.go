@@ -62,6 +62,18 @@ func fakeClaudeMain(mode string) int {
 		inner, _ := json.Marshal(schema.AgentSidecarOutput{})
 		data, _ := json.Marshal(claudeJSONResult{Result: string(inner), IsError: false})
 		fmt.Println(string(data))
+	case "valid_nonzero":
+		// Writes a valid JSON envelope to stdout then exits 1 to simulate a
+		// context timeout or cleanup error that fires after output is complete.
+		inner, _ := json.Marshal(schema.AgentSidecarOutput{
+			ObligationsAddressed: []string{"OB-77"},
+			FilesChanged:         []string{"pkg/bar.go"},
+			CommandsRun:          []string{"go vet ./..."},
+			Summary:              "review complete",
+		})
+		data, _ := json.Marshal(claudeJSONResult{Result: string(inner), IsError: false})
+		fmt.Println(string(data))
+		return 1
 	default:
 		fmt.Fprintln(os.Stderr, "fake claude: unknown mode:", mode)
 		return 2
@@ -161,5 +173,25 @@ func TestExecute_EmptySidecar_ErrInvalidSidecar(t *testing.T) {
 	_, err := adapter.Execute(context.Background(), claudeTestCapsule(t.TempDir()), claudeTestProjection())
 	if !errors.Is(err, runner.ErrInvalidSidecar) {
 		t.Errorf("err = %v, want ErrInvalidSidecar", err)
+	}
+}
+
+func TestExecute_ValidEnvelope_NonZeroExit(t *testing.T) {
+	// Claude writes a valid JSON envelope then exits 1 (e.g. context timeout fires
+	// after output is complete). Execute must return the sidecar, not an error.
+	t.Setenv("ORCA_FAKE_CLAUDE", "valid_nonzero")
+	orcaDir := t.TempDir()
+	worktree := t.TempDir()
+	out, err := New(orcaDir, claudeTestBinaryPath(t)).Execute(
+		context.Background(), claudeTestCapsule(worktree), claudeTestProjection(),
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(out.ObligationsAddressed) != 1 || out.ObligationsAddressed[0] != "OB-77" {
+		t.Errorf("ObligationsAddressed = %v, want [OB-77]", out.ObligationsAddressed)
+	}
+	if len(out.FilesChanged) != 1 || out.FilesChanged[0] != "pkg/bar.go" {
+		t.Errorf("FilesChanged = %v, want [pkg/bar.go]", out.FilesChanged)
 	}
 }

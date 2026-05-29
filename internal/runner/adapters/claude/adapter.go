@@ -115,28 +115,49 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		transcript: transcriptPath,
 		stdin:      briefingFile,
 	})
+
+	// Build the execute error once so it can be returned on any parse failure
+	// path when runErr is set. When the output parses successfully we discard it.
+	var executeErr error
 	if runErr != nil {
 		stderrSnippet := strings.TrimSpace(stderr)
 		if len(stderrSnippet) > 512 {
 			stderrSnippet = stderrSnippet[:512] + "... (see " + transcriptPath + " for full output)"
 		}
-		return nil, fmt.Errorf("claude adapter: execute failed: %w: %s", runErr, stderrSnippet)
+		executeErr = fmt.Errorf("claude adapter: execute failed: %w: %s", runErr, stderrSnippet)
 	}
 
+	// Parse the JSON envelope before acting on runErr. Claude writes its
+	// complete JSON response to stdout before exiting, so a valid envelope may
+	// be present even when the process was interrupted after finishing its work.
 	outer := &claudeJSONResult{}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), outer); err != nil {
+		if executeErr != nil {
+			return nil, executeErr
+		}
 		return nil, runner.ErrNoSidecar
 	}
 	if outer.IsError || strings.TrimSpace(outer.Result) == "" {
+		if executeErr != nil {
+			return nil, executeErr
+		}
 		return nil, runner.ErrNoSidecar
 	}
 	sidecar := &schema.AgentSidecarOutput{}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(outer.Result)), sidecar); err != nil {
+		if executeErr != nil {
+			return nil, executeErr
+		}
 		return nil, runner.ErrInvalidSidecar
 	}
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
+		if executeErr != nil {
+			return nil, executeErr
+		}
 		return nil, runner.ErrInvalidSidecar
 	}
+	// Output is valid. Return it regardless of executeErr — a non-zero exit may
+	// reflect a cleanup failure that arrived after the response was already written.
 	if outer.Usage != nil {
 		sidecar.TokensUsed = outer.Usage.InputTokens + outer.Usage.OutputTokens
 	}

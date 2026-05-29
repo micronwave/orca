@@ -115,23 +115,24 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		"-o", absSidecarPath,
 		"-",
 	}
-	_, stderr, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
+	// Remove any sidecar left by a prior attempt so that a stale file cannot be
+	// silently accepted if the current run is interrupted before writing a new one.
+	_ = os.Remove(absSidecarPath)
+
+	_, _, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
 		args:       args,
 		worktree:   capsule.Sandbox.WorktreePath,
 		transcript: transcriptPath,
 		stdin:      briefingFile,
 	})
-	if runErr != nil {
-		stderrSnippet := strings.TrimSpace(stderr)
-		if len(stderrSnippet) > 512 {
-			stderrSnippet = stderrSnippet[:512] + "... (see " + transcriptPath + " for full output)"
-		}
-		return nil, fmt.Errorf("codex adapter: execute failed: %w: %s", runErr, stderrSnippet)
-	}
 
+	// Read the sidecar before acting on runErr. Codex writes the sidecar via
+	// -o before exiting, so the file may be present and valid even when the
+	// process was interrupted by a context timeout after completing its work.
 	sidecarData, err := os.ReadFile(sidecarPath)
 	if err != nil {
+		// No sidecar written. Signal the runner to fall back to transcript extraction.
 		return nil, runner.ErrNoSidecar
 	}
 	sidecar := &schema.AgentSidecarOutput{}
@@ -141,6 +142,10 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	if len(sidecar.FilesChanged) == 0 && len(sidecar.CommandsRun) == 0 && len(sidecar.ObligationsAddressed) == 0 {
 		return nil, runner.ErrInvalidSidecar
 	}
+	// Sidecar is valid. Return it regardless of runErr — a non-zero exit may
+	// reflect a post-task cleanup failure or a context kill that arrived after
+	// the sidecar was already written.
+	_ = runErr
 	sidecar.WallTimeSeconds = duration.Seconds()
 	return sidecar, nil
 }
