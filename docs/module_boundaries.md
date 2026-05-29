@@ -175,7 +175,7 @@ reads this field via `store.LoadDecision(capsule.TopologyDecisionID)` to populat
 
 | | |
 |---|---|
-| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), `ClaimArtifacts` via `LoadClaimsForGoal` / `LoadClaimsByStatus` for labeled projection injection and contested-claim risks, `EvidenceArtifacts` via `LoadEvidenceForObligation`, `FailureFingerprints` via `LoadFailuresForFiles`, `ExecutionCapsule` via `LoadCapsule`, `DecisionRecord` via `LoadDecision` (topology decision, via `capsule.TopologyDecisionID`), `StateSnapshot` via `LoadLatestSnapshot` |
+| **Reads (store)** | `GoalIR`, `GoalConditions`, `Obligations` (for capsule), `ClaimArtifacts` via `LoadClaimsForGoal` / `LoadRepoScopedClaims` / `LoadClaimsByStatus` for labeled projection injection and contested-claim risks, `EvidenceArtifacts` via `LoadEvidenceForObligation`, `FailureFingerprints` via `LoadFailuresForFiles`, `ExecutionCapsule` via `LoadCapsule`, `DecisionRecord` via `LoadDecision` (topology decision, via `capsule.TopologyDecisionID`), `StateSnapshot` via `LoadLatestSnapshot` |
 | **Writes (store)** | `ContextProjection` (executor), `HumanSummaryProjection` |
 | **Writes (log)** | none directly — store emits `context_projection_created` |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/reconciler`, `internal/budget`, `internal/gate` |
@@ -198,6 +198,12 @@ Projection claim rules: verified claims are injected as facts only when their
 stale, and contested claims are included only with labels. Invalidated claims are
 excluded. Contested-claim risks shown to the gate are written into the saved
 `HumanSummaryProjection`; the gate does not query claims directly.
+
+Claim retrieval is associative rather than path-only: the projector builds a
+query from `GoalIR.OriginalIntent` plus obligation descriptions, scores
+goal-scoped + repo-scoped candidates, excludes superseded claims, applies
+`InjectionKeywords` / `InjectionConditions`, and orders by score (confidence as
+tiebreaker) before rendering.
 
 ---
 
