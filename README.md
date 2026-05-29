@@ -1,39 +1,39 @@
 # Orca
 
-**Stop babysitting your agents. Let them prove their work.**
+**Stop babysitting your agents and let them prove their work.**
 
 Orca is a local runtime that turns vague coding goals into checkable work. It wires multiple AI providers (Claude, Codex, etc.) into a single execution loop so you can delegate a massive task and walk away, knowing exactly what was proven when you get back.
 
-No more hopping between five different CLI chats. No more copy-pasting diffs. No more "trust me, I ran the tests" from an LLM.
+No hopping between five different CLI chats or pasting diffs.
 
 ---
 
 ## The Problem: "Agent Babysitting"
 
-Current agent tools are great at writing code, but they're terrible at proving it works. You spend half your day:
+Current agent tools are pretty decent-ish at writing code, but they're terrible at proving it works. You spend half your day:
 1. Launching an agent in one terminal.
 2. Checking its diff in another.
 3. Realizing it hallucinated a test pass.
 4. Manually syncing context to a *different* agent because the first one got "confused."
 
-It’s exhausting. The unit of work shouldn't be a chat transcript; it should be a **proven patch**.
+The unit of work should be a **proven patch** and not a "trust me bro". 
 
 ---
 
-## The Orca Way: Proof-Carrying Patches
+## The Orca Proof Patches
 
-Orca treats agents like contractors, not chat buddies. You give it a goal, and Orca handles the "how":
+Orca treats agents like contractors, give it a goal and Orca handles the "how":
 
-*   **Multi-Provider Wiring:** It automatically delegates steps to the right model. Maybe Claude handles the implementation while Codex reviews the risk. You just see the result.
+*   **Multi-Provider Wiring:** It automatically delegates steps to the right model. Maybe Claude handles the implementation while Codex reviews the risk.
 *   **Obligations, Not Prompts:** Orca defines what "done" looks like (e.g., "Tests in `internal/reconciler` must pass") before any code is written.
 *   **Execution Capsules:** Each agent run happens in a cage. We give it the exact files it needs (and nothing else), a token budget, and a set of gates it must pass to exit.
-*   **Context Projections:** Instead of replaying 50kb of chat history, Orca "compiles" a fresh briefing for each step. It’s faster, cheaper, and keeps the agent from wandering off-track.
+*   **Context Projections:** Instead of replaying 50kb of chat history, Orca "compiles" a fresh briefing for each step. It’s faster, cheaper, and keeps the agent from wandering.
 
 ---
 
 ## What it looks like
 
-When you run Orca, you aren't just watching text stream by. You're watching a state machine advance.
+When you run Orca, you're watching a state machine advance.
 
 ```text
 $ orca goal "refactor the storage layer to use SQLite"
@@ -58,13 +58,51 @@ $ orca goal "refactor the storage layer to use SQLite"
 
 ---
 
-## How it's built (The plain English version)
+## Quickstart
 
-Orca isn't a "wrapper." It's a Go-based supervisor that manages a durable **Artifact Graph**.
+### 1. Build and Install
+```bash
+go build -o orca ./cmd/orca
+# Move the binary to your PATH
+mv orca /usr/local/bin/
+```
 
-1.  **The Event Log:** Everything that happens is saved to `events.log`. If your computer crashes or the API goes down, Orca just picks up where it left off.
+### 2. Initialize a Repository
+Run this in the root of the project you want Orca to manage.
+```bash
+orca init
+```
+This creates a `.orca/` directory. You'll find a `config.yaml` inside. **Open it and set your test commands** (e.g., `go test ./...` or `npm test`) so Orca knows how to verify the work.
+
+### 3. Delegate a Goal
+You can provide a goal directly or pull from a GitHub issue.
+```bash
+# Option A: Direct delegation
+orca goal "add a new endpoint to the API that returns the current system load"
+
+# Option B: From an issue (requires GITHUB_TOKEN and intake.repo config)
+orca goal --from-issue 42
+```
+
+### 4. Monitor and Control
+Orca runs in a loop. You can check the state at any time from another terminal.
+```bash
+# See what's running, what's blocked, and current budget spend
+orca status
+
+# Stop everything and cleanup worktrees
+orca cancel
+```
+
+---
+
+## How it's built
+
+Orca isn't a wrapper, but a Go-based supervisor that manages a durable **Artifact Graph**.
+
+1.  **The Event Log:** Everything that happens is saved to `events.log`. If your computer crashes or the API goes down, Orca picks up where it left off.
 2.  **The Store:** All patches, test results, and "claims" (things the agent discovered) are stored as JSON files in `.orca/`.
-3.  **The Reconciler:** This is the brain. It looks at the evidence (test logs, lint output) and matches it against the obligations. If the evidence doesn't match, the patch is rejected. Simple as that.
+3.  **The Reconciler:** This is the brain. It looks at the evidence (test logs, lint output) and matches it against the obligations. If the evidence doesn't match, the patch is rejected.
 
 ---
 
@@ -79,41 +117,14 @@ Orca isn't a "wrapper." It's a Go-based supervisor that manages a durable **Arti
 
 ---
 
-## Quickstart
-
-### 1. Install
-```bash
-go build -o orca ./cmd/orca
-# Put it in your path
-```
-
-### 2. Init
-```bash
-orca init
-# Creates the .orca/ directory and local config
-```
-
-### 3. Delegate
-```bash
-orca goal "fix the race condition in the event log"
-```
-
----
-
 ## Supported Drivers
 
 Orca is model-agnostic. Out of the box, we support:
 *   **Claude Code** (via `claude` CLI)
-*   **GPT-4 / Codex** (via `codex` CLI)
+*   **Codex** (via `codex` CLI)
 *   **Remote Adapters** (Any MCP-compatible endpoint)
 
----
-
-## The "Manual"
-
-We're building this because we want to stop writing "prompt engineering" and start writing **contracts**. 
-
-Orca is currently CLI-first and opinionated. It expects you to have a Go environment (for now) and it expects your code to have some form of automated testing it can hook into. If you don't have tests, Orca will make "identifying a reproduction case" its first obligation.
+Configure these in `.orca/config.yaml` by pointing to their paths, or ensure they are in your `$PATH`. For GitHub integration, set your `GITHUB_TOKEN` in your environment.
 
 ---
 
