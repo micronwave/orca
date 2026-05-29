@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -428,6 +429,184 @@ func TestStripCommentQuoteAware(t *testing.T) {
 		got := stripComment(tc.input)
 		if got != tc.want {
 			t.Errorf("stripComment(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestDetectProjectType_GoMod(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if got := DetectProjectType(dir); got != "go" {
+		t.Fatalf("DetectProjectType = %q, want %q", got, "go")
+	}
+}
+
+func TestDetectProjectType_PackageJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	if got := DetectProjectType(dir); got != "node" {
+		t.Fatalf("DetectProjectType = %q, want %q", got, "node")
+	}
+}
+
+func TestDetectProjectType_PomXML(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pom.xml"), []byte("<project/>"), 0o644); err != nil {
+		t.Fatalf("write pom.xml: %v", err)
+	}
+	if got := DetectProjectType(dir); got != "maven" {
+		t.Fatalf("DetectProjectType = %q, want %q", got, "maven")
+	}
+}
+
+func TestDetectProjectType_PriorityGoModOverPackageJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	if got := DetectProjectType(dir); got != "go" {
+		t.Fatalf("DetectProjectType = %q, want %q (go.mod has higher priority)", got, "go")
+	}
+}
+
+func TestDetectProjectType_WalksUpToFindGoMod(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	sub := filepath.Join(root, "internal", "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if got := DetectProjectType(sub); got != "go" {
+		t.Fatalf("DetectProjectType = %q, want %q (should walk up to root)", got, "go")
+	}
+}
+
+func TestDetectProjectType_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	// Create a fake filesystem root so the walk is bounded and doesn't reach a
+	// real project root on the host. We test the no-marker case by checking
+	// an isolated deep directory that has no markers above it within TempDir.
+	// The actual host might have markers above the temp root, so we just verify
+	// DetectProjectType returns a string (not panic); the empty case is exercised
+	// by the Makefile sub-test instead.
+	result := DetectProjectType(dir)
+	_ = result // "go", "node", "maven", or "" — depends on host filesystem above tmpdir
+}
+
+func TestDetectProjectType_Makefile_ReturnsEmpty(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte("all:\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// sub has no markers; root has Makefile which maps to "".
+	// Walk should find Makefile in root and return "".
+	if got := DetectProjectType(sub); got != "" {
+		t.Fatalf("DetectProjectType = %q, want %q (Makefile maps to empty)", got, "")
+	}
+}
+
+func TestDefaultConfigYAML_GoLoadsAndHasGates(t *testing.T) {
+	yaml := DefaultConfigYAML("go")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(go): %v", err)
+	}
+	if len(cfg.Verifier.Gates) != 3 {
+		t.Fatalf("gates count = %d, want 3", len(cfg.Verifier.Gates))
+	}
+	names := map[string]bool{}
+	for _, g := range cfg.Verifier.Gates {
+		names[g.Name] = true
+	}
+	for _, want := range []string{"go_test", "go_vet", "go_build"} {
+		if !names[want] {
+			t.Fatalf("missing gate %q", want)
+		}
+	}
+}
+
+func TestDefaultConfigYAML_NodeLoadsAndHasNpmGate(t *testing.T) {
+	yaml := DefaultConfigYAML("node")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(node): %v", err)
+	}
+	if len(cfg.Verifier.Gates) != 1 || cfg.Verifier.Gates[0].Name != "npm_test" {
+		t.Fatalf("gates = %+v, want single npm_test gate", cfg.Verifier.Gates)
+	}
+}
+
+func TestDefaultConfigYAML_MavenLoadsAndHasMvnGate(t *testing.T) {
+	yaml := DefaultConfigYAML("maven")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(maven): %v", err)
+	}
+	if len(cfg.Verifier.Gates) != 1 || cfg.Verifier.Gates[0].Name != "mvn_test" {
+		t.Fatalf("gates = %+v, want single mvn_test gate", cfg.Verifier.Gates)
+	}
+}
+
+func TestDefaultConfigYAML_FallbackHasEmptyGatesSection(t *testing.T) {
+	yaml := DefaultConfigYAML("")
+	if !strings.Contains(yaml, "gates:") {
+		t.Fatal("fallback YAML missing 'gates:' section")
+	}
+	// Load should fail (no gates) — that's expected; user must configure.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load(fallback) succeeded; expected error about missing gates")
+	}
+	if !strings.Contains(err.Error(), "gates") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDetectProjectType_CurrentDirReturnsGo(t *testing.T) {
+	// Acceptance criterion 7: DetectProjectType(".") in the orca repo returns "go"
+	// because go.mod is present in an ancestor directory.
+	got := DetectProjectType(".")
+	if got != "go" {
+		t.Fatalf("DetectProjectType('.') = %q, want 'go' (go.mod in ancestor)", got)
+	}
+}
+
+func TestDefaultConfigYAML_IncludesAllRequiredSections(t *testing.T) {
+	for _, pt := range []string{"go", "node", "maven"} {
+		yaml := DefaultConfigYAML(pt)
+		for _, section := range []string{"verifier:", "gate:", "budget:", "adapters:", "advanced:", "mcp:", "intake:", "pr:", "ci:", "remote:"} {
+			if !strings.Contains(yaml, section) {
+				t.Errorf("DefaultConfigYAML(%q) missing section %q", pt, section)
+			}
 		}
 	}
 }
