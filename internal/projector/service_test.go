@@ -601,6 +601,283 @@ func TestCompileExecutor_excludesSupersededClaims(t *testing.T) {
 	}
 }
 
+// ── Associative retrieval — keyword-scored context injection (item 10) ────────
+
+func TestCompileExecutor_keywordGateExcludesNonMatchingClaim(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-kw-gate"
+		conditionID = "GC-kw-gate"
+		obligation  = "OB-kw-gate"
+		capsuleID   = "CAP-kw-gate"
+	)
+	// seedGoalScenario: OriginalIntent="summarize projector implementation",
+	// obligation description="implement deterministic context compiler"
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/schema/common.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// "projector" appears in the goal query; this claim passes the keyword gate.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:           "CL-kw-match",
+		Text:              "projector compiles context from artifacts",
+		ClaimType:         schema.ClaimInvariant,
+		SourceCapsuleID:   capsuleID,
+		AffectedFiles:     []string{"internal/schema/common.go"},
+		Status:            schema.ClaimVerified,
+		InjectionKeywords: []string{"projector"},
+	}); err != nil {
+		t.Fatalf("SaveClaim match: %v", err)
+	}
+	// "SSH" does not appear in the query; this claim must be excluded.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:           "CL-kw-nomatch",
+		Text:              "SSH host verification should use knownhosts",
+		ClaimType:         schema.ClaimInvariant,
+		SourceCapsuleID:   capsuleID,
+		AffectedFiles:     []string{"internal/schema/common.go"},
+		Status:            schema.ClaimVerified,
+		InjectionKeywords: []string{"SSH"},
+	}); err != nil {
+		t.Fatalf("SaveClaim nomatch: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "CL-kw-match") {
+		t.Fatalf("projection missing keyword-matching claim: %+v", projection.IncludedSections)
+	}
+	if projectionIncludes(projection, "CL-kw-nomatch") {
+		t.Fatal("projection must not include claim with non-matching keyword")
+	}
+}
+
+func TestCompileExecutor_injectionConditionExcludesWrongRole(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-ic-role"
+		conditionID = "GC-ic-role"
+		obligation  = "OB-ic-role"
+		capsuleID   = "CAP-ic-role"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/schema/common.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:             "CL-ic-reviewer-only",
+		Text:                "reviewer-only claim text",
+		ClaimType:           schema.ClaimInvariant,
+		SourceCapsuleID:     capsuleID,
+		AffectedFiles:       []string{"internal/schema/common.go"},
+		Status:              schema.ClaimVerified,
+		InjectionConditions: []string{"role=reviewer"},
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if projectionIncludes(projection, "CL-ic-reviewer-only") {
+		t.Fatal("executor projection must not include claim gated to role=reviewer")
+	}
+}
+
+func TestCompileExecutor_outOfScopeFileClaimIncluded(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-oos-file"
+		conditionID = "GC-oos-file"
+		obligation  = "OB-oos-file"
+		capsuleID   = "CAP-oos-file"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/schema/common.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// AffectedFiles is outside AllowedPaths; item 10 removes the file-path gate.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-oos-verifier",
+		Text:            "verifier engine reads RiskLevel for gate decisions",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/verifier/verifier.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "CL-oos-verifier") {
+		t.Fatalf("projection must include out-of-scope file claim (item 10 removes file-path gate): %+v", projection.IncludedSections)
+	}
+}
+
+func TestCompileExecutor_highScoreClaimRankedFirst(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-score-rank"
+		conditionID = "GC-score-rank"
+		obligation  = "OB-score-rank"
+		capsuleID   = "CAP-score-rank"
+	)
+	// seedGoalScenario: OriginalIntent="summarize projector implementation",
+	// obligation description="implement deterministic context compiler"
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/schema/common.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// High-relevance: shares tokens with "projector", "context", "compiler", "deterministic".
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-z-score-high",
+		Text:            "projector context compiler implements deterministic summarization",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim high: %v", err)
+	}
+	// Low-relevance: no token overlap with the query.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-a-score-low",
+		Text:            "SSH host verification requires knownhosts database",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+	}); err != nil {
+		t.Fatalf("SaveClaim low: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if !projectionIncludes(projection, "CL-z-score-high") || !projectionIncludes(projection, "CL-a-score-low") {
+		t.Fatalf("projection missing expected claims: %+v", projection.IncludedSections)
+	}
+	// Both claims land in the same "claims: ..." section. High-score must precede low-score.
+	claimsSection := ""
+	for _, s := range projection.IncludedSections {
+		if strings.Contains(s, "CL-z-score-high") && strings.Contains(s, "CL-a-score-low") {
+			claimsSection = s
+			break
+		}
+	}
+	if claimsSection == "" {
+		t.Fatalf("expected both claims in one section: %+v", projection.IncludedSections)
+	}
+	highIdx := strings.Index(claimsSection, "CL-z-score-high")
+	lowIdx := strings.Index(claimsSection, "CL-a-score-low")
+	if highIdx >= lowIdx {
+		t.Fatalf("high-score claim (pos %d) must appear before low-score claim (pos %d)", highIdx, lowIdx)
+	}
+}
+
+func TestCompileExecutor_equalScoreHigherConfidenceFirst(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-score-confidence"
+		conditionID = "GC-score-confidence"
+		obligation  = "OB-score-confidence"
+		capsuleID   = "CAP-score-confidence"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/schema/common.go"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-z-high-confidence",
+		Text:            "projector context compiler",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		Confidence:      0.9,
+	}); err != nil {
+		t.Fatalf("SaveClaim high-confidence: %v", err)
+	}
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-a-low-confidence",
+		Text:            "projector context compiler",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		Confidence:      0.1,
+	}); err != nil {
+		t.Fatalf("SaveClaim low-confidence: %v", err)
+	}
+
+	projection, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	claimsSection := ""
+	for _, s := range projection.IncludedSections {
+		if strings.Contains(s, "CL-z-high-confidence") && strings.Contains(s, "CL-a-low-confidence") {
+			claimsSection = s
+			break
+		}
+	}
+	if claimsSection == "" {
+		t.Fatalf("expected both confidence claims in one section: %+v", projection.IncludedSections)
+	}
+	highIdx := strings.Index(claimsSection, "CL-z-high-confidence")
+	lowIdx := strings.Index(claimsSection, "CL-a-low-confidence")
+	if highIdx >= lowIdx {
+		t.Fatalf("higher-confidence claim (pos %d) must appear before lower-confidence claim (pos %d)", highIdx, lowIdx)
+	}
+}
+
 func projectionIncludes(p *schema.ContextProjection, want string) bool {
 	for _, section := range p.IncludedSections {
 		if strings.Contains(section, want) {
