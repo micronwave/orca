@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goos "runtime"
 	"sort"
 	"strings"
 	"time"
@@ -1032,7 +1033,86 @@ func runInteractive(orcaDir string) error {
 }
 
 func runUI(args []string) error {
-	return fmt.Errorf("orca ui: not yet implemented")
+	fs := flag.NewFlagSet("orca ui", flag.ContinueOnError)
+	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	desktop, err := findDesktopBinary()
+	if err != nil {
+		return err
+	}
+
+	absOrcaDir, err := filepath.Abs(*orcaDir)
+	if err != nil {
+		return fmt.Errorf("orca ui: resolve orca-dir: %w", err)
+	}
+	cmd := exec.Command(desktop, "--orca-dir", absOrcaDir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// findDesktopBinary checks candidate locations for the orca-desktop binary
+// in priority order and returns the first path that exists and is executable.
+func findDesktopBinary() (string, error) {
+	for _, p := range desktopBinaryCandidates() {
+		if info, err := os.Stat(p); err == nil && isExecutableDesktopBinary(info) {
+			return p, nil
+		}
+	}
+	if p, err := exec.LookPath("orca-desktop"); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf(
+		"orca ui: orca-desktop not found.\n" +
+			"Install it with:\n" +
+			"  go install github.com/micronwave/orca/desktop/cmd/orca-desktop@latest\n" +
+			"Or download from: https://github.com/micronwave/orca/releases",
+	)
+}
+
+func isExecutableDesktopBinary(info os.FileInfo) bool {
+	if info == nil || info.IsDir() {
+		return false
+	}
+	if goos.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+// desktopBinaryCandidates returns well-known paths to check for orca-desktop,
+// in priority order. It branches on goos.GOOS for Windows vs. Unix paths.
+func desktopBinaryCandidates() []string {
+	var candidates []string
+
+	// 1. Phase B install-script location.
+	if goos.GOOS == "windows" {
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			candidates = append(candidates, filepath.Join(localAppData, "Programs", "orca", "orca-desktop.exe"))
+		}
+	} else {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			candidates = append(candidates, filepath.Join(home, ".orca", "bin", "orca-desktop"))
+		}
+	}
+
+	// 2. Side-by-side with the running orca binary.
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		if goos.GOOS == "windows" {
+			candidates = append(candidates, filepath.Join(dir, "orca-desktop.exe"))
+			// 3. Windows only: developer repo layout (desktop/build/bin).
+			candidates = append(candidates, filepath.Join(dir, "desktop", "build", "bin", "orca-desktop.exe"))
+		} else {
+			candidates = append(candidates, filepath.Join(dir, "orca-desktop"))
+		}
+	}
+
+	return candidates
 }
 
 func activeGoalError(goal *schema.GoalIR) error {
