@@ -76,8 +76,9 @@ $env:Path += ";$(Get-Location)"
 ```
 *Note: To make it permanent on Windows, add the directory containing `orca.exe` to your "System Environment Variables".*
 
-### 2. Initialize a Repository
-Run this in the root of the project you want Orca to manage (e.g., `E:\my-project`).
+### 2. Initialize a Repository (optional)
+Running `orca goal` will auto-initialize `.orca/` for you, detecting your project type (`go.mod`, `package.json`, `pom.xml`) and writing sensible gate defaults. You only need to run `orca init` explicitly if you want to inspect or customize `config.yaml` before the first run.
+
 ```bash
 # If orca is in your PATH:
 orca init
@@ -85,16 +86,31 @@ orca init
 # If not (Windows example):
 E:\orca\orca.exe init
 ```
-This creates a `.orca/` directory. You'll find a `config.yaml` inside. **Open it and set your test commands** (e.g., `go test ./...` or `npm test`) so Orca knows how to verify the work.
+This creates a `.orca/config.yaml` pre-populated for your project type. Open it and adjust the verifier gates if needed.
 
 ### 3. Delegate a Goal
-You can provide a goal directly or pull from a GitHub issue.
+You can provide a goal directly, pull from a GitHub issue, or use the interactive REPL.
 ```bash
 # Option A: Direct delegation
 orca goal "add a new endpoint to the API that returns the current system load"
 
 # Option B: From an issue (requires GITHUB_TOKEN and intake.repo config)
 orca goal --from-issue 42
+```
+
+**Option C: Interactive REPL** — run `orca` with no arguments for a prompt-driven session. Auto-initializes `.orca/` on first use.
+```text
+$ orca
+Orca  local proof runtime
+Working directory: /my-project
+
+> add a new endpoint to the API that returns the current system load
+[COMPILING] ...
+
+> /status
+> /cancel
+> /help
+> exit
 ```
 
 ### 4. Monitor and Control
@@ -105,6 +121,9 @@ orca status
 
 # Stop everything and cleanup worktrees
 orca cancel
+
+# Open the desktop UI (requires orca-desktop to be installed)
+orca ui
 ```
 
 ---
