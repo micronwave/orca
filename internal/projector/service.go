@@ -61,7 +61,12 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 	if err != nil {
 		return nil, err
 	}
-	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, capsule.AllowedPaths, freshnessBase)
+	topology, err := s.loadTopologyForCapsule(ctx, capsule)
+	if err != nil {
+		return nil, err
+	}
+	query := buildProjectionQuery(goal, obligations)
+	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, query, role, topology, maxRiskLevel(obligations))
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +129,17 @@ func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*
 	if err != nil {
 		return nil, err
 	}
-	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, capsule.AllowedPaths, freshnessBase)
+	if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
+		return nil, fmt.Errorf("projector: capsule %s topology_decision_id is required", capsule.CapsuleID)
+	}
+	sourceArtifactIDs = append(sourceArtifactIDs, capsule.TopologyDecisionID)
+	decision, err := s.store.LoadDecision(ctx, capsule.TopologyDecisionID)
+	if err != nil {
+		return nil, fmt.Errorf("projector: load topology decision %s: %w", capsule.TopologyDecisionID, err)
+	}
+	topology := schema.Topology(decision.Decision)
+	query := buildProjectionQuery(goal, obligations)
+	claims, claimIDs, err := s.loadClaimsForProjection(ctx, goal.GoalID, query, schema.ProjectionRoleHumanSummary, topology, maxRiskLevel(obligations))
 	if err != nil {
 		return nil, err
 	}
@@ -144,16 +159,6 @@ func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*
 	sourceArtifactIDs = append(sourceArtifactIDs, contestedClaimIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, evidenceIDs...)
 	sourceArtifactIDs = append(sourceArtifactIDs, failureIDs...)
-
-	if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
-		return nil, fmt.Errorf("projector: capsule %s topology_decision_id is required", capsule.CapsuleID)
-	}
-	sourceArtifactIDs = append(sourceArtifactIDs, capsule.TopologyDecisionID)
-	decision, err := s.store.LoadDecision(ctx, capsule.TopologyDecisionID)
-	if err != nil {
-		return nil, fmt.Errorf("projector: load topology decision %s: %w", capsule.TopologyDecisionID, err)
-	}
-	topology := schema.Topology(decision.Decision)
 	conditionRefs, err := s.loadConditionRefs(ctx, obligations)
 	if err != nil {
 		return nil, err
@@ -471,7 +476,6 @@ func summarizeClaims(claims []*schema.ClaimArtifact, freshnessBase string) strin
 	for _, claim := range claims {
 		parts = append(parts, claimLabel(claim, freshnessBase)+": "+claim.Text)
 	}
-	sort.Strings(parts)
 	return strings.Join(parts, "; ")
 }
 
@@ -711,8 +715,14 @@ func (s *Compiler) loadPatchesByObligation(
 	return patches, sourceIDs, nil
 }
 
-func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID string, files []string, freshnessBase string) ([]*schema.ClaimArtifact, []string, error) {
-	_ = freshnessBase
+// loadClaimsForProjection implements two-stage retrieval: load all goal-scoped
+// and repo-scoped claims as candidates (Stage 1), then score each against the
+// query string composed of goal intent + obligation descriptions (Stage 2).
+// Claims are returned sorted by relevance score, highest first. Hard gates:
+// invalidated and superseded claims are excluded; claims with InjectionKeywords
+// must match the query; claims with InjectionConditions must satisfy role,
+// topology, and risk predicates. orca.md §5.8, todo_add.md item 10.
+func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID, query string, role schema.ProjectionRole, topology schema.Topology, maxRisk schema.RiskLevel) ([]*schema.ClaimArtifact, []string, error) {
 	goalClaims, err := s.store.LoadClaimsForGoal(ctx, goalID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("projector: load goal claims: %w", err)
@@ -725,9 +735,12 @@ func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID string, f
 	candidates = append(candidates, goalClaims...)
 	candidates = append(candidates, repoClaims...)
 
-	fileSet := normalizedProjectionFiles(files)
-	out := make([]*schema.ClaimArtifact, 0, len(candidates))
-	ids := make([]string, 0, len(candidates))
+	queryLower := strings.ToLower(query)
+	type scoredClaim struct {
+		claim *schema.ClaimArtifact
+		score float32
+	}
+	scored := make([]scoredClaim, 0, len(candidates))
 	seen := make(map[string]bool, len(candidates))
 	for _, claim := range candidates {
 		if seen[claim.ClaimID] {
@@ -740,11 +753,37 @@ func (s *Compiler) loadClaimsForProjection(ctx context.Context, goalID string, f
 		if strings.TrimSpace(claim.SupersededBy) != "" {
 			continue
 		}
-		if !claimMatchesFiles(claim, fileSet) {
+		if len(claim.InjectionKeywords) > 0 {
+			matched := false
+			for _, kw := range claim.InjectionKeywords {
+				if strings.Contains(queryLower, strings.ToLower(kw)) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if !evaluateInjectionConditions(claim.InjectionConditions, role, topology, maxRisk) {
 			continue
 		}
-		out = append(out, claim)
-		ids = append(ids, claim.ClaimID)
+		scored = append(scored, scoredClaim{
+			claim: claim,
+			score: scoreClaimRelevance(claim, query),
+		})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].claim.Confidence > scored[j].claim.Confidence
+	})
+	out := make([]*schema.ClaimArtifact, 0, len(scored))
+	ids := make([]string, 0, len(scored))
+	for _, sc := range scored {
+		out = append(out, sc.claim)
+		ids = append(ids, sc.claim.ClaimID)
 	}
 	return out, ids, nil
 }
@@ -834,4 +873,137 @@ func claimMatchesFiles(claim *schema.ClaimArtifact, fileSet map[string]bool) boo
 		}
 	}
 	return false
+}
+
+// tokenizeText splits s into lowercase alphanumeric tokens, splitting on
+// whitespace and punctuation. Used for keyword-overlap scoring.
+func tokenizeText(s string) []string {
+	tokens := make([]string, 0, len(s)/5+1)
+	var buf strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			buf.WriteRune(r)
+		} else {
+			if buf.Len() > 0 {
+				tokens = append(tokens, buf.String())
+				buf.Reset()
+			}
+		}
+	}
+	if buf.Len() > 0 {
+		tokens = append(tokens, buf.String())
+	}
+	return tokens
+}
+
+// buildProjectionQuery builds the relevance query from goal intent and
+// obligation descriptions. Used by loadClaimsForProjection.
+func buildProjectionQuery(goal *schema.GoalIR, obligations []*schema.Obligation) string {
+	parts := make([]string, 0, 1+len(obligations))
+	if goal != nil && strings.TrimSpace(goal.OriginalIntent) != "" {
+		parts = append(parts, goal.OriginalIntent)
+	}
+	for _, o := range obligations {
+		if d := strings.TrimSpace(o.Description); d != "" {
+			parts = append(parts, d)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// maxRiskLevel returns the highest RiskLevel among obligations.
+func maxRiskLevel(obligations []*schema.Obligation) schema.RiskLevel {
+	for _, o := range obligations {
+		if o.RiskLevel == schema.RiskHigh {
+			return schema.RiskHigh
+		}
+	}
+	for _, o := range obligations {
+		if o.RiskLevel == schema.RiskMedium {
+			return schema.RiskMedium
+		}
+	}
+	return schema.RiskLow
+}
+
+// scoreClaimRelevance scores a claim against a query string.
+// Base score = (unique claim tokens that appear in query) / (unique claim tokens).
+// Bonuses: +0.2 if any InjectionKeyword matches; +0.1*Confidence.
+func scoreClaimRelevance(claim *schema.ClaimArtifact, query string) float32 {
+	claimTokens := tokenizeText(claim.Text)
+	claimSet := make(map[string]bool, len(claimTokens))
+	for _, t := range claimTokens {
+		claimSet[t] = true
+	}
+	queryTokens := tokenizeText(query)
+	querySet := make(map[string]bool, len(queryTokens))
+	for _, t := range queryTokens {
+		querySet[t] = true
+	}
+	var base float32
+	if len(claimSet) > 0 {
+		var matches int
+		for t := range claimSet {
+			if querySet[t] {
+				matches++
+			}
+		}
+		base = float32(matches) / float32(len(claimSet))
+	}
+	queryLower := strings.ToLower(query)
+	for _, kw := range claim.InjectionKeywords {
+		if strings.Contains(queryLower, strings.ToLower(kw)) {
+			base += 0.2
+			break
+		}
+	}
+	base += 0.1 * claim.Confidence
+	return base
+}
+
+// evaluateInjectionConditions checks whether all structured predicates in
+// conditions pass for the given capsule state. Supported keys: risk, role,
+// topology. An unknown topology value causes topology conditions to pass
+// vacuously to avoid over-exclusion when topology is not yet determined.
+func evaluateInjectionConditions(conditions []string, role schema.ProjectionRole, topology schema.Topology, maxRisk schema.RiskLevel) bool {
+	for _, cond := range conditions {
+		key, value, ok := strings.Cut(cond, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "risk":
+			if string(maxRisk) != value {
+				return false
+			}
+		case "role":
+			if string(role) != value {
+				return false
+			}
+		case "topology":
+			if topology != "" && string(topology) != value {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// loadTopologyForCapsule loads the topology from the capsule's topology
+// decision record. Returns ("", nil) when TopologyDecisionID is empty or the
+// decision does not yet exist; errors only on genuine I/O failures.
+func (s *Compiler) loadTopologyForCapsule(ctx context.Context, capsule *schema.ExecutionCapsule) (schema.Topology, error) {
+	if strings.TrimSpace(capsule.TopologyDecisionID) == "" {
+		return "", nil
+	}
+	decision, err := s.store.LoadDecision(ctx, capsule.TopologyDecisionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("projector: load topology decision %s: %w", capsule.TopologyDecisionID, err)
+	}
+	return schema.Topology(decision.Decision), nil
 }
