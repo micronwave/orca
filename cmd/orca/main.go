@@ -251,7 +251,7 @@ func runCIWait(args []string) (err error) {
 		token = os.Getenv("GITHUB_TOKEN")
 	}
 
-	poller := cigate.New(cfg.CI, token, cfg.Intake.Repo, log, st, ciPollerOpts...)
+	poller := cigate.New(cfg.CI, token, cfg.Intake.Repo, ciPollerOpts...)
 	timeout := time.Duration(*timeoutSec) * time.Second
 	status, runURL, summary, rawLogPath, waitErr := poller.Wait(ctx, gID, *capsuleID, *branch, timeout)
 
@@ -1105,6 +1105,40 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 		roi.TotalCoordinationCost,
 		roi.VerifiedValuePer1KTokens,
 	)
+
+	// Phase 5 indicators
+	mcpAddr := rt.cfg.MCP.Listen
+	if mcpAddr == "" {
+		mcpAddr = "127.0.0.1:7070"
+	}
+	if rt.cfg.MCP.Enabled {
+		fmt.Fprintf(out, "MCP server: running on %s\n", mcpAddr)
+	} else {
+		fmt.Fprintln(out, "MCP server: disabled")
+	}
+	if rt.cfg.Remote.Enabled {
+		fmt.Fprintf(out, "Remote execution: enabled (host=%s)\n", rt.cfg.Remote.Host)
+	} else {
+		fmt.Fprintln(out, "Remote execution: disabled")
+	}
+	prURL, err := rt.latestPRURLForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	if prURL != "" {
+		fmt.Fprintf(out, "Latest PR: %s\n", prURL)
+	} else {
+		fmt.Fprintln(out, "Latest PR: none")
+	}
+	ciRecord, err := rt.latestCIStatusForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	if ciRecord != nil {
+		fmt.Fprintf(out, "CI: provider=%s branch=%s status=%s\n", ciRecord.Provider, ciRecord.Branch, ciRecord.Status)
+	} else {
+		fmt.Fprintln(out, "CI: no runs recorded")
+	}
 	return nil
 }
 
@@ -1463,6 +1497,67 @@ func isActiveCapsule(state schema.CapsuleState) bool {
 	default:
 		return false
 	}
+}
+
+// latestPRURLForGoal scans the event log for the most recent pr_created event
+// and returns its PRURL, or "" when no PR has been created for the goal.
+func (rt *runtime) latestPRURLForGoal(ctx context.Context, goalID string) (string, error) {
+	var url string
+	var latestSeq int64
+	var seq int64
+	for {
+		events, err := rt.eventLog.ReadForGoal(ctx, goalID, seq, 200)
+		if err != nil {
+			return "", fmt.Errorf("orca status: read events for pr: %w", err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		for _, ev := range events {
+			if ev.Type == schema.EventPRCreated && ev.SequenceNum > latestSeq {
+				var pr schema.PRRecord
+				if err := json.Unmarshal(ev.Payload, &pr); err != nil {
+					return "", fmt.Errorf("orca status: decode pr_created payload for event %s: %w", ev.EventID, err)
+				}
+				if pr.PRURL != "" {
+					latestSeq = ev.SequenceNum
+					url = pr.PRURL
+				}
+			}
+		}
+		seq = events[len(events)-1].SequenceNum
+	}
+	return url, nil
+}
+
+// latestCIStatusForGoal scans the event log for the most recent ci_status_received
+// event and returns the record, or nil when no CI run has been recorded.
+func (rt *runtime) latestCIStatusForGoal(ctx context.Context, goalID string) (*schema.CIStatusRecord, error) {
+	var latest *schema.CIStatusRecord
+	var latestSeq int64
+	var seq int64
+	for {
+		events, err := rt.eventLog.ReadForGoal(ctx, goalID, seq, 200)
+		if err != nil {
+			return nil, fmt.Errorf("orca status: read events for ci status: %w", err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		for _, ev := range events {
+			if ev.Type == schema.EventCIStatusReceived && ev.SequenceNum > latestSeq {
+				var r schema.CIStatusRecord
+				if err := json.Unmarshal(ev.Payload, &r); err != nil {
+					return nil, fmt.Errorf("orca status: decode ci_status_received payload for event %s: %w", ev.EventID, err)
+				}
+				latestSeq = ev.SequenceNum
+				rc := r
+				latest = &rc
+			}
+		}
+		seq = events[len(events)-1].SequenceNum
+	}
+	return latest, nil
 }
 
 func (rt *runtime) mergeReadiness(

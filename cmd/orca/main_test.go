@@ -308,6 +308,82 @@ func TestStatusReportsOutstandingMergeReviewForAcceptedHighRiskPatch(t *testing.
 	}
 }
 
+func TestLatestPRURLForGoal_MalformedPayloadReturnsError(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	log, _ := openStoreForTest(t, orcaDir)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = log.Close()
+		}
+	}()
+	ctx := context.Background()
+	if _, err := log.Append(ctx, schema.Event{
+		Type:       schema.EventPRCreated,
+		GoalID:     "G-1",
+		ArtifactID: "PR-1",
+		Payload:    []byte("123"),
+	}); err != nil {
+		t.Fatalf("append malformed pr event: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close setup log: %v", err)
+	}
+	closed = true
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer closeFn()
+
+	_, err = rt.latestPRURLForGoal(context.Background(), "G-1")
+	if err == nil {
+		t.Fatal("latestPRURLForGoal error = nil, want malformed payload error")
+	}
+	if !strings.Contains(err.Error(), "decode pr_created payload") {
+		t.Fatalf("latestPRURLForGoal error = %v, want decode pr_created payload", err)
+	}
+}
+
+func TestLatestCIStatusForGoal_MalformedPayloadReturnsError(t *testing.T) {
+	orcaDir := seedOrcaDir(t, true)
+	log, _ := openStoreForTest(t, orcaDir)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = log.Close()
+		}
+	}()
+	ctx := context.Background()
+	if _, err := log.Append(ctx, schema.Event{
+		Type:       schema.EventCIStatusReceived,
+		GoalID:     "G-1",
+		ArtifactID: "CI-1",
+		Payload:    []byte("123"),
+	}); err != nil {
+		t.Fatalf("append malformed ci event: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("close setup log: %v", err)
+	}
+	closed = true
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("open runtime: %v", err)
+	}
+	defer closeFn()
+
+	_, err = rt.latestCIStatusForGoal(context.Background(), "G-1")
+	if err == nil {
+		t.Fatal("latestCIStatusForGoal error = nil, want malformed payload error")
+	}
+	if !strings.Contains(err.Error(), "decode ci_status_received payload") {
+		t.Fatalf("latestCIStatusForGoal error = %v, want decode ci_status_received payload", err)
+	}
+}
+
 func TestGoalStatusSetToCompleteAfterSuccessfulRun(t *testing.T) {
 	orcaDir := seedOrcaDir(t, false)
 	rt, closeFn, err := openRuntime(orcaDir, false)
