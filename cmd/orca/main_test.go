@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goos "runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1776,10 +1778,182 @@ func TestAutoInitWrittenConfigLoads(t *testing.T) {
 	}
 }
 
-func TestRunUIReturnsNotImplemented(t *testing.T) {
+func TestRunUI_DesktopNotFound_ReturnsInstallInstructions(t *testing.T) {
+	// Isolate the home/LOCALAPPDATA location so the pre-seeded orca-desktop
+	// candidates (if any) are not reachable, and clear PATH so exec.LookPath
+	// also fails.
+	t.Setenv("PATH", "")
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
 	err := runUI([]string{})
-	if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("runUI error = %v, want 'not yet implemented'", err)
+	if err == nil {
+		t.Fatal("runUI: expected error when orca-desktop not found, got nil")
+	}
+	for _, want := range []string{"orca-desktop not found", "Install it with:", "go install"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("runUI error missing %q:\n%s", want, err.Error())
+		}
+	}
+}
+
+func TestFindDesktopBinary_FindsOnPATH(t *testing.T) {
+	dir := t.TempDir()
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		name = "orca-desktop.exe"
+	}
+	fakeBinary := filepath.Join(dir, name)
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("create fake binary: %v", err)
+	}
+	// Point home/LOCALAPPDATA away from any real installation.
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+	t.Setenv("PATH", dir)
+
+	got, err := findDesktopBinary()
+	if err != nil {
+		t.Fatalf("findDesktopBinary: %v", err)
+	}
+	if _, statErr := os.Stat(got); statErr != nil {
+		t.Errorf("findDesktopBinary returned non-existent path %q: %v", got, statErr)
+	}
+}
+
+func TestFindDesktopBinary_FindsWellKnownLocation(t *testing.T) {
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+		name = "orca-desktop.exe"
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+	t.Setenv("PATH", "")
+
+	var candidate string
+	if goos.GOOS == "windows" {
+		candidate = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "orca", name)
+	} else {
+		candidate = filepath.Join(os.Getenv("HOME"), ".orca", "bin", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
+		t.Fatalf("mkdir candidate dir: %v", err)
+	}
+	if err := os.WriteFile(candidate, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write candidate binary: %v", err)
+	}
+
+	got, err := findDesktopBinary()
+	if err != nil {
+		t.Fatalf("findDesktopBinary: %v", err)
+	}
+	if got != candidate {
+		t.Fatalf("findDesktopBinary = %q, want %q", got, candidate)
+	}
+}
+
+func TestFindDesktopBinary_SkipsNonExecutableCandidate(t *testing.T) {
+	if goos.GOOS == "windows" {
+		t.Skip("windows does not use unix executable mode bits")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	nonExecCandidate := filepath.Join(home, ".orca", "bin", "orca-desktop")
+	if err := os.MkdirAll(filepath.Dir(nonExecCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir candidate dir: %v", err)
+	}
+	if err := os.WriteFile(nonExecCandidate, []byte("#!/bin/sh\necho no\n"), 0o644); err != nil {
+		t.Fatalf("write non-exec candidate: %v", err)
+	}
+
+	pathDir := t.TempDir()
+	pathBinary := filepath.Join(pathDir, "orca-desktop")
+	if err := os.WriteFile(pathBinary, []byte("#!/bin/sh\necho yes\n"), 0o755); err != nil {
+		t.Fatalf("write path binary: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	got, err := findDesktopBinary()
+	if err != nil {
+		t.Fatalf("findDesktopBinary: %v", err)
+	}
+	if got != pathBinary {
+		t.Fatalf("findDesktopBinary = %q, want PATH binary %q", got, pathBinary)
+	}
+}
+
+func TestRunUI_PassesResolvedAbsOrcaDir(t *testing.T) {
+	helperDir := t.TempDir()
+	helperSrc := filepath.Join(helperDir, "main.go")
+	helperOut := filepath.Join(helperDir, "args.txt")
+
+	helperCode := `package main
+import (
+	"os"
+	"strings"
+)
+func main() {
+	_ = os.WriteFile(os.Getenv("ORCA_UI_ARGS_FILE"), []byte(strings.Join(os.Args[1:], "\n")), 0o644)
+}`
+	if err := os.WriteFile(helperSrc, []byte(helperCode), 0o644); err != nil {
+		t.Fatalf("write helper source: %v", err)
+	}
+
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		name = "orca-desktop.exe"
+	}
+	helperBin := filepath.Join(helperDir, name)
+	build := exec.Command("go", "build", "-o", helperBin, helperSrc)
+	build.Env = os.Environ()
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build helper binary: %v", err)
+	}
+
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+	t.Setenv("PATH", helperDir)
+	t.Setenv("ORCA_UI_ARGS_FILE", helperOut)
+
+	if err := runUI([]string{"--orca-dir", "."}); err != nil {
+		t.Fatalf("runUI: %v", err)
+	}
+
+	raw, err := os.ReadFile(helperOut)
+	if err != nil {
+		t.Fatalf("read helper output: %v", err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	wantAbs, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolve abs path: %v", err)
+	}
+	wantArgs := []string{"--orca-dir", wantAbs}
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("runUI args = %q, want %q", gotArgs, wantArgs)
+	}
+}
+
+func TestDesktopBinaryCandidates_ReturnsNonEmpty(t *testing.T) {
+	// Ensure at least the home-based candidate is present even in an isolated env.
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+	if len(desktopBinaryCandidates()) == 0 {
+		t.Fatal("desktopBinaryCandidates returned empty slice")
 	}
 }
 
