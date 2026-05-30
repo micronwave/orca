@@ -89,8 +89,8 @@ main() {
 
     echo ""
     echo "Installation complete."
-    echo "Running: orca init --help"
-    "${INSTALL_DIR}/${BINARY_NAME}" init --help
+    echo "Running: orca --help"
+    "${INSTALL_DIR}/${BINARY_NAME}" --help
 }
 
 main
