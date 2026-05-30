@@ -89,6 +89,24 @@ type VerifierConfig struct {
 	WorkingDir string
 }
 
+// ValidateGates returns an error if the verifier gate configuration is
+// insufficient to run an execution. Read-only commands (status, cancel) skip
+// this check; call it only on paths that invoke the verifier.
+func (c VerifierConfig) ValidateGates() error {
+	if len(c.Gates) == 0 {
+		return fmt.Errorf("config: verifier.gates must contain at least one gate")
+	}
+	for i, gate := range c.Gates {
+		if gate.Name == "" {
+			return fmt.Errorf("config: verifier.gates[%d].name is required", i)
+		}
+		if gate.Command == "" {
+			return fmt.Errorf("config: verifier.gates[%d].command is required", i)
+		}
+	}
+	return nil
+}
+
 type VerifierGate struct {
 	Name     string
 	Command  string
@@ -438,17 +456,6 @@ func Load(path string) (*Config, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("config: scan %s: %w", path, err)
-	}
-	if len(cfg.Verifier.Gates) == 0 {
-		return nil, fmt.Errorf("config: verifier.gates must contain at least one gate")
-	}
-	for i, gate := range cfg.Verifier.Gates {
-		if gate.Name == "" {
-			return nil, fmt.Errorf("config: verifier.gates[%d].name is required", i)
-		}
-		if gate.Command == "" {
-			return nil, fmt.Errorf("config: verifier.gates[%d].command is required", i)
-		}
 	}
 	if cfg.Budget.DefaultMaxTokens == 0 {
 		return nil, fmt.Errorf("config: budget.default_max_tokens must be greater than 0")

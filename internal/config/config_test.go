@@ -59,16 +59,54 @@ adapters:
 	}
 }
 
-func TestLoadRejectsMissingVerifierGates(t *testing.T) {
+func TestValidateGates_rejectsMissingGates(t *testing.T) {
+	cfg := VerifierConfig{}
+	if err := cfg.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates succeeded with no gates")
+	}
+}
+
+func TestValidateGates_rejectsMissingName(t *testing.T) {
+	cfg := VerifierConfig{Gates: []VerifierGate{{Command: "go test ./..."}}}
+	if err := cfg.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates succeeded with unnamed gate")
+	}
+}
+
+func TestValidateGates_rejectsMissingCommand(t *testing.T) {
+	cfg := VerifierConfig{Gates: []VerifierGate{{Name: "tests"}}}
+	if err := cfg.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates succeeded with gate missing command")
+	}
+}
+
+func TestValidateGates_acceptsValidGate(t *testing.T) {
+	cfg := VerifierConfig{Gates: []VerifierGate{{Name: "tests", Command: "go test ./..."}}}
+	if err := cfg.ValidateGates(); err != nil {
+		t.Fatalf("ValidateGates rejected valid config: %v", err)
+	}
+}
+
+func TestLoadSucceedsWithoutVerifierGates(t *testing.T) {
+	// Load no longer validates gates — that is deferred to ValidateGates,
+	// which is called only on execution paths that need the verifier.
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`
 verifier:
   working_dir: ""
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded without verifier gates")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if err := cfg.Verifier.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates should reject a config with no gates")
 	}
 }
 
@@ -577,17 +615,22 @@ func TestDefaultConfigYAML_FallbackHasEmptyGatesSection(t *testing.T) {
 	if !strings.Contains(yaml, "gates:") {
 		t.Fatal("fallback YAML missing 'gates:' section")
 	}
-	// Load should fail (no gates) — that's expected; user must configure.
+	// Load must succeed even with no gates configured — gate validation is
+	// deferred to ValidateGates(), which execution paths call before running.
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load(fallback) succeeded; expected error about missing gates")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(fallback) failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "gates") {
-		t.Fatalf("unexpected error: %v", err)
+	// The fallback has no gates, so ValidateGates must reject it.
+	if err := cfg.Verifier.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates accepted fallback config with no gates")
+	}
+	if !strings.Contains(cfg.Verifier.ValidateGates().Error(), "gates") {
+		t.Fatalf("unexpected ValidateGates error: %v", cfg.Verifier.ValidateGates())
 	}
 }
 

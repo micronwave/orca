@@ -147,6 +147,9 @@ func runGoal(args []string) (err error) {
 			err = closeErr
 		}
 	}()
+	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
+		return err
+	}
 
 	active, err := rt.store.LoadActiveGoal(context.Background())
 	if err != nil {
