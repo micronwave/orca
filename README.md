@@ -7,12 +7,12 @@ $ orca goal "refactor the storage layer to use SQLite"
 
 [COMPILING]  Goal -> 4 checkable obligations
 [PLANNING]   Selected Topology: implementer_reviewer
-[CAPSULE]    Starting CAP-1 (executor: claude-3-5-sonnet)
+[CAPSULE]    Starting CAP-1 (executor: claude-sonnet-4-6)
              - Allowed: internal/store/*.go
              - Gate: 'go test ./internal/store/...'
 [RUNNING]    Agent is modifying 3 files...
 [SUCCESS]    CAP-1 finished. Patch created.
-[CAPSULE]    Starting CAP-2 (reviewer: gpt-4-codex)
+[CAPSULE]    Starting CAP-2 (reviewer: gpt-5.3-codex)
              - Task: Review PATCH-1 for migration risks.
 [SUCCESS]    CAP-2 finished. No risks found.
 [VERIFYING]  Running final gates...
