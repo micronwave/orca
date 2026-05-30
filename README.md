@@ -1,39 +1,6 @@
-# Orca
+# Orca 
 
-**Stop babysitting your agents and let them prove their work.**
-
-Orca is a local runtime that turns vague coding goals into checkable work. It wires multiple AI providers (Claude, Codex, etc.) into a single execution loop so you can delegate a massive task and walk away, knowing exactly what was proven when you get back.
-
-No hopping between five different CLI chats or pasting diffs.
-
----
-
-## The Problem: "Agent Babysitting"
-
-Current agent tools are pretty decent-ish at writing code, but they're terrible at proving it works. You spend half your day:
-1. Launching an agent in one terminal.
-2. Checking its diff in another.
-3. Realizing it hallucinated a test pass.
-4. Manually syncing context to a *different* agent because the first one got "confused."
-
-The unit of work should be a **proven patch** and not a "trust me bro". 
-
----
-
-## The Orca Proof Patches
-
-Orca treats agents like contractors, give it a goal and Orca handles the "how":
-
-*   **Multi-Provider Wiring:** It automatically delegates steps to the right model. Maybe Claude handles the implementation while Codex reviews the risk.
-*   **Obligations, Not Prompts:** Orca defines what "done" looks like (e.g., "Tests in `internal/reconciler` must pass") before any code is written.
-*   **Execution Capsules:** Each agent run happens in a cage. We give it the exact files it needs (and nothing else), a token budget, and a set of gates it must pass to exit.
-*   **Context Projections:** Instead of replaying 50kb of chat history, Orca "compiles" a fresh briefing for each step. It’s faster, cheaper, and keeps the agent from wandering.
-
----
-
-## What it looks like
-
-When you run Orca, you're watching a state machine advance.
+Orca is a local runtime that turns coding goals into verified patches. You give it a goal, it wires the right agents together, runs your test suite against the result, and hands you proof that implementation was accurate. Gone are the days of "trust me bro, it works"
 
 ```text
 $ orca goal "refactor the storage layer to use SQLite"
@@ -60,45 +27,47 @@ $ orca goal "refactor the storage layer to use SQLite"
 
 ## Quickstart
 
-### 1. Build and Install
+### 1. Install
 
-**macOS / Linux:**
+#### For end users
+
 ```bash
-go build -o orca ./cmd/orca
-sudo mv orca /usr/local/bin/
+# macOS/Linux:
+curl -fsSL https://raw.githubusercontent.com/micronwave/orca/main/install.sh | sh
+
+# Windows (PowerShell):
+iwr https://raw.githubusercontent.com/micronwave/orca/main/install.ps1 | iex
 ```
 
-**Windows (PowerShell):**
-```powershell
-go build -o orca.exe ./cmd/orca
-# To run from anywhere, add the folder to your PATH:
-$env:Path += ";$(Get-Location)" 
+#### For contributors
+
+```bash
+go install ./cmd/orca
 ```
-*Note: To make it permanent on Windows, add the directory containing `orca.exe` to your "System Environment Variables".*
 
 ### 2. Initialize a Repository (optional)
-Running `orca goal` will auto-initialize `.orca/` for you, detecting your project type (`go.mod`, `package.json`, `pom.xml`) and writing sensible gate defaults. You only need to run `orca init` explicitly if you want to inspect or customize `config.yaml` before the first run.
+
+> [!TIP]
+> `orca goal` auto-initializes `.orca/` on first run — you only need this step if you want to inspect or edit `config.yaml` before delegating anything.
 
 ```bash
-# If orca is in your PATH:
 orca init
-
-# If not (Windows example):
-E:\orca\orca.exe init
 ```
-This creates a `.orca/config.yaml` pre-populated for your project type. Open it and adjust the verifier gates if needed.
+This creates a `.orca/config.yaml` pre-populated for your project type (`go.mod`, `package.json`, `pom.xml`, etc.). Open it and adjust the verifier gates if needed.
 
 ### 3. Delegate a Goal
+
 You can provide a goal directly, pull from a GitHub issue, or use the interactive REPL.
 ```bash
-# Option A: Direct delegation
+# Direct delegation
 orca goal "add a new endpoint to the API that returns the current system load"
 
-# Option B: From an issue (requires GITHUB_TOKEN and intake.repo config)
+# From a GitHub issue (requires GITHUB_TOKEN and intake.repo config)
 orca goal --from-issue 42
 ```
 
-**Option C: Interactive REPL** — run `orca` with no arguments for a prompt-driven session. Auto-initializes `.orca/` on first use.
+> [!NOTE]
+> Run `orca` with no arguments to drop into an interactive session. Auto-initializes `.orca/` on first use.
 ```text
 $ orca
 Orca  local proof runtime
@@ -114,6 +83,7 @@ Working directory: /my-project
 ```
 
 ### 4. Monitor and Control
+
 Orca runs in a loop. You can check the state at any time from another terminal.
 ```bash
 # See what's running, what's blocked, and current budget spend
@@ -125,6 +95,17 @@ orca cancel
 # Open the desktop UI (requires orca-desktop to be installed)
 orca ui
 ```
+
+---
+
+## How it works
+
+Orca treats agents like contractors: give it a goal and it handles the "how".
+
+*   **Multi-Provider Wiring:** It automatically delegates steps to the right model. Maybe Claude handles the implementation while Codex reviews the risk.
+*   **Obligations, Not Prompts:** Orca defines what "done" looks like (e.g., "Tests in `internal/reconciler` must pass") before any code is written.
+*   **Execution Capsules:** Each agent run happens in a cage. We give it the exact files it needs (and nothing else), a token budget, and a set of gates it must pass to exit.
+*   **Context Projections:** Instead of replaying 50kb of chat history, Orca compiles a fresh briefing for each step. It's faster, cheaper, and keeps the agent from wandering.
 
 ---
 
@@ -151,7 +132,7 @@ Orca isn't a wrapper, but a Go-based supervisor that manages a durable **Artifac
 
 ## Supported Drivers
 
-Orca is model-agnostic. Out of the box, we support:
+Orca is model-agnostic. Out of the box, it supports:
 *   **Claude Code** (via `claude` CLI)
 *   **Codex** (via `codex` CLI)
 *   **Remote Adapters** (Any MCP-compatible endpoint)
