@@ -1088,14 +1088,20 @@ func runInteractive(orcaDir string) error {
 			continue
 		case line == "exit" || line == "quit":
 			return nil
-		case line == "/status":
-			_ = runStatus([]string{"--orca-dir", orcaDir})
-		case line == "/cancel":
-			_ = runCancel([]string{"--orca-dir", orcaDir}, os.Stdin, os.Stdout)
-		case line == "/help":
+		case line == "/status", line == "status":
+			if err := runStatus([]string{"--orca-dir", orcaDir}); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
+		case line == "/cancel", line == "cancel":
+			if err := runCancel([]string{"--orca-dir", orcaDir}, os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
+		case line == "/help", line == "help":
 			printHelp()
 		default:
-			_ = runGoal([]string{"--orca-dir", orcaDir, line})
+			if err := runGoal([]string{"--orca-dir", orcaDir, line}); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
 		}
 	}
 	return scanner.Err()
