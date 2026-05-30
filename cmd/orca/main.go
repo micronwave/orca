@@ -672,6 +672,11 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				if !decision.Approved {
 					return fmt.Errorf("orca: merge gate rejected patch %s: %s", readyPatchID, decision.Notes)
 				}
+				for _, pid := range acceptedPatchIDs {
+					if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
+						return fmt.Errorf("orca: apply patch %s: %w", pid, err)
+					}
+				}
 				// PR creation only runs after explicit human gate approval.
 				// There is no auto-PR path in Phase 5.
 				if rt.cfg.PR.Enabled {
@@ -685,6 +690,12 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 					}
 				}
 			} else {
+				// Apply all accepted patches to the working directory.
+				for _, pid := range acceptedPatchIDs {
+					if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
+						return fmt.Errorf("orca: apply patch %s: %w", pid, err)
+					}
+				}
 				// The reconciler already emitted merge_applied for every patch where
 				// MergeReady=true && !HumanGateRequired. Emit only for earlier accepted
 				// patches that did not receive a reconciler merge_applied.
@@ -1490,6 +1501,37 @@ func (rt *runtime) updateGoalStatus(ctx context.Context, goalID string, status s
 	if err := rt.store.UpdateGoalStatus(ctx, goalID, status); err != nil {
 		return &store.MaterializationError{Event: ev, Err: fmt.Errorf("orca: update goal status: %w", err)}
 	}
+	return nil
+}
+
+// applyPatchToWorkDir applies the diff from patchID to the project working
+// directory using git apply. It is called after the human gate (or
+// auto-accept) approves a merge so that the agent's changes land on disk.
+// A zero-byte or missing diff is treated as a no-op (the agent may have
+// produced no file changes beyond evidence artifacts).
+func (rt *runtime) applyPatchToWorkDir(ctx context.Context, patchID string) error {
+	patch, err := rt.store.LoadPatch(ctx, patchID)
+	if err != nil {
+		return fmt.Errorf("load patch: %w", err)
+	}
+	if patch.DiffPath == "" || patch.DiffPath == "inline" {
+		return nil
+	}
+	info, err := os.Stat(patch.DiffPath)
+	if err != nil {
+		return fmt.Errorf("stat diff %s: %w", patch.DiffPath, err)
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+	projectRoot := filepath.Dir(rt.orcaDir)
+	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patch.DiffPath)
+	cmd.Dir = projectRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git apply in %s: %w\n%s", projectRoot, err, strings.TrimSpace(string(out)))
+	}
+	fmt.Fprintf(os.Stderr, "[orca] patch %s: applied to working directory\n", patchID)
 	return nil
 }
 
