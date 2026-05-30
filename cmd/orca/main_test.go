@@ -1967,3 +1967,146 @@ func TestIsattyReturnsFalseForRegularFile(t *testing.T) {
 		t.Fatal("isatty(regular file) = true, want false")
 	}
 }
+
+func TestFindProjectRoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		setupFn   func(t *testing.T) (startDir, wantRoot string)
+	}{
+		{
+			name: "git_root_found",
+			setupFn: func(t *testing.T) (string, string) {
+				root := t.TempDir()
+				if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+					t.Fatalf("mkdir .git: %v", err)
+				}
+				sub := filepath.Join(root, "src", "pkg")
+				if err := os.MkdirAll(sub, 0o755); err != nil {
+					t.Fatalf("mkdir sub: %v", err)
+				}
+				return sub, root
+			},
+		},
+		{
+			name: "at_git_root",
+			setupFn: func(t *testing.T) (string, string) {
+				root := t.TempDir()
+				if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+					t.Fatalf("mkdir .git: %v", err)
+				}
+				return root, root
+			},
+		},
+		{
+			name: "no_git_fallback",
+			setupFn: func(t *testing.T) (string, string) {
+				// Use a temp dir that has no .git anywhere in its ancestry
+				// (temp dirs live in OS temp, which should have no .git).
+				dir := t.TempDir()
+				return dir, dir
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			startDir, wantRoot := tt.setupFn(t)
+			got := findProjectRoot(startDir)
+			// Resolve both to absolute paths for comparison.
+			wantAbs, _ := filepath.Abs(wantRoot)
+			gotAbs, _ := filepath.Abs(got)
+			if gotAbs != wantAbs {
+				t.Fatalf("findProjectRoot(%q) = %q, want %q", startDir, gotAbs, wantAbs)
+			}
+		})
+	}
+}
+
+func TestAutoInitWithConfirmation(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, orcaDir string)
+		input       string
+		wantErr     bool
+		errContains string
+		wantConfig  bool
+	}{
+		{
+			name: "already_initialized",
+			setup: func(t *testing.T, orcaDir string) {
+				// Write a config.yaml so the function short-circuits.
+				if err := os.MkdirAll(orcaDir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(orcaDir, "config.yaml"), []byte("# existing"), 0o644); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+			},
+			input:      "",
+			wantErr:    false,
+			wantConfig: true,
+		},
+		{
+			// Non-TTY always auto-proceeds regardless of reader content.
+			name:       "non_tty_y_input_proceeds",
+			setup:      nil,
+			input:      "y\n",
+			wantErr:    false,
+			wantConfig: true,
+		},
+		{
+			// Non-TTY does not read from in, so "n" does not abort.
+			name:       "non_tty_n_input_proceeds",
+			setup:      nil,
+			input:      "n\n",
+			wantErr:    false,
+			wantConfig: true,
+		},
+		{
+			// Non-TTY does not read from in, so empty input does not abort.
+			name:       "non_tty_empty_input_proceeds",
+			setup:      nil,
+			input:      "\n",
+			wantErr:    false,
+			wantConfig: true,
+		},
+		{
+			// Non-TTY with EOF (like < /dev/null) also proceeds.
+			name:       "non_tty_eof_proceeds",
+			setup:      nil,
+			input:      "",
+			wantErr:    false,
+			wantConfig: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := t.TempDir()
+			orcaDir := filepath.Join(parent, ".orca")
+			if tt.setup != nil {
+				tt.setup(t, orcaDir)
+			}
+			var out strings.Builder
+			err := autoInitWithConfirmation(orcaDir, strings.NewReader(tt.input), &out)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("autoInitWithConfirmation = nil, want error containing %q", tt.errContains)
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("autoInitWithConfirmation = %v, want nil", err)
+				}
+			}
+			configPath := filepath.Join(orcaDir, "config.yaml")
+			_, statErr := os.Stat(configPath)
+			if tt.wantConfig && statErr != nil {
+				t.Fatalf("config.yaml not created: %v", statErr)
+			}
+			if !tt.wantConfig && statErr == nil {
+				t.Fatal("config.yaml exists but should not have been created")
+			}
+		})
+	}
+}
