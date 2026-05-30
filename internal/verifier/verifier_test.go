@@ -654,20 +654,6 @@ func TestVerify_ChangedSnapshotOrNoLearningForcesFreshGateRun(t *testing.T) {
 	}
 }
 
-func TestParseCommand_supportsQuotedExecutablePath(t *testing.T) {
-	t.Parallel()
-
-	executable, args, err := parseCommand(`"C:\Program Files\Go\bin\go" test ./...`)
-	if err != nil {
-		t.Fatalf("parseCommand: %v", err)
-	}
-	if executable != `C:\Program Files\Go\bin\go` {
-		t.Fatalf("executable = %q", executable)
-	}
-	if strings.Join(args, " ") != "test ./..." {
-		t.Fatalf("args = %v", args)
-	}
-}
 
 func TestVerify_UsesSupplementalEvidence(t *testing.T) {
 	t.Parallel()

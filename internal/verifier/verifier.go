@@ -43,6 +43,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -586,11 +587,10 @@ func mapKeys(values map[string]bool) []string {
 type execGateRunner struct{}
 
 func (execGateRunner) Run(ctx context.Context, command, workingDir string) (int, string, error) {
-	executable, args, err := parseCommand(command)
-	if err != nil {
-		return -1, "", err
+	if strings.TrimSpace(command) == "" {
+		return -1, "", fmt.Errorf("verifier: command is required")
 	}
-	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd := shellCommand(ctx, command)
 	if strings.TrimSpace(workingDir) != "" {
 		cmd.Dir = workingDir
 	}
@@ -605,35 +605,28 @@ func (execGateRunner) Run(ctx context.Context, command, workingDir string) (int,
 	return -1, string(out), fmt.Errorf("verifier: execute %q: %w", command, err)
 }
 
-func checkCommandPresent(command string) error {
-	executable, _, err := parseCommand(command)
-	if err != nil {
-		return err
+// shellCommand returns a Cmd that runs command through the platform shell so
+// that shell built-ins (echo, exit, &&, pipes) work on every OS.
+// Windows: cmd /C <command>. All other platforms: sh -c <command>.
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/C", command)
 	}
-	_, err = exec.LookPath(executable)
-	return err
+	return exec.CommandContext(ctx, "sh", "-c", command)
 }
 
-func parseCommand(command string) (string, []string, error) {
-	trimmed := strings.TrimSpace(command)
-	if trimmed == "" {
-		return "", nil, fmt.Errorf("verifier: command is required")
+func checkCommandPresent(command string) error {
+	if strings.TrimSpace(command) == "" {
+		return fmt.Errorf("verifier: command is required")
 	}
-	if trimmed[0] == '"' || trimmed[0] == '\'' {
-		quote := trimmed[0]
-		end := strings.IndexByte(trimmed[1:], quote)
-		if end < 0 {
-			return "", nil, fmt.Errorf("verifier: malformed command %q", command)
-		}
-		executable := trimmed[1 : end+1]
-		rest := strings.TrimSpace(trimmed[end+2:])
-		return executable, strings.Fields(rest), nil
+	// Commands run through the platform shell (shellCommand), so the only
+	// binary we need is the shell itself — cmd.exe on Windows, sh elsewhere.
+	shell := "sh"
+	if runtime.GOOS == "windows" {
+		shell = "cmd"
 	}
-	parts := strings.Fields(trimmed)
-	if len(parts) == 0 {
-		return "", nil, fmt.Errorf("verifier: command is required")
-	}
-	return parts[0], parts[1:], nil
+	_, err := exec.LookPath(shell)
+	return err
 }
 
 func isTestGate(gate config.VerifierGate) bool {
