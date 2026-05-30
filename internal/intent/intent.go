@@ -66,6 +66,7 @@ func (s *Compiler) Compile(ctx context.Context, rawIntent string) (*schema.GoalI
 		)
 	}
 
+	docsOnly := isDocsOnlyGoal(intentText)
 	primaryParts := splitPrimaryConditions(intentText)
 	conditions := make([]schema.GoalCondition, 0, len(primaryParts)+1)
 	for _, part := range primaryParts {
@@ -79,12 +80,16 @@ func (s *Compiler) Compile(ctx context.Context, rawIntent string) (*schema.GoalI
 			Status:               schema.GoalConditionUnmet,
 		})
 	}
-	conditions = append(conditions, schema.GoalCondition{
-		ID:                   idgen.New("GC"),
-		Description:          "All existing tests continue to pass",
-		EffectiveDescription: "All existing tests continue to pass",
-		Status:               schema.GoalConditionUnmet,
-	})
+	// Docs-only goals (writing/updating markdown files) don't run a test suite,
+	// so the standard regression condition is not applicable.
+	if !docsOnly {
+		conditions = append(conditions, schema.GoalCondition{
+			ID:                   idgen.New("GC"),
+			Description:          "All existing tests continue to pass",
+			EffectiveDescription: "All existing tests continue to pass",
+			Status:               schema.GoalConditionUnmet,
+		})
+	}
 	goal := schema.GoalIR{
 		GoalID:           idgen.New("G"),
 		OriginalIntent:   intentText,
@@ -111,8 +116,21 @@ func inferRiskLevel(intentText string) schema.RiskLevel {
 			return schema.RiskHigh
 		}
 	}
+	if isDocsOnlyGoal(intentText) {
+		return schema.RiskLow
+	}
 	return schema.RiskMedium
 }
+
+// isDocsOnlyGoal reports whether the intent text describes a documentation-only
+// task such as writing or updating a README or markdown file. These goals do not
+// run tests or static checks, so code-quality obligations are irrelevant.
+// Mixed goals that mention docs alongside code work (fix, bug, implement,
+// refactor) are NOT docs-only and receive the full code-safety obligation set.
+func isDocsOnlyGoal(text string) bool {
+	return reDocsGoal.MatchString(text) && !reCodeWorkSignal.MatchString(text)
+}
+
 
 // splitPrimaryConditions splits intentText on newlines and semicolons to
 // produce one GoalCondition per distinct sub-goal. Single-line intents
@@ -148,6 +166,13 @@ var (
 	// rePureScopeClause matches a clause that begins with a scope directive.
 	rePureScopeClause = regexp.MustCompile(
 		"(?i)^\\s*(?:only\\s+(?:" + scopeVerbAlts + ")|(?:do\\s+not|don'?t)\\s+(?:" + scopeVerbAlts + "))\\b")
+	// reDocsGoal matches intent text that describes a documentation-only task
+	// (writing/updating markdown files or README files). Used to suppress
+	// irrelevant code-quality obligations and lower default risk.
+	reDocsGoal = regexp.MustCompile(`(?i)\b(readme|markdown)\b|\.md\b`)
+	// reCodeWorkSignal matches strong code-change indicators. When present
+	// alongside docs signals, the goal is mixed and must not be docs-only.
+	reCodeWorkSignal = regexp.MustCompile(`(?i)\bfix\b|\bbug\b|\bimplement\b|\brefactor\b`)
 )
 
 // parseScopeConstraints extracts AllowedFiles and ForbiddenFiles from

@@ -163,6 +163,96 @@ func TestCompile_scopeConstraintsMultiPath(t *testing.T) {
 	}
 }
 
+func TestCompile_docsGoalSkipsTestRegressionAndSetsLowRisk(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		intent string
+	}{
+		{"readme keyword", `write a 50 line readme for "E:\project\guide.md"`},
+		{"markdown keyword", "add a Markdown reference section to the project"},
+		{"dot-md path", `update the docs at docs/overview.md`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			log, err := eventlog.Open(root + `\events.log`)
+			if err != nil {
+				t.Fatalf("eventlog.Open: %v", err)
+			}
+			t.Cleanup(func() { _ = log.Close() })
+			st, err := store.New(root, log)
+			if err != nil {
+				t.Fatalf("store.New: %v", err)
+			}
+
+			compiler := New(st)
+			goal, err := compiler.Compile(context.Background(), tc.intent)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if goal.RiskLevel != schema.RiskLow {
+				t.Fatalf("risk = %s, want low for docs goal", goal.RiskLevel)
+			}
+			for _, c := range goal.GoalConditions {
+				if c.Description == "All existing tests continue to pass" {
+					t.Fatal("docs goal must not include test-regression condition")
+				}
+			}
+		})
+	}
+}
+
+func TestCompile_mixedCodeDocsGoalIsNotDocsOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		intent string
+	}{
+		{"fix and readme", "fix parser bug and update README.md"},
+		{"implement and md", "implement the parser; update docs/api.md"},
+		{"refactor and markdown", "refactor the schema and add a Markdown changelog"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			log, err := eventlog.Open(root + `\events.log`)
+			if err != nil {
+				t.Fatalf("eventlog.Open: %v", err)
+			}
+			t.Cleanup(func() { _ = log.Close() })
+			st, err := store.New(root, log)
+			if err != nil {
+				t.Fatalf("store.New: %v", err)
+			}
+
+			compiler := New(st)
+			goal, err := compiler.Compile(context.Background(), tc.intent)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			hasRegression := false
+			for _, c := range goal.GoalConditions {
+				if c.Description == "All existing tests continue to pass" {
+					hasRegression = true
+				}
+			}
+			if !hasRegression {
+				t.Fatal("mixed code+docs goal must include test-regression condition")
+			}
+			if goal.RiskLevel == schema.RiskLow {
+				t.Fatalf("mixed code+docs goal risk = %s, want medium or high", goal.RiskLevel)
+			}
+		})
+	}
+}
+
 func TestCompile_rejectsWhenActiveGoalExists(t *testing.T) {
 	t.Parallel()
 

@@ -42,6 +42,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -116,15 +117,60 @@ func (s *Engine) ProposeObligations(ctx context.Context, goalID string) ([]strin
 		return nil, fmt.Errorf("verifier: load goal %s: %w", goalID, err)
 	}
 
-	obligationIDs := make([]string, 0, len(goal.GoalConditions)*3)
+	// Find the first unmet or partially-met condition. Obligations are created
+	// once at the goal level (not per-condition) to avoid duplicates when the
+	// intent compiler emits multiple conditions for a single goal.
+	var primaryConditionID string
 	for _, condition := range goal.GoalConditions {
-		if condition.Status != schema.GoalConditionUnmet && condition.Status != schema.GoalConditionPartiallyMet {
-			continue
+		if condition.Status == schema.GoalConditionUnmet || condition.Status == schema.GoalConditionPartiallyMet {
+			primaryConditionID = condition.ID
+			break
 		}
-		obligations := []schema.Obligation{
+	}
+	if primaryConditionID == "" {
+		return nil, nil
+	}
+
+	var obligations []schema.Obligation
+	if isDocsGoal(goal) {
+		// Documentation-only goals (writing/updating markdown files) do not
+		// require test or static-check evidence. The only obligations are
+		// delivering the target file and confirming scope.
+		target := extractTargetFileFromIntent(goal.OriginalIntent)
+		desc := "Create or update the documentation file as described"
+		if target != "" {
+			desc = "Create or update " + target
+		}
+		var expectedFiles []string
+		if target != "" {
+			expectedFiles = []string{target}
+		}
+		obligations = []schema.Obligation{
 			{
 				ObligationID:     idgen.New("OB"),
-				GoalConditionID:  condition.ID,
+				GoalConditionID:  primaryConditionID,
+				Description:      desc,
+				EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+				Blocking:         true,
+				RiskLevel:        schema.RiskLow,
+				Status:           schema.ObligationOpen,
+				ExpectedFiles:    expectedFiles,
+			},
+			{
+				ObligationID:     idgen.New("OB"),
+				GoalConditionID:  primaryConditionID,
+				Description:      "Confirm only intended files changed (scope check)",
+				EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+				Blocking:         true,
+				RiskLevel:        schema.RiskLow,
+				Status:           schema.ObligationOpen,
+			},
+		}
+	} else {
+		obligations = []schema.Obligation{
+			{
+				ObligationID:     idgen.New("OB"),
+				GoalConditionID:  primaryConditionID,
 				Description:      "Run all tests and confirm exit code 0",
 				EvidenceRequired: []string{string(schema.EvidenceTestResult)},
 				Blocking:         true,
@@ -133,7 +179,7 @@ func (s *Engine) ProposeObligations(ctx context.Context, goalID string) ([]strin
 			},
 			{
 				ObligationID:     idgen.New("OB"),
-				GoalConditionID:  condition.ID,
+				GoalConditionID:  primaryConditionID,
 				Description:      "Run static checks (vet/lint/typecheck) and confirm pass",
 				EvidenceRequired: []string{string(schema.EvidenceLintResult), string(schema.EvidenceTypecheckResult)},
 				Blocking:         true,
@@ -142,7 +188,7 @@ func (s *Engine) ProposeObligations(ctx context.Context, goalID string) ([]strin
 			},
 			{
 				ObligationID:     idgen.New("OB"),
-				GoalConditionID:  condition.ID,
+				GoalConditionID:  primaryConditionID,
 				Description:      "Confirm only intended files changed (scope check)",
 				EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
 				Blocking:         true,
@@ -150,14 +196,59 @@ func (s *Engine) ProposeObligations(ctx context.Context, goalID string) ([]strin
 				Status:           schema.ObligationOpen,
 			},
 		}
-		for i := range obligations {
-			if err := s.store.SaveObligation(ctx, &obligations[i]); err != nil {
-				return nil, fmt.Errorf("verifier: save obligation %s: %w", obligations[i].ObligationID, err)
-			}
-			obligationIDs = append(obligationIDs, obligations[i].ObligationID)
+	}
+
+	obligationIDs := make([]string, 0, len(obligations))
+	for i := range obligations {
+		if err := s.store.SaveObligation(ctx, &obligations[i]); err != nil {
+			return nil, fmt.Errorf("verifier: save obligation %s: %w", obligations[i].ObligationID, err)
 		}
+		obligationIDs = append(obligationIDs, obligations[i].ObligationID)
 	}
 	return obligationIDs, nil
+}
+
+// reVerifierCodeWorkSignal matches strong code-change indicators. When present
+// alongside docs signals the goal is mixed and must not suppress code obligations.
+var reVerifierCodeWorkSignal = regexp.MustCompile(`(?i)\bfix\b|\bbug\b|\bimplement\b|\brefactor\b`)
+
+// isDocsGoal reports whether the goal describes a documentation-only task
+// such as writing or updating a README or markdown file. Mixed goals that also
+// contain code-change signals (fix, bug, implement, refactor) are not docs-only.
+func isDocsGoal(goal *schema.GoalIR) bool {
+	lower := strings.ToLower(goal.OriginalIntent)
+	hasDocsSignal := strings.Contains(lower, "readme") ||
+		strings.Contains(lower, ".md") ||
+		strings.Contains(lower, "markdown")
+	return hasDocsSignal && !reVerifierCodeWorkSignal.MatchString(goal.OriginalIntent)
+}
+
+// extractTargetFileFromIntent extracts the primary target file path from a
+// docs goal intent. It first looks for a quoted string that ends in ".md",
+// then falls back to any whitespace-delimited token ending in ".md".
+// Non-".md" quoted strings (e.g. section names) are skipped to avoid
+// propagating bad scope.
+func extractTargetFileFromIntent(intentText string) string {
+	for _, q := range []string{`"`, `'`} {
+		_, after, found := strings.Cut(intentText, q)
+		if !found {
+			continue
+		}
+		content, _, found := strings.Cut(after, q)
+		if !found {
+			continue
+		}
+		if p := strings.TrimSpace(content); strings.HasSuffix(strings.ToLower(p), ".md") {
+			return p
+		}
+	}
+	for _, field := range strings.Fields(intentText) {
+		field = strings.Trim(field, `"'.,;`)
+		if strings.HasSuffix(strings.ToLower(field), ".md") {
+			return field
+		}
+	}
+	return ""
 }
 
 func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*schema.VerifierResult, error) {

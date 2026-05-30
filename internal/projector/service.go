@@ -197,7 +197,7 @@ func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*
 		ExpectedFileScope: schema.ExpectedFileScope{
 			ToRead:   append([]string(nil), capsule.AllowedPaths...),
 			ToWrite:  nil,
-			ToCreate: nil,
+			ToCreate: collectExpectedFiles(obligations),
 		},
 		ExplicitExclusions: append([]string(nil), capsule.ForbiddenPaths...),
 		Topology: schema.TopologyDecision{
@@ -627,6 +627,22 @@ func onOff(enabled bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// collectExpectedFiles returns the union of ExpectedFiles across all
+// obligations, deduplicated and in stable order.
+func collectExpectedFiles(obligations []*schema.Obligation) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, ob := range obligations {
+		for _, f := range ob.ExpectedFiles {
+			if f = strings.TrimSpace(f); f != "" && !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }
 
 func (s *Compiler) loadCapsuleBundle(

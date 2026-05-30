@@ -109,10 +109,13 @@ func TestProposeObligations_createsTemplatesForUnmetConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeObligations: %v", err)
 	}
-	if len(ids) != 6 {
-		t.Fatalf("created IDs len = %d, want 6", len(ids))
+	// Obligations are created once at the goal level (for the first unmet
+	// condition) rather than per-condition, so 3 not 6.
+	if len(ids) != 3 {
+		t.Fatalf("created IDs len = %d, want 3", len(ids))
 	}
 
+	// All obligations belong to the first unmet condition.
 	unmet, err := st.LoadObligationsForCondition(ctx, "GC-unmet")
 	if err != nil {
 		t.Fatalf("LoadObligationsForCondition: %v", err)
@@ -134,6 +137,173 @@ func TestProposeObligations_createsTemplatesForUnmetConditions(t *testing.T) {
 	}
 	if !foundTestObligation {
 		t.Fatal("missing tests obligation template")
+	}
+
+	// GC-partial and GC-met get no obligations.
+	partial, err := st.LoadObligationsForCondition(ctx, "GC-partial")
+	if err != nil {
+		t.Fatalf("LoadObligationsForCondition GC-partial: %v", err)
+	}
+	if len(partial) != 0 {
+		t.Fatalf("GC-partial obligations = %d, want 0", len(partial))
+	}
+}
+
+func TestProposeObligations_docsGoalCreatesDeliveryAndScopeObligations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	goal := &schema.GoalIR{
+		GoalID:         "G-docs",
+		OriginalIntent: `write a 50 line readme for "docs/guide.md"`,
+		GoalConditions: []schema.GoalCondition{
+			{ID: "GC-docs", Status: schema.GoalConditionUnmet},
+		},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}
+	if err := st.SaveGoal(ctx, goal); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+
+	engine := New(st, config.VerifierConfig{}, nil)
+	ids, err := engine.ProposeObligations(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("ProposeObligations: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("created IDs len = %d, want 2 for docs goal", len(ids))
+	}
+
+	obligations, err := st.LoadObligationsForCondition(ctx, "GC-docs")
+	if err != nil {
+		t.Fatalf("LoadObligationsForCondition: %v", err)
+	}
+	if len(obligations) != 2 {
+		t.Fatalf("obligations len = %d, want 2", len(obligations))
+	}
+
+	descSet := make(map[string]bool)
+	for _, ob := range obligations {
+		descSet[ob.Description] = true
+		// No test or static-check obligations for docs goals.
+		if ob.Description == "Run all tests and confirm exit code 0" {
+			t.Fatal("docs goal must not have a test obligation")
+		}
+		if ob.Description == "Run static checks (vet/lint/typecheck) and confirm pass" {
+			t.Fatal("docs goal must not have a static-check obligation")
+		}
+	}
+
+	// Delivery obligation carries the target file in ExpectedFiles.
+	var deliveryOb *schema.Obligation
+	for _, ob := range obligations {
+		if ob.Description == "Create or update docs/guide.md" {
+			deliveryOb = ob
+		}
+	}
+	if deliveryOb == nil {
+		t.Fatalf("delivery obligation not found; descriptions: %v", descSet)
+	}
+	if len(deliveryOb.ExpectedFiles) != 1 || deliveryOb.ExpectedFiles[0] != "docs/guide.md" {
+		t.Fatalf("delivery obligation ExpectedFiles = %v, want [docs/guide.md]", deliveryOb.ExpectedFiles)
+	}
+	if deliveryOb.RiskLevel != schema.RiskLow {
+		t.Fatalf("delivery obligation risk = %s, want low", deliveryOb.RiskLevel)
+	}
+}
+
+func TestProposeObligations_mixedCodeDocsGoalGetsCodeObligations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	goal := &schema.GoalIR{
+		GoalID:         "G-mixed",
+		OriginalIntent: "fix parser bug and update README.md",
+		GoalConditions: []schema.GoalCondition{
+			{ID: "GC-mixed", Status: schema.GoalConditionUnmet},
+		},
+		RiskLevel: schema.RiskMedium,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}
+	if err := st.SaveGoal(ctx, goal); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+
+	engine := New(st, config.VerifierConfig{}, nil)
+	ids, err := engine.ProposeObligations(ctx, goal.GoalID)
+	if err != nil {
+		t.Fatalf("ProposeObligations: %v", err)
+	}
+	// Mixed goal must get full code obligations (3), not docs obligations (2).
+	if len(ids) != 3 {
+		t.Fatalf("mixed goal obligation count = %d, want 3", len(ids))
+	}
+	obligations, err := st.LoadObligationsForCondition(ctx, "GC-mixed")
+	if err != nil {
+		t.Fatalf("LoadObligationsForCondition: %v", err)
+	}
+	foundTest := false
+	foundStatic := false
+	for _, ob := range obligations {
+		if ob.Description == "Run all tests and confirm exit code 0" {
+			foundTest = true
+		}
+		if ob.Description == "Run static checks (vet/lint/typecheck) and confirm pass" {
+			foundStatic = true
+		}
+	}
+	if !foundTest {
+		t.Fatal("mixed goal must have test obligation")
+	}
+	if !foundStatic {
+		t.Fatal("mixed goal must have static-check obligation")
+	}
+}
+
+func TestExtractTargetFileFromIntent_skipsNonMarkdownQuotedText(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		intent string
+		want   string
+	}{
+		{"md in quotes", `write a 50 line readme for "docs/guide.md"`, "docs/guide.md"},
+		{"section name quoted", `update README.md section "Installation"`, "README.md"},
+		{"md token no quotes", "update docs/overview.md with new examples", "docs/overview.md"},
+		{"no md", "write a guide", ""},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractTargetFileFromIntent(tc.intent)
+			if got != tc.want {
+				t.Fatalf("extractTargetFileFromIntent(%q) = %q, want %q", tc.intent, got, tc.want)
+			}
+		})
 	}
 }
 
