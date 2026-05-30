@@ -54,7 +54,8 @@ func run(args []string) error {
 		if !isatty(os.Stdin) {
 			return fmt.Errorf("orca: command is required (init, goal, status, cancel)")
 		}
-		return runInteractive(".orca")
+		orcaDir := filepath.Join(findProjectRoot("."), ".orca")
+		return runInteractive(orcaDir)
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return runGoal(args)
@@ -79,9 +80,12 @@ func run(args []string) error {
 
 func runInit(args []string) (err error) {
 	fs := flag.NewFlagSet("orca init", flag.ContinueOnError)
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 	if err := ensureInitTarget(*orcaDir); err != nil {
 		return err
@@ -112,11 +116,14 @@ func runInit(args []string) (err error) {
 func runGoal(args []string) (err error) {
 	fs := flag.NewFlagSet("orca goal", flag.ContinueOnError)
 	goalFlag := fs.String("goal", "", "user goal to execute")
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	noLearning := fs.Bool("no-learning", false, "disable adaptive reuse (learning layer)")
 	fromIssue := fs.Int("from-issue", 0, "GitHub issue number to use as goal input")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 	goalText := strings.TrimSpace(*goalFlag)
 	if goalText == "" {
@@ -128,7 +135,7 @@ func runGoal(args []string) (err error) {
 	if *fromIssue <= 0 && goalText == "" {
 		return fmt.Errorf("orca goal: goal text is required (or use --from-issue)")
 	}
-	if err := autoInit(*orcaDir); err != nil {
+	if err := autoInitWithConfirmation(*orcaDir, os.Stdin, os.Stderr); err != nil {
 		return err
 	}
 	rt, closeFn, err := openRuntime(*orcaDir, *noLearning)
@@ -156,9 +163,12 @@ func runGoal(args []string) (err error) {
 
 func runStatus(args []string) (err error) {
 	fs := flag.NewFlagSet("orca status", flag.ContinueOnError)
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 	rt, closeFn, openErr := openRuntime(*orcaDir, false)
 	if openErr != nil {
@@ -174,9 +184,12 @@ func runStatus(args []string) (err error) {
 
 func runCancel(args []string, in io.Reader, out io.Writer) (err error) {
 	fs := flag.NewFlagSet("orca cancel", flag.ContinueOnError)
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 	rt, closeFn, openErr := openRuntime(*orcaDir, false)
 	if openErr != nil {
@@ -206,13 +219,16 @@ func runCI(args []string) error {
 
 func runCIWait(args []string) (err error) {
 	fs := flag.NewFlagSet("orca ci wait", flag.ContinueOnError)
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	timeoutSec := fs.Int("timeout", 600, "poll timeout in seconds")
 	branch := fs.String("branch", "", "branch to poll (overrides config branch)")
 	goalID := fs.String("goal-id", "", "goal ID (auto-resolved from active goal if empty)")
 	capsuleID := fs.String("capsule-id", "", "capsule ID for the CI status record")
 	if parseErr := fs.Parse(args); parseErr != nil {
 		return parseErr
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 
 	cfg, err := config.Load(filepath.Join(*orcaDir, "config.yaml"))
@@ -949,6 +965,27 @@ func isatty(f *os.File) bool {
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
+// findProjectRoot walks up from dir until it finds a directory containing
+// .git/, then returns that directory as the project root. Falls back to dir
+// if no git repository is found (e.g., not in a git repo).
+func findProjectRoot(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(abs, ".git")); err == nil {
+			return abs
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			break // reached filesystem root
+		}
+		abs = parent
+	}
+	return dir // fallback: no .git found
+}
+
 func mustAbs(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -1002,8 +1039,37 @@ func autoInit(orcaDir string) (err error) {
 	return nil
 }
 
+func autoInitWithConfirmation(orcaDir string, in io.Reader, out io.Writer) error {
+	configPath := filepath.Join(orcaDir, "config.yaml")
+	if _, err := os.Stat(configPath); err == nil {
+		return nil
+	}
+	absOrcaDir, err := filepath.Abs(orcaDir)
+	if err != nil {
+		absOrcaDir = orcaDir
+	}
+	interactive := false
+	if f, ok := in.(*os.File); ok && isatty(f) {
+		interactive = true
+	}
+	if !interactive {
+		fmt.Fprintf(out, "Initializing .orca/ at %s\n", absOrcaDir)
+		return autoInit(orcaDir)
+	}
+	fmt.Fprintf(out, "Initializing .orca/ at %s — proceed? [y/N] ", absOrcaDir)
+	scanner := bufio.NewScanner(in)
+	if !scanner.Scan() {
+		return fmt.Errorf("orca: init aborted")
+	}
+	line := strings.TrimSpace(scanner.Text())
+	if line != "y" && line != "Y" {
+		return fmt.Errorf("orca: init aborted")
+	}
+	return autoInit(orcaDir)
+}
+
 func runInteractive(orcaDir string) error {
-	if err := autoInit(orcaDir); err != nil {
+	if err := autoInitWithConfirmation(orcaDir, os.Stdin, os.Stderr); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
@@ -1034,9 +1100,12 @@ func runInteractive(orcaDir string) error {
 
 func runUI(args []string) error {
 	fs := flag.NewFlagSet("orca ui", flag.ContinueOnError)
-	orcaDir := fs.String("orca-dir", ".orca", "path to the .orca directory")
+	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *orcaDir == "" {
+		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
 
 	desktop, err := findDesktopBinary()
