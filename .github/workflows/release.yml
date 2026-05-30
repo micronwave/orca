@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli:
+    name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ''
+          - goos: linux
+            goarch: arm64
+            ext: ''
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build -o "orca-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/orca
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: orca-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+
+# ---------------------------------------------------------------------------
+# Desktop build stub (DISABLED — not yet ready to ship)
+#
+# Requirements before enabling:
+#   - Wails app in desktop/ is production-ready
+#   - Node.js 18+ (for Wails frontend build)
+#   - wails CLI: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+#   - Choose runner OS to match target platform (macos-latest for .app bundles,
+#     windows-latest for .exe; cross-compilation is not supported by Wails)
+#
+# To enable: uncomment the job block below and remove this comment block.
+#
+#  build-desktop:
+#    name: Build Desktop
+#    needs: build-cli
+#    runs-on: macos-latest
+#    steps:
+#      - uses: actions/checkout@v4
+#
+#      - uses: actions/setup-go@v5
+#        with:
+#          go-version: '1.22.x'
+#
+#      - uses: actions/setup-node@v4
+#        with:
+#          node-version: '18'
+#
+#      - name: Install Wails CLI
+#        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+#
+#      - name: Build desktop binary
+#        working-directory: desktop
+#        run: wails build
+#
+#      - name: Upload desktop release asset
+#        uses: softprops/action-gh-release@v2
+#        with:
+#          files: desktop/build/bin/orca-desktop*
