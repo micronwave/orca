@@ -675,3 +675,174 @@ func loadResumeGoal(t *testing.T, rt *runtime) *schema.GoalIR {
 	}
 	return goal
 }
+
+// ── hasMergeAppliedEvent tests ────────────────────────────────────────────────
+
+func TestHasMergeAppliedEvent_ReturnsTrueWhenEventExists(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true, withMergeApplied: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	found, err := rt.hasMergeAppliedEvent(context.Background(), "G-R1", "PATCH-R1")
+	if err != nil {
+		t.Fatalf("hasMergeAppliedEvent: %v", err)
+	}
+	if !found {
+		t.Fatal("expected true for existing merge_applied event, got false")
+	}
+}
+
+func TestHasMergeAppliedEvent_ReturnsFalseForWrongPatchID(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true, withMergeApplied: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	found, err := rt.hasMergeAppliedEvent(context.Background(), "G-R1", "PATCH-UNKNOWN")
+	if err != nil {
+		t.Fatalf("hasMergeAppliedEvent: %v", err)
+	}
+	if found {
+		t.Fatal("expected false for non-existent patch ID, got true")
+	}
+}
+
+func TestHasMergeAppliedEvent_ReturnsFalseWhenNoMergeEvent(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	found, err := rt.hasMergeAppliedEvent(context.Background(), "G-R1", "PATCH-R1")
+	if err != nil {
+		t.Fatalf("hasMergeAppliedEvent: %v", err)
+	}
+	if found {
+		t.Fatal("expected false when no merge_applied event exists, got true")
+	}
+}
+
+// ── resumeFromCheckpoint dispatch tests ──────────────────────────────────────
+
+func TestResumeFromCheckpoint_UnknownKind_ReturnsError(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	cp := Checkpoint{Kind: CheckpointKind("totally_unknown"), GoalID: "G-R1"}
+	if err := rt.resumeFromCheckpoint(context.Background(), cp); err == nil {
+		t.Fatal("expected error for unknown checkpoint kind, got nil")
+	}
+}
+
+func TestResumeFromCheckpoint_FinalizeMerge_MarksGoalComplete(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true, withMergeApplied: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	ctx := context.Background()
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(ctx, goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointFinalizeMerge {
+		t.Fatalf("expected CheckpointFinalizeMerge, got %s", cp.Kind)
+	}
+
+	if err := rt.resumeFromCheckpoint(ctx, cp); err != nil {
+		t.Fatalf("resumeFromCheckpoint: %v", err)
+	}
+	if got := loadGoalStatus(t, orcaDir, "G-R1"); got != schema.GoalStatusComplete {
+		t.Fatalf("goal status = %s, want complete", got)
+	}
+}
+
+func TestResumeFromCheckpoint_MergeGate_RejectedByGate(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	ctx := context.Background()
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(ctx, goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointMergeGate {
+		t.Fatalf("expected CheckpointMergeGate, got %s", cp.Kind)
+	}
+
+	rt.gatekeeper = &stubGate{mergeApproved: false, mergeNotes: "not ready"}
+	err = rt.resumeFromCheckpoint(ctx, cp)
+	if err == nil {
+		t.Fatal("expected error when gate rejects, got nil")
+	}
+	if !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("error %q does not mention rejection", err.Error())
+	}
+}
+
+func TestResumeFromCheckpoint_MergeGate_ApprovedByGate_MarksGoalComplete(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{
+		withCapsule: true, withPatch: true, withVerifier: true,
+		patchAccepted: true,
+	})
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	ctx := context.Background()
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(ctx, goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointMergeGate {
+		t.Fatalf("expected CheckpointMergeGate, got %s", cp.Kind)
+	}
+
+	rt.gatekeeper = &stubGate{mergeApproved: true}
+	if err := rt.resumeFromCheckpoint(ctx, cp); err != nil {
+		t.Fatalf("resumeFromCheckpoint with approved gate: %v", err)
+	}
+	if got := loadGoalStatus(t, orcaDir, "G-R1"); got != schema.GoalStatusComplete {
+		t.Fatalf("goal status = %s, want complete", got)
+	}
+	if got := countResumeEvents(t, orcaDir, schema.EventMergeApplied); got == 0 {
+		t.Fatal("expected merge_applied event in log after approved gate, got none")
+	}
+}

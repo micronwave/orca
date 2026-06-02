@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Integration tests
+        run: go test -tags integration ./internal/integration/...
+
   build-cli:
     name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:

@@ -506,7 +506,13 @@ func TestSupervisor_ConcurrentStatusDuringGoal(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// All calls must return without panic — no assertion needed beyond no race.
+	// Verify that /status actually produced output — not just "no race".
+	mu.Lock()
+	n := outBuf.Len()
+	mu.Unlock()
+	if n == 0 {
+		t.Error("concurrent /status calls produced no output")
+	}
 }
 
 type syncWriter struct {
@@ -556,14 +562,18 @@ func TestNewSupervisor_ClosesOriginalGatekeeper(t *testing.T) {
 	}
 	defer closeFn()
 
-	original := rt.gatekeeper
+	tracker := &closedTracker{inner: rt.gatekeeper}
+	rt.gatekeeper = tracker
+
 	sup := newSupervisor(orcaDir, rt, strings.NewReader(""), io.Discard, io.Discard)
 	defer func() { sup.stopOnce.Do(func() { close(sup.stop) }); _ = sup.gateW.Close() }()
 
-	// rt.gatekeeper must now be the sessionGate, not the original.
-	if rt.gatekeeper == original {
-		t.Fatal("newSupervisor did not replace rt.gatekeeper")
+	// newSupervisor must call Close() on the original gatekeeper.
+	if !tracker.closed {
+		t.Fatal("newSupervisor did not call Close() on the original gatekeeper")
 	}
+
+	// rt.gatekeeper must be the sessionGate wrapping the new inner gatekeeper.
 	sg, ok := rt.gatekeeper.(*sessionGate)
 	if !ok {
 		t.Fatalf("rt.gatekeeper is %T, want *sessionGate", rt.gatekeeper)
@@ -571,9 +581,6 @@ func TestNewSupervisor_ClosesOriginalGatekeeper(t *testing.T) {
 	if sg.s != sup {
 		t.Fatal("sessionGate.s does not point to the created supervisor")
 	}
-
-	// The original gatekeeper's stop channel must be closed (no reader goroutine).
-	_ = original // just verify no panic; the stop channel was closed by newSupervisor
 }
 
 // Provide a minimal fmt.Fprintln equivalent used inside session.go tests
