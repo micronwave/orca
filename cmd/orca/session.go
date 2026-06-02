@@ -169,6 +169,9 @@ func (s *Supervisor) readLines(lineCh chan<- string) {
 			return
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(s.errout, "[orca] input read error: %v\n", err)
+	}
 	close(lineCh)
 }
 

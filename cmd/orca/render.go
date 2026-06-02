@@ -172,9 +172,6 @@ const (
 	ansiCyan   = "\x1b[36m"
 )
 
-// ansiWrap wraps s with the given ANSI escape code followed by a reset.
-func ansiWrap(code, s string) string { return code + s + ansiReset }
-
 // eventColorCode returns the ANSI escape prefix appropriate for ev's kind
 // and severity.
 func eventColorCode(ev UIEvent) string {

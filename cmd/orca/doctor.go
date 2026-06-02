@@ -100,7 +100,7 @@ func runDoctorWithOutput(args []string, out io.Writer) error {
 
 // runPreflight performs all doctor/setup checks and returns a PreflightResult.
 // Pass cfg=nil when the config file is absent or failed to load.
-func runPreflight(orcaDir, configPath string, configExists bool, cfg *config.Config) *PreflightResult {
+func runPreflight(_ string, configPath string, configExists bool, cfg *config.Config) *PreflightResult {
 	r := &PreflightResult{
 		ProjectRoot:  findProjectRoot("."),
 		ProjectType:  config.DetectProjectType("."),

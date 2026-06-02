@@ -587,7 +587,7 @@ func isGateRequired(topology schema.Topology, maxRisk schema.RiskLevel) bool {
 
 // showActiveGoalResumePrompt prints a concise summary of the active goal and
 // its checkpoint, then writes available options to out. It does not block.
-func (rt *runtime) showActiveGoalResumePrompt(ctx context.Context, out io.Writer, goal *schema.GoalIR, cp Checkpoint) {
+func (rt *runtime) showActiveGoalResumePrompt(_ context.Context, out io.Writer, goal *schema.GoalIR, cp Checkpoint) {
 	fmt.Fprintf(out, "\nActive goal detected (status: %s)\n", goal.Status)
 	fmt.Fprintf(out, "  Intent: %q\n", goal.OriginalIntent)
 	fmt.Fprintf(out, "  Goal ID: %s\n", goal.GoalID)
