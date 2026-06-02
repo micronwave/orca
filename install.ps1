@@ -6,6 +6,9 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+# Respect NO_COLOR (https://no-color.org/) and dumb terminals.
+$script:UseColor = (-not $env:NO_COLOR) -and ($env:TERM -ne 'dumb')
+
 $Repo       = 'micronwave/orca'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\orca'
 $BinaryPath = Join-Path $InstallDir 'orca.exe'
@@ -34,7 +37,35 @@ $AssetName   = "orca-windows-$GoArch.exe"
 $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$AssetName"
 $ChecksumUrl = "$DownloadUrl.sha256"
 
-Write-Host "Downloading $DownloadUrl ..."
+function Write-Col {
+    param([string]$Text, [ConsoleColor]$Color = 'Cyan')
+    if ($script:UseColor) { Write-Host $Text -ForegroundColor $Color }
+    else { Write-Host $Text }
+}
+
+function Show-Banner {
+    Write-Col "   .            _"
+    Write-Col "  - _ _  _  ( ) _"
+    Write-Col "- ( _ )( _ )( _ )| |( _ )"
+    Write-Col "-  (_ ) | | |  _/| || _ |"
+    Write-Col " - ( _ ) |_| | _ | |_|( _ )"
+    Write-Col "  -  -   -   -   -   -"
+    Write-Host ""
+}
+
+function Write-Status {
+    param([string]$Message, [ConsoleColor]$Color = "Cyan")
+    if ($script:UseColor) {
+        Write-Host "[orca] " -NoNewline -ForegroundColor Cyan
+        Write-Host $Message -ForegroundColor $Color
+    } else {
+        Write-Host "[orca] $Message"
+    }
+}
+
+Show-Banner
+
+Write-Status "Downloading $AssetName ..."
 
 # Download to a temp file so a failed/partial download never corrupts an
 # existing install. Move to the final path only after checksum passes.
@@ -44,21 +75,21 @@ $TmpChecksum = [System.IO.Path]::GetTempFileName()
 try {
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpFile -UseBasicParsing
 
-    Write-Host "Verifying checksum ..."
+    Write-Status "Verifying checksum ..."
     Invoke-WebRequest -Uri $ChecksumUrl -OutFile $TmpChecksum -UseBasicParsing
     $Expected = (Get-Content $TmpChecksum -Raw).Trim().ToLowerInvariant()
     $Actual   = (Get-FileHash -Path $TmpFile -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($Actual -ne $Expected) {
-        Write-Error "Checksum mismatch.`n  Expected: $Expected`n  Got:      $Actual"
+        Write-Error "✗ Checksum mismatch.`n  Expected: $Expected`n  Got:      $Actual"
         exit 1
     }
-    Write-Host "Checksum verified."
+    Write-Status "✓ Checksum verified." "Green"
 
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir | Out-Null
     }
     Move-Item -Path $TmpFile -Destination $BinaryPath -Force
-    Write-Host "Installed: $BinaryPath"
+    Write-Status "✓ Installed: $BinaryPath" "Green"
 } finally {
     Remove-Item -Path $TmpFile, $TmpChecksum -ErrorAction SilentlyContinue
 }
@@ -92,15 +123,15 @@ $NormalizedPathParts  = @($PathParts | ForEach-Object { & $NormalizePath $_ })
 if ($NormalizedPathParts -notcontains $NormalizedInstallDir) {
     $NewPath = ($PathParts + $InstallDir) -join ';'
     [Environment]::SetEnvironmentVariable('Path', $NewPath, 'User')
-    Write-Host "Added $InstallDir to your user PATH."
-    Write-Host "Open a new terminal for the change to take effect."
+    Write-Status "Added $InstallDir to your user PATH."
+    Write-Col "Open a new terminal for the change to take effect." Yellow
 }
 
 # Verify the binary actually executes before declaring success.
 Write-Host ''
-Write-Host 'Verifying installation ...'
+Write-Status "Verifying installation ..."
 & $BinaryPath --help
 
 Write-Host ''
-Write-Host 'Installation complete.'
-Write-Host 'Open a new terminal to use orca from your PATH.'
+Write-Status "✦ Installation complete!" "Green"
+Write-Host "Open a new terminal to use orca from your PATH."
