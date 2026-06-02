@@ -271,18 +271,32 @@ func TestJSONNotifier_NoANSISequences(t *testing.T) {
 
 // ─── Live renderer ────────────────────────────────────────────────────────────
 
-func TestLiveRenderer_WritesColoredLines(t *testing.T) {
+func TestLiveRenderer_NonTTY_NoANSISequences(t *testing.T) {
+	// newLiveRenderer with a bytes.Buffer (non-TTY) must not emit ANSI escapes,
+	// respecting the NO_COLOR convention even when the renderer is explicitly created.
 	var buf bytes.Buffer
 	n := newLiveRenderer(&buf)
 	n.Step(context.Background(), UIEvent{Kind: EventKindGoalCompiling, Summary: "compiling intent"})
 	got := buf.String()
-	// Must contain the summary text.
 	if !strings.Contains(got, "compiling intent") {
 		t.Errorf("live renderer output missing summary: %s", got)
 	}
-	// Must contain at least one ANSI escape (color).
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("live renderer output to non-TTY buffer must not contain ANSI escapes:\n%s", got)
+	}
+}
+
+func TestLiveRenderer_Interactive_WritesColoredLines(t *testing.T) {
+	// Force isInteractive=true to cover the TTY color path without a real TTY.
+	var buf bytes.Buffer
+	r := &liveRenderer{out: &buf, isInteractive: true, totalSteps: 4}
+	r.Step(context.Background(), UIEvent{Kind: EventKindGoalCompiling, Summary: "compiling intent"})
+	got := buf.String()
+	if !strings.Contains(got, "compiling intent") {
+		t.Errorf("interactive renderer output missing summary: %s", got)
+	}
 	if !strings.Contains(got, "\x1b") {
-		t.Errorf("live renderer output has no ANSI escapes (expected color): %s", got)
+		t.Errorf("interactive renderer output has no ANSI escapes (expected color): %s", got)
 	}
 }
 
@@ -298,6 +312,38 @@ func TestLiveRenderer_VerifierFailure_PrintsEachFailure(t *testing.T) {
 	for _, want := range []string{"go test ./...: exit 1", "go vet ./...: exit 2"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("live renderer verifier failure missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestLiveRenderer_ReconcileBlocked_PrintsEachReason(t *testing.T) {
+	var buf bytes.Buffer
+	n := newLiveRenderer(&buf)
+	n.Step(context.Background(), UIEvent{
+		Kind:    EventKindReconcileBlocked,
+		Summary: "reconcile blocked",
+		Detail:  "missing evidence for OBL-1; patch rejected by reviewer",
+	})
+	got := buf.String()
+	for _, want := range []string{"missing evidence for OBL-1", "patch rejected by reviewer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("live renderer reconcile blocked missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestLiveRenderer_ReconcileFollowUp_PrintsObligationIDs(t *testing.T) {
+	var buf bytes.Buffer
+	n := newLiveRenderer(&buf)
+	n.Step(context.Background(), UIEvent{
+		Kind:    EventKindReconcileFollowUp,
+		Summary: "follow-up obligations created",
+		Detail:  "OBL-0000000000000004, OBL-0000000000000005",
+	})
+	got := buf.String()
+	for _, want := range []string{"follow-up:", "OBL-0000"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("live renderer reconcile follow-up missing %q:\n%s", want, got)
 		}
 	}
 }

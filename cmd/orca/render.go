@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/micronwave/orca/internal/ui"
 )
 
 // shortID returns at most 12 characters of an artifact ID. The full ID is
@@ -159,60 +161,27 @@ func splitDetail(detail string) []string {
 	return out
 }
 
-// ─── ANSI color helpers ───────────────────────────────────────────────────────
-// These constants are used only by liveRenderer and are never written to
-// non-TTY outputs.
-
-const (
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
-	ansiRed    = "\x1b[31m"
-	ansiGreen  = "\x1b[32m"
-	ansiYellow = "\x1b[33m"
-	ansiCyan   = "\x1b[36m"
-)
-
-// eventColorCode returns the ANSI escape prefix appropriate for ev's kind
-// and severity.
-func eventColorCode(ev UIEvent) string {
-	if ev.Severity == "error" {
-		return ansiRed + ansiBold
-	}
-	switch ev.Kind {
-	case EventKindVerifierPassed, EventKindMergeApplied, EventKindReconcileAccepted,
-		EventKindMergeReady:
-		return ansiGreen
-	case EventKindVerifierFailed, EventKindCapsuleFailed, EventKindReconcileBlocked:
-		return ansiRed
-	case EventKindCapsuleWaitingForGate:
-		return ansiYellow
-	case EventKindGoalCompiling, EventKindGoalPlanning, EventKindTopologySelected:
-		return ansiBold
-	default:
-		return ansiCyan
-	}
-}
-
 // ─── Live renderer ────────────────────────────────────────────────────────────
 
-// liveRenderer is a TTY-aware Notifier that adds ANSI color and concise
-// structure to lifecycle events. It is isolated from all core pipeline packages:
-// it depends only on UIEvent. The renderer updates an internal DashboardState
-// on every Step call.
-//
-// The renderer does not redraw lines (no cursor movement). Each event produces
-// one or more formatted lines, which is sufficient for a compact live display
-// without requiring an external TUI library.
 type liveRenderer struct {
-	mu    sync.Mutex
-	out   io.Writer
-	state DashboardState
+	mu            sync.Mutex
+	out           io.Writer
+	state         DashboardState
+	currentStep   int
+	totalSteps    int
+	lastLine      string
+	hasHeader     bool
+	isInteractive bool
 }
 
 // newLiveRenderer returns a Notifier that writes ANSI-colored lifecycle lines
 // to out. It should only be called when out is a TTY.
 func newLiveRenderer(out io.Writer) Notifier {
-	return &liveRenderer{out: out}
+	return &liveRenderer{
+		out:           out,
+		totalSteps:    4, // Typical flow: Compile, Plan, Run, Verify
+		isInteractive: ui.UseColor(out),
+	}
 }
 
 func (r *liveRenderer) Step(_ context.Context, ev UIEvent) {
@@ -223,119 +192,161 @@ func (r *liveRenderer) Step(_ context.Context, ev UIEvent) {
 	defer r.mu.Unlock()
 	r.state.Apply(ev)
 
-	msg := liveEventMessage(ev)
-	code := eventColorCode(ev)
-	fmt.Fprintf(r.out, "%s[orca]%s %s\n", code, ansiReset, msg)
+	if !r.hasHeader {
+		if ev.GoalID != "" {
+			fmt.Fprintf(r.out, "%s %s Goal: %s\n", ui.IconOrca, r.color(ui.OrcaBlue+ui.Bold, "Goal"), r.color(ui.Bold, shortID(ev.GoalID)))
+		} else {
+			fmt.Fprintf(r.out, "%s %s\n", ui.IconOrca, r.color(ui.OrcaBlue+ui.Bold, "Orca Goal Running"))
+		}
+		r.hasHeader = true
+	}
+
+	step, icon, fallback, done := r.stepInfo(ev)
+	msg := summarizedMessage(ev, fallback)
+	if step > 0 {
+		r.currentStep = step
+	}
+
+	status := r.color(ui.Black+ui.Bold, "[Running...]")
+	if done {
+		status = r.color(ui.Green, "Done")
+	}
+	if ev.Severity == "error" {
+		status = r.color(ui.Red+ui.Bold, "Failed")
+	}
+
+	line := fmt.Sprintf("%s %s", icon, msg)
+	if step > 0 {
+		line = fmt.Sprintf("[%d/%d] %s %-30s %s", r.currentStep, r.totalSteps, icon, msg, status)
+	}
+
+	if r.isInteractive {
+		if step > 0 && r.lastLine != "" && r.currentStep == r.lastStep(r.lastLine) {
+			ui.ReplaceLine(r.out, line)
+		} else {
+			if r.lastLine != "" {
+				fmt.Fprintln(r.out)
+			}
+			fmt.Fprint(r.out, line)
+		}
+	} else {
+		fmt.Fprintln(r.out, line)
+	}
+	if step > 0 {
+		r.lastLine = line
+	} else {
+		r.lastLine = ""
+	}
 
 	// Expand verifier failures so the user sees each one immediately.
 	if ev.Kind == EventKindVerifierFailed && ev.Detail != "" {
+		fmt.Fprintln(r.out)
 		for _, f := range splitDetail(ev.Detail) {
-			fmt.Fprintf(r.out, "  %s✗ %s%s\n", ansiRed, f, ansiReset)
+			fmt.Fprintf(r.out, "  %s %s\n", ui.IconCross, r.color(ui.Red, f))
 		}
+		r.lastLine = "" // Force new line for next event
 	}
-	// Gate waiting: show inline action hints.
+
+	// Expand reconcile-blocked failures so the user sees each blocking reason.
+	if ev.Kind == EventKindReconcileBlocked && ev.Detail != "" {
+		fmt.Fprintln(r.out)
+		for _, f := range splitDetail(ev.Detail) {
+			fmt.Fprintf(r.out, "  %s %s\n", ui.IconCross, r.color(ui.Red, f))
+		}
+		r.lastLine = ""
+	}
+
+	// Expand follow-up obligation IDs so the user knows what runs next.
+	if ev.Kind == EventKindReconcileFollowUp && ev.Detail != "" {
+		fmt.Fprintln(r.out)
+		for _, id := range strings.Split(ev.Detail, ", ") {
+			if id = strings.TrimSpace(id); id != "" {
+				fmt.Fprintf(r.out, "  %s follow-up: %s\n", ui.IconStep, r.color(ui.Black+ui.Bold, shortID(id)))
+			}
+		}
+		r.lastLine = ""
+	}
+
 	if ev.Kind == EventKindCapsuleWaitingForGate {
-		fmt.Fprintf(r.out, "  %s→ ENTER to approve · 'reject' to reject · 'cancel' to abort%s\n",
-			ansiYellow, ansiReset)
+		fmt.Fprintf(r.out, "\n  %s ENTER to approve · 'reject' to reject · 'cancel' to abort\n", r.color(ui.Yellow, ui.IconStep))
+		r.lastLine = ""
 	}
-	// Merge ready: confirmation line.
+
 	if ev.Kind == EventKindMergeReady {
-		fmt.Fprintf(r.out, "  %s✓ Patch verified and ready to merge.%s\n", ansiGreen, ansiReset)
+		fmt.Fprintf(r.out, "\n  %s\n", r.color(ui.Green, "✓ Patch verified and ready to merge."))
+		r.lastLine = ""
 	}
-	// Merge applied: applied confirmation.
+
 	if ev.Kind == EventKindMergeApplied {
-		fmt.Fprintf(r.out, "  %s✓ Changes applied to working directory.%s\n", ansiGreen, ansiReset)
+		fmt.Fprintf(r.out, "\n%s\n", ui.Success("Changes applied to working directory."))
+		r.lastLine = ""
 	}
 }
 
-func liveEventMessage(ev UIEvent) string {
+func (r *liveRenderer) stepInfo(ev UIEvent) (step int, icon, fallback string, done bool) {
 	switch ev.Kind {
 	case EventKindGoalCompiling:
-		return fallbackSummary(ev, "compiling intent")
+		return 1, ui.IconHammer, "compiling intent", false
 	case EventKindGoalPlanning:
-		if ev.GoalID != "" {
-			return fmt.Sprintf("goal %s: planning", shortID(ev.GoalID))
-		}
-	case EventKindSetupStarted, EventKindSetupReady, EventKindSetupBlocked:
-		return fallbackSummary(ev, string(ev.Kind))
-	case EventKindTopologySelected:
-		topology := ""
-		if ev.Fields != nil {
-			topology = ev.Fields["topology"]
-		}
-		if ev.GoalID != "" && topology != "" {
-			return fmt.Sprintf("goal %s: selected topology %s", shortID(ev.GoalID), topology)
-		}
-		if topology != "" {
-			return "selected topology " + topology
-		}
-	case EventKindCapsuleCreated:
-		if ev.CapsuleID != "" {
-			return fmt.Sprintf("capsule %s: compiling projections", shortID(ev.CapsuleID))
-		}
+		return 2, ui.IconClipboard, "planning", false
 	case EventKindCapsuleWaitingForGate:
-		if ev.CapsuleID != "" {
-			return fmt.Sprintf("capsule %s: awaiting projection review", shortID(ev.CapsuleID))
-		}
-	case EventKindCapsuleRunning:
-		if ev.CapsuleID != "" {
-			return fmt.Sprintf("capsule %s: running", shortID(ev.CapsuleID))
-		}
+		return 3, ui.IconRocket, "awaiting projection review", false
+	case EventKindCapsuleCreated, EventKindCapsuleRunning:
+		return 3, ui.IconRocket, "running capsule", false
 	case EventKindCapsuleCompleted:
-		if ev.CapsuleID != "" {
-			return fmt.Sprintf("capsule %s: completed", shortID(ev.CapsuleID))
-		}
+		return 3, ui.IconRocket, "capsule completed", true
 	case EventKindCapsuleFailed:
-		if ev.CapsuleID != "" {
-			return fmt.Sprintf("capsule %s: failed", shortID(ev.CapsuleID))
-		}
+		return 3, ui.IconCross, "capsule failed", false
 	case EventKindVerifierRunning:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: verifying", shortID(ev.PatchID))
-		}
+		return 4, ui.IconCheck, "verifying patch", false
 	case EventKindVerifierPassed:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: verification passed", shortID(ev.PatchID))
-		}
+		return 4, ui.IconCheck, "verification passed", true
 	case EventKindVerifierFailed:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: verification failed", shortID(ev.PatchID))
-		}
-	case EventKindReconcileRunning:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: reconciling proof", shortID(ev.PatchID))
-		}
-	case EventKindReconcileAccepted:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: accepted", shortID(ev.PatchID))
-		}
-	case EventKindReconcileFollowUp:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: follow-up required", shortID(ev.PatchID))
-		}
-	case EventKindReconcileBlocked:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: blocked", shortID(ev.PatchID))
-		}
+		return 4, ui.IconCheck, "verification failed", false
 	case EventKindMergeReady:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: merge ready", shortID(ev.PatchID))
-		}
-	case EventKindMergeApplied:
-		if ev.PatchID != "" {
-			return fmt.Sprintf("patch %s: applied to working directory", shortID(ev.PatchID))
-		}
-	case EventKindPRCreated:
-		return fallbackSummary(ev, "pr created")
+		return 4, ui.IconCheck, "merge ready", true
 	}
-	return fallbackSummary(ev, string(ev.Kind))
+	return 0, ui.IconStep, "", false
 }
 
-func fallbackSummary(ev UIEvent, fallback string) string {
-	if ev.Summary != "" {
-		return ev.Summary
+func summarizedMessage(ev UIEvent, fallback string) string {
+	msg := strings.TrimSpace(ev.Summary)
+	if msg == "" {
+		msg = fallback
 	}
-	return fallback
+	if msg == "" {
+		msg = string(ev.Kind)
+	}
+
+	if ev.GoalID != "" {
+		msg = strings.ReplaceAll(msg, ev.GoalID, shortID(ev.GoalID))
+	}
+	if ev.CapsuleID != "" {
+		msg = strings.ReplaceAll(msg, ev.CapsuleID, shortID(ev.CapsuleID))
+	}
+	if ev.PatchID != "" {
+		msg = strings.ReplaceAll(msg, ev.PatchID, shortID(ev.PatchID))
+	}
+	return msg
+}
+
+// color wraps s in the given ANSI code only when the renderer is in
+// interactive (TTY + color-enabled) mode. This respects NO_COLOR / TERM=dumb.
+func (r *liveRenderer) color(code, s string) string {
+	if !r.isInteractive {
+		return s
+	}
+	return code + s + ui.Reset
+}
+
+func (r *liveRenderer) lastStep(line string) int {
+	if len(line) < 2 {
+		return 0
+	}
+	if line[0] == '[' {
+		return int(line[1] - '0')
+	}
+	return 0
 }
 
 // liveRendererState returns the current DashboardState from a liveRenderer.
