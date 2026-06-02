@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/micronwave/orca/internal/budget"
 	"github.com/micronwave/orca/internal/cigate"
 	"github.com/micronwave/orca/internal/config"
@@ -1224,11 +1226,7 @@ func ensureInitTarget(orcaDir string) error {
 }
 
 func isatty(f *os.File) bool {
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (info.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // findProjectRoot walks up from dir until it finds a directory containing

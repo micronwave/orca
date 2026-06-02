@@ -968,12 +968,13 @@ func evidenceContentHash(
 ) string {
 	obligations := append([]string(nil), obligationRefs...)
 	sort.Strings(obligations)
+	normalizedOutput := strings.ReplaceAll(output, "\r\n", "\n")
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		string(evidenceType),
 		commandIdentity(command),
 		normalizedWorkingDir(workingDir),
 		fmt.Sprintf("exit=%d", exitCode),
-		output,
+		normalizedOutput,
 		strings.Join(obligations, ","),
 		goalID,
 		snapshotID,

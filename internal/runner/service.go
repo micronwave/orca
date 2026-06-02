@@ -481,7 +481,7 @@ func buildPatchDiff(ctx context.Context, orcaDir, capsuleID, worktreePath string
 	seen := make(map[string]bool)
 	changed := make([]string, 0)
 	for _, name := range strings.Split(strings.TrimSpace(string(namesRaw)), "\n") {
-		name = filepath.Clean(strings.TrimSpace(name))
+		name = filepath.Clean(strings.TrimSpace(strings.TrimRight(name, "\r")))
 		if name == "" || name == "." || seen[name] {
 			continue
 		}
