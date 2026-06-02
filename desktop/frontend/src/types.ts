@@ -112,6 +112,19 @@ export interface PendingGate {
   reason: string
 }
 
+export interface TimelineEntry {
+  at: string
+  type: string
+  summary: string
+  status: string // "ok" | "error" | "warning" | ""
+}
+
+export interface SetupHealthView {
+  config_exists: boolean
+  event_log_exists: boolean
+  warning?: string
+}
+
 export interface DashboardState {
   goal: GoalView | null
   obligations: ObligationView[]
@@ -121,6 +134,8 @@ export interface DashboardState {
   blockedDecisions: PendingGate[]
   mergeReadiness: string
   budget: BudgetSummary | null
+  timeline: TimelineEntry[]
+  setupHealth: SetupHealthView | null
   loading: boolean
   error: string | null
   selectedPatch: string | null

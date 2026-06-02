@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -86,11 +92,19 @@ func (a *App) GetGoal() (*GoalView, error) {
 	return &v, nil
 }
 
-// ListObligations returns all obligations in the store, sorted by ID.
+// ListObligations returns obligations for the active or most recent goal, sorted by ID.
 func (a *App) ListObligations() ([]ObligationView, error) {
-	obs, err := scanDir[obligationDisk](orcaPath(a.dir(), relObligations))
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return nil, err
+	}
+	obs := scope.obligations
+	if scope.goalID == "" {
+		obs, err = scanDir[obligationDisk](orcaPath(dir, relObligations))
+		if err != nil {
+			return nil, err
+		}
 	}
 	sort.Slice(obs, func(i, j int) bool {
 		return obs[i].ObligationID < obs[j].ObligationID
@@ -102,11 +116,19 @@ func (a *App) ListObligations() ([]ObligationView, error) {
 	return out, nil
 }
 
-// ListCapsules returns all capsules, sorted by ID.
+// ListCapsules returns capsules for the active or most recent goal, sorted by ID.
 func (a *App) ListCapsules() ([]CapsuleView, error) {
-	caps, err := scanDir[capsuleDisk](orcaPath(a.dir(), relCapsules))
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return nil, err
+	}
+	caps := scope.capsules
+	if scope.goalID == "" {
+		caps, err = scanDir[capsuleDisk](orcaPath(dir, relCapsules))
+		if err != nil {
+			return nil, err
+		}
 	}
 	sort.Slice(caps, func(i, j int) bool {
 		return caps[i].CapsuleID < caps[j].CapsuleID
@@ -118,12 +140,18 @@ func (a *App) ListCapsules() ([]CapsuleView, error) {
 	return out, nil
 }
 
-// ListPatches returns all patches, sorted by patch ID.
+// ListPatches returns patches for the active or most recent goal, sorted by patch ID.
 func (a *App) ListPatches() ([]PatchView, error) {
-	patches, err := scanDir[patchDisk](orcaPath(a.dir(), relPatches))
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	patches, err := scanDir[patchDisk](orcaPath(dir, relPatches))
+	if err != nil {
+		return nil, err
+	}
+	patches = filterPatchesByScope(patches, scope)
 	sort.Slice(patches, func(i, j int) bool {
 		return patches[i].PatchID < patches[j].PatchID
 	})
@@ -177,12 +205,19 @@ func evidenceSupportsClaimed(supports []string, claimed map[string]bool) bool {
 	return false
 }
 
-// ListFailures returns all failure fingerprints, sorted by failure ID.
+// ListFailures returns failure fingerprints for the active or most recent goal,
+// sorted by failure ID.
 func (a *App) ListFailures() ([]FailureView, error) {
-	failures, err := scanDir[failureDisk](orcaPath(a.dir(), relFailures))
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	failures, err := scanDir[failureDisk](orcaPath(dir, relFailures))
+	if err != nil {
+		return nil, err
+	}
+	failures = filterFailuresByScope(failures, scope)
 	sort.Slice(failures, func(i, j int) bool {
 		return failures[i].FailureID < failures[j].FailureID
 	})
@@ -226,14 +261,22 @@ func (a *App) GetBudget(capsuleID string) (*BudgetView, error) {
 	return &agg, nil
 }
 
-// GetBudgetSummary returns aggregated budget totals across all records.
+// GetBudgetSummary returns aggregated budget totals for the active or most recent goal.
 func (a *App) GetBudgetSummary() (*BudgetSummary, error) {
-	records, err := scanDir[budgetDisk](orcaPath(a.dir(), relBudgets))
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	records, err := scanDir[budgetDisk](orcaPath(dir, relBudgets))
 	if err != nil {
 		return nil, err
 	}
 	s := &BudgetSummary{}
 	for _, r := range records {
+		if scope.goalID != "" && r.GoalID != scope.goalID {
+			continue
+		}
 		s.TotalTokensSpent += r.TokensSpent
 		s.TotalWallTimeSeconds += r.WallTimeSeconds
 		s.TotalToolCalls += r.ToolCalls
@@ -464,6 +507,8 @@ func shouldReviewProjection(topology, maxRisk string) bool {
 		return true
 	case "implementer_reviewer":
 		return maxRisk == "medium" || maxRisk == "high"
+	case "single", "parallel", "test_first", "investigate_then_implement":
+		return true
 	default:
 		return false
 	}
@@ -526,6 +571,7 @@ func hasGateDecision(decisions []decisionDisk, gateCtx, relatedID string) bool {
 // so that GetMergeReadiness and GetBlockedDecisions only consider the active
 // goal's records, mirroring the goal-scoped queries in cmd/orca printStatus.
 type goalScope struct {
+	goalID        string
 	conditionIDs  map[string]bool
 	obligationIDs map[string]bool
 	capsuleIDs    map[string]bool
@@ -549,6 +595,7 @@ func loadActiveGoalScopeFromDir(dir string) (goalScope, error) {
 		return goalScope{}, nil
 	}
 	scope := goalScope{
+		goalID:        active.GoalID,
 		conditionIDs:  make(map[string]bool, len(active.GoalConditions)),
 		obligationIDs: make(map[string]bool),
 		capsuleIDs:    make(map[string]bool),
@@ -605,7 +652,7 @@ func findActiveGoalDisk(goals []goalDisk) *goalDisk {
 // have been created yet (capsuleIDs is empty), an empty slice is returned so
 // that historical verifier results from other goals are not mixed in.
 func filterVerifierResultsByScope(vrs []verifierResultDisk, scope goalScope) []verifierResultDisk {
-	if len(scope.conditionIDs) == 0 {
+	if scope.goalID == "" {
 		return vrs // no active goal — no filter
 	}
 	if len(scope.capsuleIDs) == 0 {
@@ -620,3 +667,223 @@ func filterVerifierResultsByScope(vrs []verifierResultDisk, scope goalScope) []v
 	return out
 }
 
+func filterPatchesByScope(patches []patchDisk, scope goalScope) []patchDisk {
+	if scope.goalID == "" {
+		return patches
+	}
+	if len(scope.capsuleIDs) == 0 {
+		return nil
+	}
+	out := patches[:0:0]
+	for _, p := range patches {
+		if scope.capsuleIDs[p.CapsuleID] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func filterFailuresByScope(failures []failureDisk, scope goalScope) []failureDisk {
+	if scope.goalID == "" {
+		return failures
+	}
+	if len(scope.capsuleIDs) == 0 {
+		return nil
+	}
+	out := failures[:0:0]
+	for _, f := range failures {
+		if scope.capsuleIDs[f.SourceCapsuleID] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// ── Timeline and setup health ─────────────────────────────────────────────────
+
+// rawEventLogLine is the minimal JSON shape of one line in events.log.
+type rawEventLogLine struct {
+	Type       string          `json:"type"`
+	GoalID     string          `json:"goal_id"`
+	ArtifactID string          `json:"artifact_id,omitempty"`
+	Payload    json.RawMessage `json:"payload"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// GetTimeline reads the events.log JSONL and returns a filtered, ordered list
+// of lifecycle timeline entries for the primary screen stepper. Routine
+// housekeeping events are omitted. Returns at most 200 entries. Returns an
+// empty slice when the log does not exist.
+func (a *App) GetTimeline() ([]TimelineEntry, error) {
+	dir := a.dir()
+	scope, err := loadActiveGoalScopeFromDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	logPath := filepath.Join(dir, "events.log")
+	f, err := os.Open(logPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []TimelineEntry{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []TimelineEntry
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 16<<20) // allow large artifact payload events
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var ev rawEventLogLine
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue // skip malformed lines
+		}
+		if scope.goalID != "" && ev.GoalID != scope.goalID {
+			continue
+		}
+		if !timelineSignificant(ev.Type) {
+			continue
+		}
+		entries = append(entries, timelineEntryFromEvent(ev))
+	}
+	if err := sc.Err(); err != nil {
+		return entries, err
+	}
+	const maxEntries = 200
+	if len(entries) > maxEntries {
+		entries = entries[len(entries)-maxEntries:]
+	}
+	return entries, nil
+}
+
+// GetSetupHealth returns a lightweight disk-based setup health check from the
+// .orca/ directory. Full doctor diagnostics are CLI-only (orca doctor).
+func (a *App) GetSetupHealth() (*SetupHealthView, error) {
+	dir := a.dir()
+	_, configErr := os.Stat(filepath.Join(dir, "config.yaml"))
+	configExists := configErr == nil
+	_, logErr := os.Stat(filepath.Join(dir, "events.log"))
+	eventLogExists := logErr == nil
+
+	h := &SetupHealthView{
+		ConfigExists:   configExists,
+		EventLogExists: eventLogExists,
+	}
+	if !configExists {
+		h.Warning = "config.yaml not found — run orca init to set up"
+	}
+	return h, nil
+}
+
+// timelineSignificant reports whether an event type is worth showing in the
+// timeline stepper. Routine housekeeping events are excluded to keep the
+// timeline focused on meaningful lifecycle steps.
+func timelineSignificant(evType string) bool {
+	switch evType {
+	case "state_snapshot_saved",
+		"budget_record_saved", "budget_record_updated",
+		"capsule_projection_linked",
+		"artifact_invalidated",
+		"claim_status_updated", "claim_superseded",
+		"topology_outcome_recorded",
+		"pr_created", "ci_status_received", "intake_issue_ingested":
+		return false
+	}
+	return true
+}
+
+// timelineEntryFromEvent converts a rawEventLogLine into a TimelineEntry.
+func timelineEntryFromEvent(ev rawEventLogLine) TimelineEntry {
+	summary, status := eventTypeLabel(ev.Type, ev.Payload)
+	return TimelineEntry{
+		At:      ev.CreatedAt,
+		Type:    ev.Type,
+		Summary: summary,
+		Status:  status,
+	}
+}
+
+// eventTypeLabel maps an events.log type string to a human-readable summary
+// and a status indicator ("ok" | "error" | "warning" | ""). Unknown types
+// fall back to their raw type string with underscores replaced by spaces.
+func eventTypeLabel(evType string, payload json.RawMessage) (string, string) {
+	switch evType {
+	case "goal_created":
+		return "Goal created", "ok"
+	case "obligation_created":
+		return "Obligation planned", ""
+	case "topology_selected":
+		if topo := payloadString(payload, "topology"); topo != "" {
+			return "Topology: " + topo, "ok"
+		}
+		return "Topology selected", "ok"
+	case "context_projection_created":
+		return "Context compiled", ""
+	case "capsule_created":
+		return "Capsule created", ""
+	case "capsule_started":
+		return "Capsule started", ""
+	case "capsule_state_updated":
+		if state := payloadString(payload, "state"); state != "" {
+			return "Capsule: " + strings.ReplaceAll(state, "_", " "), ""
+		}
+		return "Capsule state updated", ""
+	case "capsule_completed":
+		return "Capsule completed", "ok"
+	case "patch_artifact_created":
+		return "Patch produced", ""
+	case "evidence_artifact_created":
+		return "Evidence collected", ""
+	case "failure_fingerprint_created":
+		return "Failure recorded", "warning"
+	case "verifier_result_created":
+		return "Verification complete", ""
+	case "obligation_status_updated":
+		if s := payloadString(payload, "status"); s != "" {
+			return "Obligation: " + s, ""
+		}
+		return "Obligation updated", ""
+	case "patch_accepted":
+		return "Patch accepted", "ok"
+	case "patch_rejected":
+		return "Patch rejected", "error"
+	case "merge_applied":
+		return "Merge applied", "ok"
+	case "goal_status_updated":
+		if s := payloadString(payload, "status"); s != "" {
+			return "Goal: " + s, ""
+		}
+		return "Goal updated", ""
+	case "decision_record_created":
+		return "Decision recorded", ""
+	case "claim_created":
+		return "Claim created", ""
+	default:
+		return strings.ReplaceAll(evType, "_", " "), ""
+	}
+}
+
+// payloadString extracts a single string field from a JSON payload object.
+// Returns an empty string if the payload is invalid or the field is absent.
+func payloadString(payload json.RawMessage, field string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return ""
+	}
+	raw, ok := m[field]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}

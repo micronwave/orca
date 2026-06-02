@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -180,8 +181,9 @@ func TestShouldReviewProjection(t *testing.T) {
 		{"implementer_reviewer", "high", true},
 		{"implementer_reviewer", "medium", true},
 		{"implementer_reviewer", "low", false},
-		{"single", "low", false},
-		{"single", "high", false},
+		{"single", "low", true},
+		{"single", "medium", true},
+		{"single", "high", true},
 		{"", "high", false},
 	}
 	for _, tc := range tests {
@@ -243,8 +245,10 @@ func TestDeriveBlockedDecisions_projectionReview_alreadyDecided(t *testing.T) {
 	}
 }
 
-func TestDeriveBlockedDecisions_singleTopology_noGateRequired(t *testing.T) {
-	// single topology with low risk never requires projection_review.
+func TestDeriveBlockedDecisions_singleTopology_pendingTimedProjectionReview(t *testing.T) {
+	// single topology still invokes projection_review; low risk uses a timed
+	// auto-proceed window in the CLI, but the pending gate is visible until a
+	// decision record exists.
 	caps := []capsuleDisk{{
 		CapsuleID:          "CAP-1",
 		Role:               "executor",
@@ -255,8 +259,11 @@ func TestDeriveBlockedDecisions_singleTopology_noGateRequired(t *testing.T) {
 	obs := []obligationDisk{{ObligationID: "OB-1", Status: "open", Blocking: true, RiskLevel: "low"}}
 
 	result := deriveBlockedDecisions(obs, caps, nil, nil, decisions)
-	if len(result) != 0 {
-		t.Errorf("expected no pending gates for single/low-risk, got %d", len(result))
+	if len(result) != 1 {
+		t.Fatalf("expected 1 pending projection gate for single/low-risk, got %d", len(result))
+	}
+	if result[0].GateType != "projection_review" || result[0].RelatedID != "CAP-1" {
+		t.Fatalf("pending gate = %+v, want projection_review for CAP-1", result[0])
 	}
 }
 
@@ -431,8 +438,9 @@ func TestFilterVerifierResultsByScope_noActiveGoal_returnsAll(t *testing.T) {
 
 func TestFilterVerifierResultsByScope_activeGoalNoCapsules_returnsNone(t *testing.T) {
 	scope := goalScope{
-		conditionIDs:  map[string]bool{"GC-A": true},
-		capsuleIDs:    map[string]bool{}, // active goal exists but has no capsules yet
+		goalID:       "GOAL-A",
+		conditionIDs: map[string]bool{"GC-A": true},
+		capsuleIDs:   map[string]bool{}, // active goal exists but has no capsules yet
 	}
 	vrs := []verifierResultDisk{
 		{VerifierResultID: "VR-OLD", CapsuleID: "CAP-OLD"},
@@ -445,8 +453,9 @@ func TestFilterVerifierResultsByScope_activeGoalNoCapsules_returnsNone(t *testin
 
 func TestFilterVerifierResultsByScope_filtersToActiveGoalCapsules(t *testing.T) {
 	scope := goalScope{
-		conditionIDs:  map[string]bool{"GC-A": true},
-		capsuleIDs:    map[string]bool{"CAP-A": true},
+		goalID:       "GOAL-A",
+		conditionIDs: map[string]bool{"GC-A": true},
+		capsuleIDs:   map[string]bool{"CAP-A": true},
 	}
 	vrs := []verifierResultDisk{
 		{VerifierResultID: "VR-A", CapsuleID: "CAP-A"},
@@ -531,6 +540,99 @@ func TestGetMergeReadiness_ignoresObligationsFromOtherGoals(t *testing.T) {
 	// blocking failures, and without obligation scoping it would also be blocked by OB-OLD.
 	if readiness != "ready" {
 		t.Errorf("got %q, want ready (old-goal VR and obligation must not affect active-goal readiness)", readiness)
+	}
+}
+
+func TestDesktopListsScopePrimaryDataToActiveGoal(t *testing.T) {
+	orcaDir := t.TempDir()
+	for _, d := range []string{
+		filepath.Join(orcaDir, "state", "goals"),
+		filepath.Join(orcaDir, "state", "obligations"),
+		filepath.Join(orcaDir, "state", "capsules"),
+		filepath.Join(orcaDir, "artifacts", "patches"),
+		filepath.Join(orcaDir, "artifacts", "failures"),
+		filepath.Join(orcaDir, "artifacts", "budgets"),
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	now := time.Now().UTC()
+	writeJSON(t, filepath.Join(orcaDir, "state", "goals", "GOAL-A.json"), goalDisk{
+		GoalID: "GOAL-A", Status: "active", CreatedAt: now,
+		GoalConditions: []goalConditionDisk{{ID: "GC-A", Status: "unmet"}},
+	})
+	writeJSON(t, filepath.Join(orcaDir, "state", "goals", "GOAL-OLD.json"), goalDisk{
+		GoalID: "GOAL-OLD", Status: "complete", CreatedAt: now.Add(-time.Hour),
+		GoalConditions: []goalConditionDisk{{ID: "GC-OLD", Status: "met"}},
+	})
+	writeJSON(t, filepath.Join(orcaDir, "state", "obligations", "OB-A.json"), obligationDisk{
+		ObligationID: "OB-A", GoalConditionID: "GC-A", Status: "open",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "state", "obligations", "OB-OLD.json"), obligationDisk{
+		ObligationID: "OB-OLD", GoalConditionID: "GC-OLD", Status: "satisfied",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "state", "capsules", "CAP-A.json"), capsuleDisk{
+		CapsuleID: "CAP-A", ObligationIDs: []string{"OB-A"},
+	})
+	writeJSON(t, filepath.Join(orcaDir, "state", "capsules", "CAP-OLD.json"), capsuleDisk{
+		CapsuleID: "CAP-OLD", ObligationIDs: []string{"OB-OLD"},
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "patches", "PATCH-A.json"), patchDisk{
+		PatchID: "PATCH-A", CapsuleID: "CAP-A",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "patches", "PATCH-OLD.json"), patchDisk{
+		PatchID: "PATCH-OLD", CapsuleID: "CAP-OLD",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "failures", "FAIL-A.json"), failureDisk{
+		FailureID: "FAIL-A", SourceCapsuleID: "CAP-A",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "failures", "FAIL-OLD.json"), failureDisk{
+		FailureID: "FAIL-OLD", SourceCapsuleID: "CAP-OLD",
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "budgets", "BUD-A.json"), budgetDisk{
+		BudgetID: "BUD-A", GoalID: "GOAL-A", TokensSpent: 10,
+	})
+	writeJSON(t, filepath.Join(orcaDir, "artifacts", "budgets", "BUD-OLD.json"), budgetDisk{
+		BudgetID: "BUD-OLD", GoalID: "GOAL-OLD", TokensSpent: 99,
+	})
+
+	app := NewApp(orcaDir)
+	obligations, err := app.ListObligations()
+	if err != nil {
+		t.Fatalf("ListObligations: %v", err)
+	}
+	if len(obligations) != 1 || obligations[0].ObligationID != "OB-A" {
+		t.Fatalf("ListObligations = %+v, want only OB-A", obligations)
+	}
+	capsules, err := app.ListCapsules()
+	if err != nil {
+		t.Fatalf("ListCapsules: %v", err)
+	}
+	if len(capsules) != 1 || capsules[0].CapsuleID != "CAP-A" {
+		t.Fatalf("ListCapsules = %+v, want only CAP-A", capsules)
+	}
+	patches, err := app.ListPatches()
+	if err != nil {
+		t.Fatalf("ListPatches: %v", err)
+	}
+	if len(patches) != 1 || patches[0].PatchID != "PATCH-A" {
+		t.Fatalf("ListPatches = %+v, want only PATCH-A", patches)
+	}
+	failures, err := app.ListFailures()
+	if err != nil {
+		t.Fatalf("ListFailures: %v", err)
+	}
+	if len(failures) != 1 || failures[0].FailureID != "FAIL-A" {
+		t.Fatalf("ListFailures = %+v, want only FAIL-A", failures)
+	}
+	budget, err := app.GetBudgetSummary()
+	if err != nil {
+		t.Fatalf("GetBudgetSummary: %v", err)
+	}
+	if budget.TotalTokensSpent != 10 {
+		t.Fatalf("TotalTokensSpent = %d, want 10", budget.TotalTokensSpent)
 	}
 }
 
@@ -638,6 +740,207 @@ func TestListEvidence_emptyPatchID(t *testing.T) {
 	if len(ev) != 0 {
 		t.Errorf("expected empty slice, got %d items", len(ev))
 	}
+}
+
+// ── GetTimeline tests ─────────────────────────────────────────────────────────
+
+func TestGetTimeline_noLog(t *testing.T) {
+	app := NewApp(t.TempDir())
+	entries, err := app.GetTimeline()
+	if err != nil {
+		t.Fatalf("GetTimeline: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected empty slice for missing log, got %d entries", len(entries))
+	}
+}
+
+func TestGetTimeline_parsesAndFilters(t *testing.T) {
+	orcaDir := t.TempDir()
+	now := time.Now().UTC()
+
+	eventsData := []map[string]any{
+		{"type": "goal_created", "goal_id": "G-1", "created_at": now.Add(-3 * time.Minute), "payload": json.RawMessage("{}")},
+		{"type": "obligation_created", "goal_id": "G-1", "created_at": now.Add(-2 * time.Minute), "payload": json.RawMessage("{}")},
+		// state_snapshot_saved should be excluded by timelineSignificant
+		{"type": "state_snapshot_saved", "goal_id": "G-1", "created_at": now.Add(-90 * time.Second), "payload": json.RawMessage("{}")},
+		{"type": "patch_accepted", "goal_id": "G-1", "created_at": now, "payload": json.RawMessage("{}")},
+	}
+	logPath := filepath.Join(orcaDir, "events.log")
+	if err := writeEventLog(t, logPath, eventsData); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp(orcaDir)
+	entries, err := app.GetTimeline()
+	if err != nil {
+		t.Fatalf("GetTimeline: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (snapshot filtered), got %d", len(entries))
+	}
+	if entries[0].Type != "goal_created" {
+		t.Errorf("entries[0].Type = %q; want goal_created", entries[0].Type)
+	}
+	if entries[2].Type != "patch_accepted" {
+		t.Errorf("entries[2].Type = %q; want patch_accepted", entries[2].Type)
+	}
+	if entries[2].Status != "ok" {
+		t.Errorf("entries[2].Status = %q; want ok", entries[2].Status)
+	}
+}
+
+func TestGetTimeline_limitsToMaxEntries(t *testing.T) {
+	orcaDir := t.TempDir()
+	now := time.Now().UTC()
+	events := make([]map[string]any, 210)
+	for i := range 210 {
+		events[i] = map[string]any{
+			"type":       "obligation_created",
+			"goal_id":    "G-1",
+			"created_at": now.Add(time.Duration(i) * time.Second),
+			"payload":    json.RawMessage("{}"),
+		}
+	}
+	logPath := filepath.Join(orcaDir, "events.log")
+	if err := writeEventLog(t, logPath, events); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp(orcaDir)
+	entries, err := app.GetTimeline()
+	if err != nil {
+		t.Fatalf("GetTimeline: %v", err)
+	}
+	if len(entries) != 200 {
+		t.Errorf("expected 200 capped entries, got %d", len(entries))
+	}
+}
+
+func TestGetTimeline_topologyPayloadExtracted(t *testing.T) {
+	orcaDir := t.TempDir()
+	now := time.Now().UTC()
+	payload, _ := json.Marshal(map[string]string{"topology": "implementer_reviewer", "decision_id": "DEC-1"})
+	events := []map[string]any{
+		{"type": "topology_selected", "goal_id": "G-1", "created_at": now, "payload": json.RawMessage(payload)},
+	}
+	logPath := filepath.Join(orcaDir, "events.log")
+	if err := writeEventLog(t, logPath, events); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp(orcaDir)
+	entries, err := app.GetTimeline()
+	if err != nil {
+		t.Fatalf("GetTimeline: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Summary != "Topology: implementer_reviewer" {
+		t.Errorf("Summary = %q; want Topology: implementer_reviewer", entries[0].Summary)
+	}
+}
+
+func TestGetTimeline_scopesEventsToActiveGoal(t *testing.T) {
+	orcaDir := t.TempDir()
+	goalDir := filepath.Join(orcaDir, "state", "goals")
+	if err := os.MkdirAll(goalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	writeJSON(t, filepath.Join(goalDir, "GOAL-A.json"), goalDisk{
+		GoalID: "GOAL-A", Status: "active", CreatedAt: now,
+		GoalConditions: []goalConditionDisk{{ID: "GC-A"}},
+	})
+	writeJSON(t, filepath.Join(goalDir, "GOAL-OLD.json"), goalDisk{
+		GoalID: "GOAL-OLD", Status: "complete", CreatedAt: now.Add(-time.Hour),
+		GoalConditions: []goalConditionDisk{{ID: "GC-OLD"}},
+	})
+	events := []map[string]any{
+		{"type": "goal_created", "goal_id": "GOAL-OLD", "created_at": now.Add(-time.Hour), "payload": json.RawMessage("{}")},
+		{"type": "goal_created", "goal_id": "GOAL-A", "created_at": now, "payload": json.RawMessage("{}")},
+	}
+	if err := writeEventLog(t, filepath.Join(orcaDir, "events.log"), events); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp(orcaDir)
+	entries, err := app.GetTimeline()
+	if err != nil {
+		t.Fatalf("GetTimeline: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Type != "goal_created" || !entries[0].At.Equal(now) {
+		t.Fatalf("entries = %+v, want only active goal event", entries)
+	}
+}
+
+// ── GetSetupHealth tests ──────────────────────────────────────────────────────
+
+func TestGetSetupHealth_configMissing(t *testing.T) {
+	app := NewApp(t.TempDir())
+	h, err := app.GetSetupHealth()
+	if err != nil {
+		t.Fatalf("GetSetupHealth: %v", err)
+	}
+	if h == nil {
+		t.Fatal("expected non-nil health")
+	}
+	if h.ConfigExists {
+		t.Error("config_exists should be false when file is absent")
+	}
+	if h.Warning == "" {
+		t.Error("expected a warning message when config.yaml is missing")
+	}
+}
+
+func TestGetSetupHealth_configExists(t *testing.T) {
+	orcaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(orcaDir, "config.yaml"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(orcaDir)
+	h, err := app.GetSetupHealth()
+	if err != nil {
+		t.Fatalf("GetSetupHealth: %v", err)
+	}
+	if !h.ConfigExists {
+		t.Error("config_exists should be true when config.yaml is present")
+	}
+	if h.Warning != "" {
+		t.Errorf("expected no warning, got %q", h.Warning)
+	}
+}
+
+func TestGetSetupHealth_eventLogDetected(t *testing.T) {
+	orcaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(orcaDir, "events.log"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(orcaDir)
+	h, err := app.GetSetupHealth()
+	if err != nil {
+		t.Fatalf("GetSetupHealth: %v", err)
+	}
+	if !h.EventLogExists {
+		t.Error("event_log_exists should be true when events.log is present")
+	}
+}
+
+// ── Helpers (timeline) ────────────────────────────────────────────────────────
+
+func writeEventLog(t *testing.T, path string, events []map[string]any) error {
+	t.Helper()
+	var sb strings.Builder
+	for _, ev := range events {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			return err
+		}
+		sb.Write(data)
+		sb.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

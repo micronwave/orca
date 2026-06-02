@@ -317,17 +317,70 @@ export namespace main {
 	    gate_type: string;
 	    related_id: string;
 	    reason: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new PendingGate(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.gate_type = source["gate_type"];
 	        this.related_id = source["related_id"];
 	        this.reason = source["reason"];
 	    }
+	}
+	export class SetupHealthView {
+	    config_exists: boolean;
+	    event_log_exists: boolean;
+	    warning: string;
+
+	    static createFrom(source: any = {}) {
+	        return new SetupHealthView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.config_exists = source["config_exists"];
+	        this.event_log_exists = source["event_log_exists"];
+	        this.warning = source["warning"];
+	    }
+	}
+	export class TimelineEntry {
+	    // Go type: time
+	    at: any;
+	    type: string;
+	    summary: string;
+	    status: string;
+
+	    static createFrom(source: any = {}) {
+	        return new TimelineEntry(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.at = this.convertValues(source["at"], null);
+	        this.type = source["type"];
+	        this.summary = source["summary"];
+	        this.status = source["status"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

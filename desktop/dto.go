@@ -12,23 +12,23 @@ type goalConditionDisk struct {
 }
 
 type goalDisk struct {
-	GoalID         string               `json:"goal_id"`
-	OriginalIntent string               `json:"original_intent"`
-	GoalConditions []goalConditionDisk  `json:"goal_conditions"`
-	RiskLevel      string               `json:"risk_level"`
-	CreatedAt      time.Time            `json:"created_at"`
-	Status         string               `json:"status"`
+	GoalID         string              `json:"goal_id"`
+	OriginalIntent string              `json:"original_intent"`
+	GoalConditions []goalConditionDisk `json:"goal_conditions"`
+	RiskLevel      string              `json:"risk_level"`
+	CreatedAt      time.Time           `json:"created_at"`
+	Status         string              `json:"status"`
 }
 
 type obligationDisk struct {
-	ObligationID    string   `json:"obligation_id"`
-	GoalConditionID string   `json:"goal_condition_id"`
-	Description     string   `json:"description"`
+	ObligationID     string   `json:"obligation_id"`
+	GoalConditionID  string   `json:"goal_condition_id"`
+	Description      string   `json:"description"`
 	EvidenceRequired []string `json:"evidence_required"`
-	Blocking        bool     `json:"blocking"`
-	RiskLevel       string   `json:"risk_level"`
-	Status          string   `json:"status"`
-	SatisfiedBy     []string `json:"satisfied_by"`
+	Blocking         bool     `json:"blocking"`
+	RiskLevel        string   `json:"risk_level"`
+	Status           string   `json:"status"`
+	SatisfiedBy      []string `json:"satisfied_by"`
 }
 
 type capsuleBudgetDisk struct {
@@ -44,15 +44,15 @@ type capsuleSandboxDisk struct {
 }
 
 type capsuleDisk struct {
-	CapsuleID          string             `json:"capsule_id"`
-	ObligationIDs      []string           `json:"obligation_ids"`
-	Agent              string             `json:"agent"`
-	Role               string             `json:"role"`
-	ContextProjectionID string            `json:"context_projection_id"`
-	Budget             capsuleBudgetDisk  `json:"budget"`
-	Sandbox            capsuleSandboxDisk `json:"sandbox"`
-	State              string             `json:"state"`
-	TopologyDecisionID string             `json:"topology_decision_id"`
+	CapsuleID           string             `json:"capsule_id"`
+	ObligationIDs       []string           `json:"obligation_ids"`
+	Agent               string             `json:"agent"`
+	Role                string             `json:"role"`
+	ContextProjectionID string             `json:"context_projection_id"`
+	Budget              capsuleBudgetDisk  `json:"budget"`
+	Sandbox             capsuleSandboxDisk `json:"sandbox"`
+	State               string             `json:"state"`
+	TopologyDecisionID  string             `json:"topology_decision_id"`
 }
 
 type patchDisk struct {
@@ -107,22 +107,22 @@ type decisionDisk struct {
 }
 
 type budgetDisk struct {
-	BudgetID              string    `json:"budget_id"`
-	GoalID                string    `json:"goal_id"`
-	CapsuleID             string    `json:"capsule_id"`
-	ObligationID          string    `json:"obligation_id"`
-	TokensSpent           int       `json:"tokens_spent"`
-	WallTimeSeconds       float64   `json:"wall_time_seconds"`
-	ToolCalls             int       `json:"tool_calls"`
-	Retries               int       `json:"retries"`
-	DuplicatedFileReads   int       `json:"duplicated_file_reads"`
-	OverlappingEdits      int       `json:"overlapping_edits"`
-	ObligationsDischarged int       `json:"obligations_discharged"`
-	PatchesAccepted       int       `json:"patches_accepted"`
-	PatchesRejected       int       `json:"patches_rejected"`
-	EvidenceArtifactsReused int     `json:"evidence_artifacts_reused"`
-	HumanInterventions    int       `json:"human_interventions"`
-	CreatedAt             time.Time `json:"created_at"`
+	BudgetID                string    `json:"budget_id"`
+	GoalID                  string    `json:"goal_id"`
+	CapsuleID               string    `json:"capsule_id"`
+	ObligationID            string    `json:"obligation_id"`
+	TokensSpent             int       `json:"tokens_spent"`
+	WallTimeSeconds         float64   `json:"wall_time_seconds"`
+	ToolCalls               int       `json:"tool_calls"`
+	Retries                 int       `json:"retries"`
+	DuplicatedFileReads     int       `json:"duplicated_file_reads"`
+	OverlappingEdits        int       `json:"overlapping_edits"`
+	ObligationsDischarged   int       `json:"obligations_discharged"`
+	PatchesAccepted         int       `json:"patches_accepted"`
+	PatchesRejected         int       `json:"patches_rejected"`
+	EvidenceArtifactsReused int       `json:"evidence_artifacts_reused"`
+	HumanInterventions      int       `json:"human_interventions"`
+	CreatedAt               time.Time `json:"created_at"`
 }
 
 type obligationVerdictDisk struct {
@@ -243,13 +243,13 @@ type BudgetView struct {
 
 // BudgetSummary is the aggregated budget across all records for the active goal.
 type BudgetSummary struct {
-	TotalTokensSpent      int     `json:"total_tokens_spent"`
-	TotalWallTimeSeconds  float64 `json:"total_wall_time_seconds"`
-	TotalToolCalls        int     `json:"total_tool_calls"`
-	TotalRetries          int     `json:"total_retries"`
-	TotalDischarged       int     `json:"total_obligations_discharged"`
-	TotalPatchesAccepted  int     `json:"total_patches_accepted"`
-	TotalPatchesRejected  int     `json:"total_patches_rejected"`
+	TotalTokensSpent     int     `json:"total_tokens_spent"`
+	TotalWallTimeSeconds float64 `json:"total_wall_time_seconds"`
+	TotalToolCalls       int     `json:"total_tool_calls"`
+	TotalRetries         int     `json:"total_retries"`
+	TotalDischarged      int     `json:"total_obligations_discharged"`
+	TotalPatchesAccepted int     `json:"total_patches_accepted"`
+	TotalPatchesRejected int     `json:"total_patches_rejected"`
 }
 
 // DecisionView is the frontend representation of a DecisionRecord.
@@ -269,6 +269,23 @@ type PendingGate struct {
 	GateType  string `json:"gate_type"`  // "projection_review" or "merge_review"
 	RelatedID string `json:"related_id"` // capsule ID or patch ID
 	Reason    string `json:"reason"`
+}
+
+// TimelineEntry is one step in the goal lifecycle timeline, derived from
+// the events.log JSONL file.
+type TimelineEntry struct {
+	At      time.Time `json:"at"`
+	Type    string    `json:"type"`
+	Summary string    `json:"summary"`
+	Status  string    `json:"status"` // "ok" | "error" | "warning" | ""
+}
+
+// SetupHealthView is a lightweight health check derived from the .orca/
+// directory state. For full diagnostic output use the CLI orca doctor command.
+type SetupHealthView struct {
+	ConfigExists   bool   `json:"config_exists"`
+	EventLogExists bool   `json:"event_log_exists"`
+	Warning        string `json:"warning,omitempty"`
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────

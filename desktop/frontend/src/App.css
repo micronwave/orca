@@ -200,6 +200,7 @@ body {
 
 /* ── Loading / empty ────────────────────────────────────────────────────── */
 .empty { color: var(--text-muted); font-size: 12px; padding: 8px 0; }
+.tab-empty { padding: 8px 6px; }
 .loading { color: var(--text-muted); font-size: 12px; padding: 20px; text-align: center; }
 .error-bar {
   background: #4a1e1e;
@@ -208,4 +209,147 @@ body {
   font-size: 12px;
   border-bottom: 1px solid #7a2e2e;
   flex-shrink: 0;
+}
+
+/* ── Card modifiers ─────────────────────────────────────────────────────── */
+.card-urgent { border-color: var(--yellow); }
+.card-warning { border-color: var(--yellow); }
+
+/* ── Next action card ───────────────────────────────────────────────────── */
+.next-action { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.next-urgent { color: var(--yellow); }
+.readiness-row { margin-top: 8px; }
+
+/* ── Detail IDs ─────────────────────────────────────────────────────────── */
+.detail-id { font-family: var(--mono); font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+/* ── Conditions collapsible ─────────────────────────────────────────────── */
+.conditions-details { margin-top: 6px; }
+.conditions-summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  list-style: none;
+  margin-bottom: 4px;
+}
+.conditions-summary::-webkit-details-marker { display: none; }
+
+/* ── Timeline ───────────────────────────────────────────────────────────── */
+.timeline-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.timeline-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+.timeline { display: flex; flex-direction: column; }
+.timeline-step { display: flex; gap: 10px; }
+.step-icon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 10px;
+  flex-shrink: 0;
+}
+.step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+  background: var(--accent);
+  opacity: 0.5;
+}
+.step-line {
+  flex: 1;
+  width: 1px;
+  background: var(--border);
+  margin-top: 3px;
+  min-height: 10px;
+}
+.step-content { flex: 1; padding-bottom: 10px; }
+.step-summary { font-size: 12px; color: var(--text); }
+.step-time { font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+
+.step-ok      .step-dot { background: var(--green);  opacity: 1; }
+.step-error   .step-dot { background: var(--red);    opacity: 1; }
+.step-warning .step-dot { background: var(--yellow); opacity: 1; }
+.step-default .step-dot { background: var(--accent); opacity: 0.5; }
+
+/* ── Detail tabs column ─────────────────────────────────────────────────── */
+.col-tabs { overflow: hidden; }
+.detail-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+  background: var(--bg-card-alt);
+}
+.tab-btn {
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-count {
+  background: var(--bg);
+  color: var(--text-muted);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+.tab-content { flex: 1; overflow-y: auto; }
+.tab-hint { padding: 4px 6px; font-size: 11px; color: var(--text-muted); }
+
+/* ── Evidence inside Patches tab ────────────────────────────────────────── */
+.evidence-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 6px 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.evidence-output {
+  font-size: 11px;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+  max-height: 120px;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: 4px 6px;
+  border-radius: 3px;
 }
