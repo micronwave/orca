@@ -1737,7 +1737,7 @@ func TestAutoInitCreatesOrcaDirAndConfig(t *testing.T) {
 	parent := t.TempDir()
 	orcaDir := filepath.Join(parent, ".orca")
 
-	if err := autoInit(orcaDir); err != nil {
+	if err := autoInit(orcaDir, "."); err != nil {
 		t.Fatalf("autoInit: %v", err)
 	}
 
@@ -1757,7 +1757,7 @@ func TestAutoInitIsIdempotent(t *testing.T) {
 	orcaDir := seedOrcaDir(t, false)
 
 	// autoInit should return nil immediately because config.yaml already exists.
-	if err := autoInit(orcaDir); err != nil {
+	if err := autoInit(orcaDir, "."); err != nil {
 		t.Fatalf("autoInit on already-initialized dir: %v", err)
 	}
 }
@@ -1766,7 +1766,7 @@ func TestAutoInitWrittenConfigLoads(t *testing.T) {
 	parent := t.TempDir()
 	orcaDir := filepath.Join(parent, ".orca")
 
-	if err := autoInit(orcaDir); err != nil {
+	if err := autoInit(orcaDir, "."); err != nil {
 		t.Fatalf("autoInit: %v", err)
 	}
 
@@ -2023,13 +2023,17 @@ func TestFindProjectRoot(t *testing.T) {
 
 func TestAutoInitWithConfirmation(t *testing.T) {
 	tests := []struct {
-		name        string
-		interactive bool
-		setup       func(t *testing.T, orcaDir string)
-		input       string
-		wantErr     bool
-		errContains string
-		wantConfig  bool
+		name           string
+		interactive    bool
+		setup          func(t *testing.T, orcaDir string)
+		input          string
+		// unknownProject uses a bare temp dir (no go.mod/package.json/pom.xml)
+		// as the projectRoot so that project type detection returns "".
+		// Recognised projects (go.mod found via ".") are the default.
+		unknownProject bool
+		wantErr        bool
+		errContains    string
+		wantConfig     bool
 	}{
 		{
 			name: "already_initialized",
@@ -2046,7 +2050,7 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			wantErr:    false,
 			wantConfig: true,
 		},
-		// Non-TTY path: proceeds regardless of reader content.
+		// Non-TTY path with recognized project: auto-inits regardless of input.
 		{
 			name:       "non_tty_y_input_proceeds",
 			input:      "y\n",
@@ -2054,7 +2058,6 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			wantConfig: true,
 		},
 		{
-			// "n" does not abort in non-TTY mode; input is never read.
 			name:       "non_tty_n_input_proceeds",
 			input:      "n\n",
 			wantErr:    false,
@@ -2067,13 +2070,12 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			wantConfig: true,
 		},
 		{
-			// EOF (e.g. < /dev/null) also proceeds in non-TTY mode.
 			name:       "non_tty_eof_proceeds",
 			input:      "",
 			wantErr:    false,
 			wantConfig: true,
 		},
-		// TTY (interactive) path: input is read and evaluated.
+		// TTY (interactive) path with recognized project: auto-inits without prompting.
 		{
 			name:        "confirmed_y",
 			interactive: true,
@@ -2088,30 +2090,44 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			wantErr:     false,
 			wantConfig:  true,
 		},
+		// Unknown project + interactive: user is prompted and can deny.
+		// unknownProject=true provides a bare temp dir so no markers are found.
 		{
-			name:        "denied_n",
-			interactive: true,
-			input:       "n\n",
-			wantErr:     true,
-			errContains: "aborted",
-			wantConfig:  false,
+			name:           "denied_n_unknown_project",
+			interactive:    true,
+			unknownProject: true,
+			input:          "n\n",
+			wantErr:        true,
+			errContains:    "aborted",
+			wantConfig:     false,
 		},
 		{
-			name:        "denied_empty",
-			interactive: true,
-			input:       "\n",
-			wantErr:     true,
-			errContains: "aborted",
-			wantConfig:  false,
+			name:           "denied_empty_unknown_project",
+			interactive:    true,
+			unknownProject: true,
+			input:          "\n",
+			wantErr:        true,
+			errContains:    "aborted",
+			wantConfig:     false,
 		},
 		{
-			// EOF with no input also aborts in interactive mode.
-			name:        "denied_eof",
-			interactive: true,
-			input:       "",
-			wantErr:     true,
-			errContains: "aborted",
-			wantConfig:  false,
+			name:           "denied_eof_unknown_project",
+			interactive:    true,
+			unknownProject: true,
+			input:          "",
+			wantErr:        true,
+			errContains:    "aborted",
+			wantConfig:     false,
+		},
+		// Unknown project + non-interactive: fails with actionable message.
+		{
+			name:           "non_tty_unknown_project_fails",
+			interactive:    false,
+			unknownProject: true,
+			input:          "",
+			wantErr:        true,
+			errContains:    "project type not recognized",
+			wantConfig:     false,
 		},
 	}
 	for _, tt := range tests {
@@ -2121,8 +2137,12 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup(t, orcaDir)
 			}
+			projectRoot := "."
+			if tt.unknownProject {
+				projectRoot = t.TempDir() // bare dir — no project markers
+			}
 			var out strings.Builder
-			err := autoInitConfirm(orcaDir, strings.NewReader(tt.input), &out, tt.interactive)
+			err := autoInitConfirm(orcaDir, projectRoot, strings.NewReader(tt.input), &out, tt.interactive)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("autoInitConfirm = nil, want error containing %q", tt.errContains)

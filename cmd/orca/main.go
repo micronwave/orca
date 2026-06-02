@@ -52,7 +52,7 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		if !isatty(os.Stdin) {
-			return fmt.Errorf("orca: command is required (init, goal, status, cancel)")
+			return fmt.Errorf("orca: command is required (init, goal, status, cancel, doctor)")
 		}
 		orcaDir := filepath.Join(findProjectRoot("."), ".orca")
 		return runInteractive(orcaDir)
@@ -73,6 +73,8 @@ func run(args []string) error {
 		return runCI(args[1:])
 	case "ui":
 		return runUI(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	default:
 		return fmt.Errorf("orca: unknown command %q", args[0])
 	}
@@ -1190,7 +1192,9 @@ func printHelp() {
 	fmt.Println("  exit / quit   exit orca")
 }
 
-func autoInit(orcaDir string) (err error) {
+// autoInit creates the .orca/ directory structure and writes config.yaml using
+// projectRoot for project type detection. Pass "." for the current directory.
+func autoInit(orcaDir, projectRoot string) (err error) {
 	configPath := filepath.Join(orcaDir, "config.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		return nil
@@ -1213,7 +1217,7 @@ func autoInit(orcaDir string) (err error) {
 	if err := os.MkdirAll(filepath.Join(orcaDir, "capsules"), 0o755); err != nil {
 		return fmt.Errorf("autoInit: create capsules dir: %w", err)
 	}
-	projectType := config.DetectProjectType(".")
+	projectType := config.DetectProjectType(projectRoot)
 	yaml := config.DefaultConfigYAML(projectType)
 	if err := os.WriteFile(configPath, []byte(yaml), 0o644); err != nil {
 		return fmt.Errorf("autoInit: write config.yaml: %w", err)
@@ -1231,23 +1235,58 @@ func autoInitWithConfirmation(orcaDir string, in io.Reader, out io.Writer) error
 	if f, ok := in.(*os.File); ok && isatty(f) {
 		interactive = true
 	}
-	return autoInitConfirm(orcaDir, in, out, interactive)
+	return autoInitConfirm(orcaDir, ".", in, out, interactive)
 }
 
-func autoInitConfirm(orcaDir string, in io.Reader, out io.Writer, interactive bool) error {
+// autoInitConfirm performs smart auto-initialization of .orca/.
+//
+// Behaviour matrix:
+//   - Config already exists → no-op (never overwrite).
+//   - Recognized project type (go/node/maven) → write config automatically,
+//     regardless of interactive mode; print a one-line notice.
+//   - Unknown project + interactive → prompt the user once.
+//   - Unknown project + non-interactive → fail with a single actionable message.
+//
+// projectRoot is passed to config.DetectProjectType for project type detection;
+// use "." in production and a temp dir in tests.
+func autoInitConfirm(orcaDir, projectRoot string, in io.Reader, out io.Writer, interactive bool) error {
 	configPath := filepath.Join(orcaDir, "config.yaml")
 	if _, err := os.Stat(configPath); err == nil {
-		return nil
+		return nil // config exists — never overwrite
 	}
+
 	absOrcaDir, err := filepath.Abs(orcaDir)
 	if err != nil {
 		absOrcaDir = orcaDir
 	}
-	if !interactive {
-		fmt.Fprintf(out, "Initializing .orca/ at %s\n", absOrcaDir)
-		return autoInit(orcaDir)
+
+	projectType := config.DetectProjectType(projectRoot)
+	recognized := projectType != ""
+
+	if recognized {
+		// Auto-write for known project types without any prompt.
+		fmt.Fprintf(out, "Initializing .orca/ at %s (%s project)\n", absOrcaDir, projectType)
+		return autoInit(orcaDir, projectRoot)
 	}
-	fmt.Fprintf(out, "Initializing .orca/ at %s — proceed? [y/N] ", absOrcaDir)
+
+	// Unknown project type.
+	if !interactive {
+		absConfig, _ := filepath.Abs(configPath)
+		return fmt.Errorf(
+			"orca: project type not recognized and %s not found\n"+
+				"  Run: orca init\n"+
+				"  Or create %s manually with at least one verifier gate",
+			absConfig, absConfig,
+		)
+	}
+
+	// Interactive + unknown: prompt once explaining the situation.
+	fmt.Fprintf(out,
+		"Project type not detected. Initialize .orca/ at %s with no gates?\n"+
+			"  (You must add at least one verifier gate to config.yaml before running orca goal.)\n"+
+			"  Proceed? [y/N] ",
+		absOrcaDir,
+	)
 	scanner := bufio.NewScanner(in)
 	if !scanner.Scan() {
 		return fmt.Errorf("orca: init aborted")
@@ -1256,7 +1295,7 @@ func autoInitConfirm(orcaDir string, in io.Reader, out io.Writer, interactive bo
 	if line != "y" && line != "Y" {
 		return fmt.Errorf("orca: init aborted")
 	}
-	return autoInit(orcaDir)
+	return autoInit(orcaDir, projectRoot)
 }
 
 func runInteractive(orcaDir string) error {
