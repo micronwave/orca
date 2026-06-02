@@ -2234,3 +2234,255 @@ func TestFreshnessCheck_MarksRepoScopedClaimsStale(t *testing.T) {
 		t.Errorf("repo-scoped claim status = %s, want stale", repoClaim.Status)
 	}
 }
+
+// ── Waiver authorization tests ────────────────────────────────────────────────
+
+// saveWaiverFailScenario builds the minimum store state for waiver tests: a
+// blocking obligation with a VerdictFailed verdict, the obligation in
+// BlockingFailures, and RecommendedAction=ActionRetry.
+func saveWaiverFailScenario(t *testing.T, env *testEnv, suffix string) (goalID, oblID, patchID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	goalID = "G-WAIVER-" + suffix
+	condID := "GC-WAIVER-" + suffix
+	oblID = "OB-WAIVER-" + suffix
+	capsID := "CAP-WAIVER-" + suffix
+	patchID = "PATCH-WAIVER-" + suffix
+	vrID := "VR-WAIVER-" + suffix
+
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "waiver test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictFailed,
+			EvidenceIDs:  nil,
+		}},
+		BlockingFailures:        []string{oblID},
+		RecommendedAction:       schema.ActionRetry,
+		RecommendationRationale: "tests failed",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	return goalID, oblID, patchID
+}
+
+// TestReconcileWaiver_AcceptsWithValidDecisionRecord verifies that a blocking
+// failed obligation is promoted to waived when the caller supplies a decision
+// ID that exists in the store with Context "waiver_review".
+func TestReconcileWaiver_AcceptsWithValidDecisionRecord(t *testing.T) {
+	env := newTestEnv(t)
+	_, oblID, patchID := saveWaiverFailScenario(t, env, "VALID")
+	const decID = "DEC-WAIVER-VALID"
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decID,
+		Context:    "waiver_review",
+		Decision:   "approved: tests are known-flaky",
+		Rationale:  "human reviewed and accepted risk",
+		MadeBy:     "human",
+		RelatedIDs: []string{oblID},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID, ReconcileInput{
+		Waivers: map[string]string{oblID: decID},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted = false, reason=%q; valid waiver should allow acceptance", result.BlockingReason)
+	}
+	obl, err := env.st.LoadObligation(env.ctx, oblID)
+	if err != nil {
+		t.Fatalf("LoadObligation: %v", err)
+	}
+	if obl.Status != schema.ObligationWaived {
+		t.Fatalf("obligation status = %s, want %s", obl.Status, schema.ObligationWaived)
+	}
+}
+
+// TestReconcileWaiver_ErrorsOnUnknownDecisionID verifies that a waiver whose
+// decision ID has no matching record in the store is rejected with an error,
+// not silently accepted.
+func TestReconcileWaiver_ErrorsOnUnknownDecisionID(t *testing.T) {
+	env := newTestEnv(t)
+	_, oblID, patchID := saveWaiverFailScenario(t, env, "UNKNOWNDEC")
+
+	_, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID, ReconcileInput{
+		Waivers: map[string]string{oblID: "DEC-DOESNOTEXIST"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown waiver decision ID, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown decision record") {
+		t.Fatalf("error = %q, want unknown decision record error", err.Error())
+	}
+}
+
+// TestReconcileWaiver_ErrorsOnWrongDecisionContext verifies that a decision
+// record with a context other than "waiver_review" cannot authorize a waiver,
+// even though the record exists in the store.
+func TestReconcileWaiver_ErrorsOnWrongDecisionContext(t *testing.T) {
+	env := newTestEnv(t)
+	_, oblID, patchID := saveWaiverFailScenario(t, env, "WRONGCTX")
+	const decID = "DEC-WAIVER-WRONGCTX"
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk",
+		MadeBy:     "system",
+		RelatedIDs: []string{oblID},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+
+	_, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID, ReconcileInput{
+		Waivers: map[string]string{oblID: decID},
+	})
+	if err == nil {
+		t.Fatal("expected error for wrong waiver context, got nil")
+	}
+	if !strings.Contains(err.Error(), `want "waiver_review"`) {
+		t.Fatalf("error = %q, want context mismatch error", err.Error())
+	}
+}
+
+// TestReconcileWaiver_RejectsEmptyWaivedBy verifies that a VerdictWaived
+// verdict with an empty WaivedBy is still rejected — the empty-string check
+// in the obligation loop catches waivers that were not routed through
+// applyWaivers (e.g. a VerifierResult stored with Verdict=waived but no
+// WaivedBy).
+func TestReconcileWaiver_RejectsEmptyWaivedBy(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-WAIVER-EMPTY"
+		condID  = "GC-WAIVER-EMPTY"
+		oblID   = "OB-WAIVER-EMPTY"
+		capsID  = "CAP-WAIVER-EMPTY"
+		patchID = "PATCH-WAIVER-EMPTY"
+		vrID    = "VR-WAIVER-EMPTY"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "empty WaivedBy test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// VerifierResult already has VerdictWaived but no WaivedBy — simulates a
+	// tampered or malformed result that bypassed the gate.
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictWaived,
+			WaivedBy:     "",
+			EvidenceIDs:  nil,
+		}},
+		RecommendedAction:       schema.ActionAccept,
+		RecommendationRationale: "waived",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted = true; VerdictWaived with empty WaivedBy must be rejected")
+	}
+	if !strings.Contains(result.BlockingReason, "waiver has no WaivedBy authorization") {
+		t.Fatalf("BlockingReason = %q, want WaivedBy authorization error", result.BlockingReason)
+	}
+}

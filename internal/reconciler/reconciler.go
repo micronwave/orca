@@ -155,7 +155,13 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 
 	// Apply pre-approved gate waivers: replace VerdictFailed with VerdictWaived
 	// in an in-memory copy so the stored VerifierResult is never mutated.
+	// Each waiver value must reference a DecisionRecord that exists in the store
+	// with Context "waiver_review"; any other value is caller-supplied and
+	// bypasses evidence-bundle enforcement without a real gate authorization.
 	if len(in.Waivers) > 0 {
+		if err := s.validateWaivers(ctx, in.Waivers); err != nil {
+			return ReconcileResult{}, err
+		}
 		vr = applyWaivers(vr, in.Waivers)
 	}
 
@@ -519,6 +525,31 @@ func applyWaivers(vr *schema.VerifierResult, waivers map[string]string) *schema.
 		vrCopy.RecommendationRationale = "all blocking failures waived by human gate decision"
 	}
 	return &vrCopy
+}
+
+// validateWaivers verifies every waiver decision ID references a DecisionRecord
+// that exists in the store with Context "waiver_review". This prevents callers
+// from bypassing evidence-bundle enforcement with an arbitrary string that has
+// no corresponding gate authorization record.
+func (s *Reconciler) validateWaivers(ctx context.Context, waivers map[string]string) error {
+	for obligationID, decisionID := range waivers {
+		trimmed := strings.TrimSpace(decisionID)
+		if trimmed == "" {
+			continue
+		}
+		dec, err := s.store.LoadDecision(ctx, trimmed)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("reconciler: waiver for obligation %s references unknown decision record %s", obligationID, trimmed)
+			}
+			return fmt.Errorf("reconciler: load waiver decision %s for obligation %s: %w", trimmed, obligationID, err)
+		}
+		if dec.Context != "waiver_review" {
+			return fmt.Errorf("reconciler: waiver for obligation %s references decision %s with context %q, want %q",
+				obligationID, trimmed, dec.Context, "waiver_review")
+		}
+	}
+	return nil
 }
 
 func (s *Reconciler) appendEvent(ctx context.Context, eventType schema.EventType, goalID, artifactID string, payload any) (schema.Event, error) {
