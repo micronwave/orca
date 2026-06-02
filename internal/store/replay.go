@@ -492,13 +492,99 @@ func (s *FileStore) updateCapsuleProjectionIDNoLock(capsuleID, projectionID stri
 	return s.writeFile(path, c)
 }
 
-// updateCapsuleStateNoLock reads the capsule file, updates State, writes back.
+// validCapsuleTransitions is the strict runtime transition table. It enforces
+// exact step-by-step progression through the lifecycle. Used by UpdateCapsuleState.
+//
+// Lifecycle order:
+//
+//	pending → worktree_created → workspace_attached → setup_run → agent_running
+//	→ completed | failed
+//
+// Any non-terminal state may also transition to failed. Terminal states
+// (completed, failed) have no valid successors.
+var validCapsuleTransitions = map[schema.CapsuleState]map[schema.CapsuleState]bool{
+	schema.CapsuleStatePending: {
+		schema.CapsuleStateWorktreeCreated: true,
+		schema.CapsuleStateFailed:          true,
+	},
+	schema.CapsuleStateWorktreeCreated: {
+		schema.CapsuleStateWorkspaceAttached: true,
+		schema.CapsuleStateFailed:            true,
+	},
+	schema.CapsuleStateWorkspaceAttached: {
+		schema.CapsuleStateSetupRun: true,
+		schema.CapsuleStateFailed:   true,
+	},
+	schema.CapsuleStateSetupRun: {
+		schema.CapsuleStateAgentRunning: true,
+		schema.CapsuleStateFailed:       true,
+	},
+	schema.CapsuleStateAgentRunning: {
+		schema.CapsuleStateCompleted: true,
+		schema.CapsuleStateFailed:    true,
+	},
+	schema.CapsuleStateCompleted: {},
+	schema.CapsuleStateFailed:    {},
+}
+
+// validReplayCapsuleTransitions is the permissive replay transition table. It
+// extends the strict table to allow forward skips because intermediate states
+// (workspace_attached, setup_run, agent_running) are never logged as events —
+// after a replay, a capsule that ran successfully appears at worktree_created,
+// so capsule_completed legitimately arrives from that state.
+//
+// It still forbids:
+//   - any transition from a terminal state
+//   - completing/failing a capsule that was never started (pending → completed/failed)
+//   - any backwards transition
+var validReplayCapsuleTransitions = map[schema.CapsuleState]map[schema.CapsuleState]bool{
+	schema.CapsuleStatePending: {
+		schema.CapsuleStateWorktreeCreated: true,
+		schema.CapsuleStateFailed:          true,
+		// completed is intentionally absent: capsule_completed before capsule_started is corrupt
+	},
+	schema.CapsuleStateWorktreeCreated: {
+		schema.CapsuleStateWorkspaceAttached: true,
+		schema.CapsuleStateSetupRun:          true,
+		schema.CapsuleStateAgentRunning:      true,
+		schema.CapsuleStateCompleted:         true,
+		schema.CapsuleStateFailed:            true,
+	},
+	schema.CapsuleStateWorkspaceAttached: {
+		schema.CapsuleStateSetupRun:     true,
+		schema.CapsuleStateAgentRunning: true,
+		schema.CapsuleStateCompleted:    true,
+		schema.CapsuleStateFailed:       true,
+	},
+	schema.CapsuleStateSetupRun: {
+		schema.CapsuleStateAgentRunning: true,
+		schema.CapsuleStateCompleted:    true,
+		schema.CapsuleStateFailed:       true,
+	},
+	schema.CapsuleStateAgentRunning: {
+		schema.CapsuleStateCompleted: true,
+		schema.CapsuleStateFailed:    true,
+	},
+	schema.CapsuleStateCompleted: {},
+	schema.CapsuleStateFailed:    {},
+}
+
+// updateCapsuleStateNoLock reads the capsule file, validates the lifecycle
+// transition using the replay-aware table (which allows forward skips for
+// non-logged intermediate states), updates State, and writes back.
 // Caller must hold s.mu.Lock().
 func (s *FileStore) updateCapsuleStateNoLock(capsuleID string, state schema.CapsuleState) error {
 	path := s.artifactPath(dirCapsules, capsuleID)
 	c, err := readFile[schema.ExecutionCapsule](path)
 	if err != nil {
 		return err
+	}
+	allowed, known := validReplayCapsuleTransitions[c.State]
+	if !known {
+		return fmt.Errorf("%w: capsule %s has unrecognised state %q", ErrInvalidCapsuleTransition, capsuleID, c.State)
+	}
+	if !allowed[state] {
+		return fmt.Errorf("%w: capsule %s: %q → %q", ErrInvalidCapsuleTransition, capsuleID, c.State, state)
 	}
 	c.State = state
 	return s.writeFile(path, c)

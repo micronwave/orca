@@ -284,6 +284,7 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 
 	var out []schema.Event
 	r := bufio.NewReaderSize(f, 1<<20)
+	var prevSeq int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -298,6 +299,7 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 			}
 			break
 		}
+		terminated := line[len(line)-1] == '\n'
 		line = bytesTrimRightNewline(line)
 		if len(line) == 0 {
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -308,10 +310,19 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 			}
 			continue
 		}
+		// Unterminated final line at EOF is a partial in-progress write; skip it.
+		if !terminated && errors.Is(readErr, io.EOF) {
+			break
+		}
 		var e schema.Event
 		if err := json.Unmarshal(line, &e); err != nil {
 			return nil, fmt.Errorf("eventlog: parse event: %w", err)
 		}
+		// Enforce complete monotonic sequence ordering across all lines.
+		if e.SequenceNum != prevSeq+1 {
+			return nil, fmt.Errorf("eventlog: sequence ordering violation: got seq %d after seq %d", e.SequenceNum, prevSeq)
+		}
+		prevSeq = e.SequenceNum
 		if e.SequenceNum <= afterSeq {
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
 				return nil, fmt.Errorf("eventlog: scan read: %w", readErr)

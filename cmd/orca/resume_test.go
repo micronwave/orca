@@ -462,10 +462,32 @@ func seedResumeDir(t *testing.T, opts seedResumeOpts) string {
 		return orcaDir
 	}
 
-	// Mark capsule completed so it appears correctly in derivation.
+	// Advance capsule to completed via the proper lifecycle; intermediate
+	// states are not logged as events but must be visited in strict order.
 	if capsuleState != schema.CapsuleStateCompleted {
-		if err := st.UpdateCapsuleState(ctx, "CAP-R1", schema.CapsuleStateCompleted); err != nil {
-			t.Fatalf("UpdateCapsuleState: %v", err)
+		capsuleLifecycle := []schema.CapsuleState{
+			schema.CapsuleStatePending,
+			schema.CapsuleStateWorktreeCreated,
+			schema.CapsuleStateWorkspaceAttached,
+			schema.CapsuleStateSetupRun,
+			schema.CapsuleStateAgentRunning,
+			schema.CapsuleStateCompleted,
+		}
+		advancing := false
+		for _, s := range capsuleLifecycle {
+			if s == capsuleState {
+				advancing = true
+				continue
+			}
+			if !advancing {
+				continue
+			}
+			if err := st.UpdateCapsuleState(ctx, "CAP-R1", s); err != nil {
+				t.Fatalf("UpdateCapsuleState to %s: %v", s, err)
+			}
+			if s == schema.CapsuleStateCompleted {
+				break
+			}
 		}
 	}
 

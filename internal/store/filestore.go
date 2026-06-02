@@ -17,6 +17,10 @@ import (
 // ErrNotFound is returned by Load methods when the requested artifact does not exist.
 var ErrNotFound = errors.New("artifact not found")
 
+// ErrInvalidCapsuleTransition is returned when a requested capsule state
+// transition violates the documented lifecycle order.
+var ErrInvalidCapsuleTransition = errors.New("invalid capsule state transition")
+
 var windowsReservedNames = map[string]bool{
 	"CON": true, "PRN": true, "AUX": true, "NUL": true,
 	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,

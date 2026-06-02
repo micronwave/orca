@@ -186,6 +186,99 @@ func TestOpen_RejectsOutOfOrderSequenceNumbers(t *testing.T) {
 	}
 }
 
+// --- ReadAfter ---
+
+func TestReadAfter_RejectsOutOfOrderSequenceNumbers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	l := openLogAt(t, path)
+
+	append1(t, l, schema.EventGoalCreated, "G-1")       // seq=1
+	append1(t, l, schema.EventObligationCreated, "G-1") // seq=2
+
+	// Inject an event with seq=5 (gap: should be 3) directly into the file,
+	// bypassing the FileLog writer so Open's scan does not reject it.
+	bad, _ := json.Marshal(schema.Event{
+		EventID:     "EV-bad",
+		Type:        schema.EventCapsuleCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 5,
+	})
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open file for injection: %v", err)
+	}
+	if _, err := f.Write(append(bad, '\n')); err != nil {
+		t.Fatalf("inject bad event: %v", err)
+	}
+	_ = f.Close()
+
+	if _, err := l.ReadAfter(context.Background(), 0, 0); err == nil {
+		t.Fatal("ReadAfter succeeded on out-of-order log, want error")
+	}
+}
+
+func TestReadAfter_RejectsFirstSequenceNumberGap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	l := openLogAt(t, path)
+
+	bad, _ := json.Marshal(schema.Event{
+		EventID:     "EV-bad",
+		Type:        schema.EventGoalCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 2,
+	})
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open file for injection: %v", err)
+	}
+	if _, err := f.Write(append(bad, '\n')); err != nil {
+		t.Fatalf("inject bad event: %v", err)
+	}
+	_ = f.Close()
+
+	if _, err := l.ReadAfter(context.Background(), 0, 0); err == nil {
+		t.Fatal("ReadAfter succeeded when first event seq was not 1, want error")
+	}
+}
+
+func TestReadAfter_SkipsUnterminatedFinalLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	l := openLogAt(t, path)
+
+	append1(t, l, schema.EventGoalCreated, "G-1") // seq=1
+
+	// Inject a valid-JSON event without a trailing '\n', simulating a partial
+	// write by an external process while this FileLog is open.
+	partial, _ := json.Marshal(schema.Event{
+		EventID:     "EV-partial",
+		Type:        schema.EventObligationCreated,
+		GoalID:      "G-1",
+		CreatedAt:   time.Now().UTC(),
+		SequenceNum: 2,
+	})
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open file for injection: %v", err)
+	}
+	if _, err := f.Write(partial); err != nil { // no trailing '\n'
+		t.Fatalf("inject partial event: %v", err)
+	}
+	_ = f.Close()
+
+	events, err := l.ReadAfter(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ReadAfter: %v", err)
+	}
+	if len(events) != 1 || events[0].SequenceNum != 1 {
+		t.Fatalf("events = %+v, want only seq=1", events)
+	}
+}
+
 // --- Append ---
 
 func TestAppend_ReturnsErrClosedAfterClose(t *testing.T) {

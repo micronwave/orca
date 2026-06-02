@@ -245,12 +245,20 @@ func (s *FileStore) UpdateCapsuleState(ctx context.Context, capsuleID string, st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
+	path := s.artifactPath(dirCapsules, capsuleID)
+	c, err := readFile[schema.ExecutionCapsule](path)
 	if err != nil {
 		return err
 	}
+	allowed, known := validCapsuleTransitions[c.State]
+	if !known {
+		return fmt.Errorf("%w: capsule %s has unrecognised state %q", ErrInvalidCapsuleTransition, capsuleID, c.State)
+	}
+	if !allowed[state] {
+		return fmt.Errorf("%w: capsule %s: %q → %q", ErrInvalidCapsuleTransition, capsuleID, c.State, state)
+	}
 	c.State = state
-	return s.writeFile(s.artifactPath(dirCapsules, capsuleID), c)
+	return s.writeFile(path, c)
 }
 
 func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, projectionID string) error {

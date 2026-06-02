@@ -425,12 +425,12 @@ func TestCapsule_UpdateState(t *testing.T) {
 	e.seedGoal(t, "G-1", "GC-1")
 	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
 	e.seedCapsule(t, "CAP-1", "OB-1")
-	if err := e.st.UpdateCapsuleState(e.ctx, "CAP-1", schema.CapsuleStateAgentRunning); err != nil {
+	if err := e.st.UpdateCapsuleState(e.ctx, "CAP-1", schema.CapsuleStateWorktreeCreated); err != nil {
 		t.Fatalf("UpdateCapsuleState: %v", err)
 	}
 	got, _ := e.st.LoadCapsule(e.ctx, "CAP-1")
-	if got.State != schema.CapsuleStateAgentRunning {
-		t.Errorf("state = %s, want agent_running", got.State)
+	if got.State != schema.CapsuleStateWorktreeCreated {
+		t.Errorf("state = %s, want worktree_created", got.State)
 	}
 }
 
@@ -2066,7 +2066,7 @@ func TestReplay_AppliesCapsuleStarted(t *testing.T) {
 		GoalID: "G-1",
 		Payload: marshalJSON(t, schema.CapsuleTransitionPayload{
 			CapsuleID: "CAP-1",
-			State:     schema.CapsuleStateAgentRunning,
+			State:     schema.CapsuleStateWorktreeCreated,
 		}),
 	}); err != nil {
 		t.Fatalf("Append capsule_started: %v", err)
@@ -2080,8 +2080,8 @@ func TestReplay_AppliesCapsuleStarted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCapsule after replay: %v", err)
 	}
-	if got.State != schema.CapsuleStateAgentRunning {
-		t.Errorf("capsule state = %s, want agent_running", got.State)
+	if got.State != schema.CapsuleStateWorktreeCreated {
+		t.Errorf("capsule state = %s, want worktree_created", got.State)
 	}
 }
 
@@ -2156,6 +2156,105 @@ func TestReplay_RejectsMalformedCreatePayload(t *testing.T) {
 
 	if err := store.Replay(e.ctx, e.log, e.st, 0); err == nil {
 		t.Fatal("Replay succeeded with malformed goal_created payload")
+	}
+}
+
+func TestReplay_RejectsIllegalCapsuleTransition(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    schema.CapsuleState
+		to      schema.CapsuleState
+		evtType schema.EventType
+	}{
+		{
+			name:    "completed to agent_running",
+			from:    schema.CapsuleStateCompleted,
+			to:      schema.CapsuleStateAgentRunning,
+			evtType: schema.EventCapsuleStateUpdated,
+		},
+		{
+			name:    "failed to worktree_created",
+			from:    schema.CapsuleStateFailed,
+			to:      schema.CapsuleStateWorktreeCreated,
+			evtType: schema.EventCapsuleStarted,
+		},
+		{
+			name:    "pending skips to agent_running",
+			from:    schema.CapsuleStatePending,
+			to:      schema.CapsuleStateAgentRunning,
+			evtType: schema.EventCapsuleStarted,
+		},
+		{
+			name:    "agent_running backwards to worktree_created",
+			from:    schema.CapsuleStateAgentRunning,
+			to:      schema.CapsuleStateWorktreeCreated,
+			evtType: schema.EventCapsuleStateUpdated,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.seedGoal(t, "G-1", "GC-1")
+			e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+			// SaveCapsule directly with tc.from state so replay recreates it there.
+			cap := &schema.ExecutionCapsule{
+				CapsuleID:     "CAP-1",
+				ObligationIDs: []string{"OB-1"},
+				Agent:         schema.AgentClaude,
+				Role:          schema.RoleExecutor,
+				State:         tc.from,
+			}
+			if err := e.st.SaveCapsule(e.ctx, cap); err != nil {
+				t.Fatalf("SaveCapsule: %v", err)
+			}
+			if _, err := e.log.Append(e.ctx, schema.Event{
+				Type:   tc.evtType,
+				GoalID: "G-1",
+				Payload: marshalJSON(t, schema.CapsuleTransitionPayload{
+					CapsuleID: "CAP-1",
+					State:     tc.to,
+				}),
+			}); err != nil {
+				t.Fatalf("Append transition event: %v", err)
+			}
+			wipeArtifacts(t, e)
+			err := store.Replay(e.ctx, e.log, e.st, 0)
+			if err == nil {
+				t.Fatalf("Replay succeeded on illegal transition %q → %q, want error", tc.from, tc.to)
+			}
+			if !errors.Is(err, store.ErrInvalidCapsuleTransition) {
+				t.Errorf("Replay error = %v, want wrapping ErrInvalidCapsuleTransition", err)
+			}
+		})
+	}
+}
+
+func TestUpdateCapsuleState_RejectsIllegalTransition(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1") // starts at pending
+
+	// Walk through the full valid lifecycle.
+	for _, state := range []schema.CapsuleState{
+		schema.CapsuleStateWorktreeCreated,
+		schema.CapsuleStateWorkspaceAttached,
+		schema.CapsuleStateSetupRun,
+		schema.CapsuleStateAgentRunning,
+		schema.CapsuleStateCompleted,
+	} {
+		if err := e.st.UpdateCapsuleState(e.ctx, "CAP-1", state); err != nil {
+			t.Fatalf("valid transition to %s: %v", state, err)
+		}
+	}
+
+	// Attempt an illegal transition from terminal state.
+	err := e.st.UpdateCapsuleState(e.ctx, "CAP-1", schema.CapsuleStateAgentRunning)
+	if err == nil {
+		t.Fatal("UpdateCapsuleState from completed succeeded, want error")
+	}
+	if !errors.Is(err, store.ErrInvalidCapsuleTransition) {
+		t.Errorf("error = %v, want ErrInvalidCapsuleTransition", err)
 	}
 }
 
