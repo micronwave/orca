@@ -57,10 +57,14 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		if !isatty(os.Stdin) {
-			return fmt.Errorf("orca: command is required (init, goal, status, cancel, doctor)")
+			return fmt.Errorf("orca: command is required (try \"orca commands\")")
 		}
 		orcaDir := filepath.Join(findProjectRoot("."), ".orca")
 		return runInteractive(orcaDir)
+	}
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		printCLIHelp(os.Stdout)
+		return nil
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return runGoal(args)
@@ -82,6 +86,8 @@ func run(args []string) error {
 		return runUI(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
+	case "commands":
+		return runCommands(args[1:])
 	default:
 		return fmt.Errorf("orca: unknown command %q", args[0])
 	}
@@ -1372,21 +1378,6 @@ func mustAbs(path string) string {
 	return abs
 }
 
-func printHelp() {
-	fmt.Println("Commands:")
-	fmt.Println("  <goal text>   start a new goal (runs in background)")
-	fmt.Println("  /status       show active goal status (concise)")
-	fmt.Println("  /details      show active goal status (full/raw)")
-	fmt.Println("  /logs         show agent or verifier logs (Phase 3)")
-	fmt.Println("  /approve      approve the current waiting gate")
-	fmt.Println("  /reject       reject the current waiting gate")
-	fmt.Println("  /cancel       cancel the active goal")
-	fmt.Println("  /resume       resume a cancelled goal (Phase 5)")
-	fmt.Println("  /config       show config path")
-	fmt.Println("  /help         show this help")
-	fmt.Println("  exit / quit   exit orca")
-}
-
 // autoInit creates the .orca/ directory structure and writes config.yaml using
 // projectRoot for project type detection. Pass "." for the current directory.
 func autoInit(orcaDir, projectRoot string) (err error) {
@@ -1771,7 +1762,51 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 	} else {
 		fmt.Fprintln(out, "CI: no runs recorded")
 	}
+
+	// Projection token deltas — Phase C §7.
+	reuseRecords, reuseErr := rt.store.LoadProjectionReuseRecordsForGoal(ctx, goal.GoalID)
+	if reuseErr == nil && len(reuseRecords) > 0 {
+		fmt.Fprintf(out, "Projection reuse: %d reuse(s) recorded for goal %s\n", len(reuseRecords), goal.GoalID)
+		for _, r := range reuseRecords {
+			fmt.Fprintf(out, "  reuse=%s role=%s original=%s tokens_saved=%d\n",
+				r.ReuseID, r.Role, r.OriginalProjectionID, r.TokensSaved)
+		}
+	}
+	rt.writeProjectionTokenDeltas(ctx, out, capsules)
+
 	return nil
+}
+
+// writeProjectionTokenDeltas loads context projections for the given capsules
+// and prints the before/after token counts for any that carry compaction metrics.
+func (rt *runtime) writeProjectionTokenDeltas(ctx context.Context, out io.Writer, capsules []*schema.ExecutionCapsule) {
+	wrote := false
+	for _, capsule := range capsules {
+		if capsule.ContextProjectionID == "" {
+			continue
+		}
+		proj, err := rt.store.LoadProjection(ctx, capsule.ContextProjectionID)
+		if err != nil || proj == nil {
+			continue
+		}
+		if proj.TokensBefore == 0 {
+			continue
+		}
+		if !wrote {
+			fmt.Fprintln(out, "Projection token deltas:")
+			wrote = true
+		}
+		omitted := ""
+		if len(proj.OmittedSections) > 0 {
+			omitted = " omitted=[" + strings.Join(proj.OmittedSections, ",") + "]"
+		}
+		fmt.Fprintf(out, "  %s role=%s before=%d after=%d saved=%d%s\n",
+			proj.ContextProjectionID, proj.Role,
+			proj.TokensBefore, proj.TokensAfter,
+			proj.TokensBefore-proj.TokensAfter,
+			omitted,
+		)
+	}
 }
 
 // printStatusConcise writes a human-friendly status summary that hides raw

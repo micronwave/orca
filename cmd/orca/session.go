@@ -232,7 +232,16 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 	case line == "/help" || line == "help":
 		printHelp()
 		return nil
+	case line == "/commands":
+		return writeCommandsTable(s.out)
+	case line == "/commands --json":
+		return writeCommandsJSON(s.out)
 	default:
+		// Guard: a line starting with "/" that isn't a known command must not
+		// silently fall through to startGoal as unintentional goal text.
+		if strings.HasPrefix(line, "/") {
+			return fmt.Errorf("orca: unknown command %q (type /help for available commands)", line)
+		}
 		return s.startGoal(ctx, line)
 	}
 }
