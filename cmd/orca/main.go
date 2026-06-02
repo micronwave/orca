@@ -69,6 +69,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "cancel":
 		return runCancel(args[1:], os.Stdin, os.Stdout)
+	case "resume":
+		return runResume(args[1:])
 	case "ci":
 		return runCI(args[1:])
 	case "ui":
@@ -176,7 +178,7 @@ func runGoal(args []string) (err error) {
 		return fmt.Errorf("orca goal: load active goal: %w", err)
 	}
 	if active != nil {
-		return activeGoalError(active)
+		return activeGoalBlockedError(active)
 	}
 	if *fromIssue > 0 {
 		return rt.runFromIssue(context.Background(), *fromIssue)
@@ -670,128 +672,209 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 		if len(patchIDs) == 0 {
 			return fmt.Errorf("orca: plan produced no implementer patch for goal %s", goal.GoalID)
 		}
-		var readyPatchID string
-		var readyResult reconciler.ReconcileResult
-		// acceptedPatchIDs tracks every patch the reconciler accepted this cycle.
-		// In parallel topology the reconciler can only emit merge_applied for the
-		// last-reconciled patch (when all obligations finally clear). Earlier accepted
-		// patches must receive their merge_applied event from the orchestrator.
-		var acceptedPatchIDs []string
-		var followUpIDs []string
-		var blockingReason string
-		// reconcilerMergeEmitted tracks patches for which the reconciler already
-		// emitted merge_applied (MergeReady=true && !HumanGateRequired). The
-		// orchestrator must not re-emit for these when backfilling earlier accepted patches.
-		reconcilerMergeEmitted := make(map[string]bool)
-		for _, patchID := range patchIDs {
-			rt.emit(ctx, UIEvent{Kind: EventKindVerifierRunning, PatchID: patchID, Summary: "patch " + patchID + ": verifying"})
-			verifyResult, err := rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
-			if err != nil {
-				return err
-			}
-			rt.emit(ctx, verifierUIEvent(goal.GoalID, verifyResult))
-			var reconcileIn reconciler.ReconcileInput
-			if len(verifyResult.BlockingFailures) > 0 {
-				waivers, waiverErr := rt.collectWaivers(ctx, verifyResult)
-				if waiverErr != nil {
-					return waiverErr
-				}
-				reconcileIn.Waivers = waivers
-			}
-			rt.emit(ctx, UIEvent{
-				Kind:    EventKindReconcileRunning,
-				GoalID:  goal.GoalID,
-				PatchID: verifyResult.PatchID,
-				Summary: fmt.Sprintf("patch %s: reconciling (recommended action: %s)", verifyResult.PatchID, verifyResult.RecommendedAction),
-				Fields:  map[string]string{"recommended_action": string(verifyResult.RecommendedAction)},
-			})
-			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID, reconcileIn)
-			if err != nil {
-				return err
-			}
-			rt.emit(ctx, reconcileUIEvent(goal.GoalID, verifyResult.PatchID, result))
-			if result.PatchAccepted {
-				acceptedPatchIDs = append(acceptedPatchIDs, verifyResult.PatchID)
-			}
-			if result.MergeReady {
-				readyPatchID = verifyResult.PatchID
-				readyResult = result
-				if !result.HumanGateRequired {
-					reconcilerMergeEmitted[verifyResult.PatchID] = true
-				}
-			}
-			if len(result.FollowUpObligationIDs) > 0 {
-				followUpIDs = append(followUpIDs, result.FollowUpObligationIDs...)
-			}
-			if result.BlockingReason != "" {
-				blockingReason = result.BlockingReason
-			}
-		}
-		rt.emit(ctx, UIEvent{Kind: EventKindGoalPlanning, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s: computing ROI", goal.GoalID)})
-		if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
+		vmResult, err := rt.runVerifyAndMerge(ctx, goal, patchIDs, supplementalEvidenceIDs, supplementalClaimIDs)
+		if err != nil {
 			return err
 		}
-
-		if readyResult.MergeReady {
-			rt.emit(ctx, UIEvent{
-				Kind:    EventKindMergeReady,
-				GoalID:  goal.GoalID,
-				PatchID: readyPatchID,
-				Summary: fmt.Sprintf("patch %s: merge ready", readyPatchID),
-				Status:  "ready",
-			})
-			if readyResult.HumanGateRequired {
-				// Gate on the last merge-ready patch; merge all accepted patches on approval.
-				decision, err := rt.gatekeeper.ReviewMerge(ctx, readyPatchID)
-				if err != nil {
-					return err
-				}
-				if !decision.Approved {
-					return fmt.Errorf("orca: merge gate rejected patch %s: %s", readyPatchID, decision.Notes)
-				}
-				for _, pid := range acceptedPatchIDs {
-					if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
-						return fmt.Errorf("orca: apply patch %s: %w", pid, err)
-					}
-				}
-				// PR creation only runs after explicit human gate approval.
-				// There is no auto-PR path in Phase 5.
-				if rt.cfg.PR.Enabled {
-					if err := rt.createAndSavePR(ctx, goal.GoalID, readyPatchID); err != nil {
-						return fmt.Errorf("orca: create pr for patch %s: %w", readyPatchID, err)
-					}
-				}
-				for _, pid := range acceptedPatchIDs {
-					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
-						return err
-					}
-				}
-			} else {
-				// Apply all accepted patches to the working directory.
-				for _, pid := range acceptedPatchIDs {
-					if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
-						return fmt.Errorf("orca: apply patch %s: %w", pid, err)
-					}
-				}
-				// The reconciler already emitted merge_applied for every patch where
-				// MergeReady=true && !HumanGateRequired. Emit only for earlier accepted
-				// patches that did not receive a reconciler merge_applied.
-				for _, pid := range acceptedPatchIDs {
-					if reconcilerMergeEmitted[pid] {
-						continue
-					}
-					if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
-						return err
-					}
-				}
-			}
-			return rt.updateGoalStatus(ctx, goal.GoalID, schema.GoalStatusComplete)
+		if vmResult.GoalComplete {
+			return nil
 		}
-		if len(followUpIDs) > 0 {
+		if len(vmResult.FollowUpObligationIDs) > 0 {
 			continue
 		}
-		return fmt.Errorf("orca: reconciliation stopped: %s", blockingReason)
+		return fmt.Errorf("orca: reconciliation stopped: %s", vmResult.BlockingReason)
 	}
+}
+
+// verifyAndMergeResult is the outcome of runVerifyAndMerge.
+type verifyAndMergeResult struct {
+	GoalComplete          bool
+	FollowUpObligationIDs []string
+	BlockingReason        string
+}
+
+// runVerifyAndMerge runs verification, reconciliation, ROI computation, and the
+// merge gate for the given patch IDs. It is called by both runPlanLoop (normal
+// path) and the resume path (for CheckpointVerifyPatches, CheckpointReconcile).
+// It returns GoalComplete=true when the goal has been marked complete.
+func (rt *runtime) runVerifyAndMerge(
+	ctx context.Context,
+	goal *schema.GoalIR,
+	patchIDs []string,
+	supplementalEvidenceIDs []string,
+	supplementalClaimIDs []string,
+) (verifyAndMergeResult, error) {
+	var readyPatchID string
+	var readyResult reconciler.ReconcileResult
+	// acceptedPatchIDs tracks every patch the reconciler accepted this cycle.
+	// In parallel topology the reconciler can only emit merge_applied for the
+	// last-reconciled patch (when all obligations finally clear). Earlier accepted
+	// patches must receive their merge_applied event from the orchestrator.
+	var acceptedPatchIDs []string
+	var followUpIDs []string
+	var blockingReason string
+	// reconcilerMergeEmitted tracks patches for which the reconciler already
+	// emitted merge_applied (MergeReady=true && !HumanGateRequired). The
+	// orchestrator must not re-emit for these when backfilling earlier accepted patches.
+	reconcilerMergeEmitted := make(map[string]bool)
+
+	for _, patchID := range patchIDs {
+		patch, patchErr := rt.store.LoadPatch(ctx, patchID)
+		if patchErr != nil {
+			return verifyAndMergeResult{}, fmt.Errorf("orca: load patch %s: %w", patchID, patchErr)
+		}
+		switch patch.Status {
+		case schema.PatchAccepted:
+			if !containsString(acceptedPatchIDs, patchID) {
+				acceptedPatchIDs = append(acceptedPatchIDs, patchID)
+			}
+			applied, appliedErr := rt.hasMergeAppliedEvent(ctx, goal.GoalID, patchID)
+			if appliedErr != nil {
+				return verifyAndMergeResult{}, appliedErr
+			}
+			if applied {
+				reconcilerMergeEmitted[patchID] = true
+			}
+			continue
+		case schema.PatchRejected, schema.PatchSuperseded:
+			continue
+		}
+
+		// Guard: use the existing verifier result if one was already saved for
+		// this patch (e.g., resume from CheckpointReconcile). Re-running the
+		// verifier would create a duplicate artifact and re-execute gate subprocesses.
+		verifyResult, existingErr := rt.store.LoadVerifierResultForPatch(ctx, patchID)
+		if existingErr != nil && !errors.Is(existingErr, store.ErrNotFound) {
+			return verifyAndMergeResult{}, fmt.Errorf("orca: load verifier result for patch %s: %w", patchID, existingErr)
+		}
+		if errors.Is(existingErr, store.ErrNotFound) {
+			rt.emit(ctx, UIEvent{Kind: EventKindVerifierRunning, PatchID: patchID, Summary: "patch " + patchID + ": verifying"})
+			var vErr error
+			verifyResult, vErr = rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
+			if vErr != nil {
+				return verifyAndMergeResult{}, vErr
+			}
+		} else {
+			rt.emit(ctx, UIEvent{Kind: EventKindVerifierRunning, PatchID: patchID, Summary: "patch " + patchID + ": verifier result already exists, loading"})
+		}
+		rt.emit(ctx, verifierUIEvent(goal.GoalID, verifyResult))
+		var reconcileIn reconciler.ReconcileInput
+		if len(verifyResult.BlockingFailures) > 0 {
+			waivers, waiverErr := rt.collectWaivers(ctx, verifyResult)
+			if waiverErr != nil {
+				return verifyAndMergeResult{}, waiverErr
+			}
+			reconcileIn.Waivers = waivers
+		}
+		rt.emit(ctx, UIEvent{
+			Kind:    EventKindReconcileRunning,
+			GoalID:  goal.GoalID,
+			PatchID: verifyResult.PatchID,
+			Summary: fmt.Sprintf("patch %s: reconciling (recommended action: %s)", verifyResult.PatchID, verifyResult.RecommendedAction),
+			Fields:  map[string]string{"recommended_action": string(verifyResult.RecommendedAction)},
+		})
+		result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID, reconcileIn)
+		if err != nil {
+			return verifyAndMergeResult{}, err
+		}
+		rt.emit(ctx, reconcileUIEvent(goal.GoalID, verifyResult.PatchID, result))
+		if result.PatchAccepted {
+			acceptedPatchIDs = append(acceptedPatchIDs, verifyResult.PatchID)
+		}
+		if result.MergeReady {
+			readyPatchID = verifyResult.PatchID
+			readyResult = result
+			if !result.HumanGateRequired {
+				reconcilerMergeEmitted[verifyResult.PatchID] = true
+			}
+		}
+		if len(result.FollowUpObligationIDs) > 0 {
+			followUpIDs = append(followUpIDs, result.FollowUpObligationIDs...)
+		}
+		if result.BlockingReason != "" {
+			blockingReason = result.BlockingReason
+		}
+	}
+
+	rt.emit(ctx, UIEvent{Kind: EventKindGoalPlanning, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s: computing ROI", goal.GoalID)})
+	if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
+		return verifyAndMergeResult{}, err
+	}
+
+	if readyResult.MergeReady {
+		rt.emit(ctx, UIEvent{
+			Kind:    EventKindMergeReady,
+			GoalID:  goal.GoalID,
+			PatchID: readyPatchID,
+			Summary: fmt.Sprintf("patch %s: merge ready", readyPatchID),
+			Status:  "ready",
+		})
+		if readyResult.HumanGateRequired {
+			// Gate on the last merge-ready patch; merge all accepted patches on approval.
+			decision, err := rt.gatekeeper.ReviewMerge(ctx, readyPatchID)
+			if err != nil {
+				return verifyAndMergeResult{}, err
+			}
+			if !decision.Approved {
+				return verifyAndMergeResult{}, fmt.Errorf("orca: merge gate rejected patch %s: %s", readyPatchID, decision.Notes)
+			}
+			for _, pid := range acceptedPatchIDs {
+				if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
+					return verifyAndMergeResult{}, fmt.Errorf("orca: apply patch %s: %w", pid, err)
+				}
+			}
+			// PR creation only runs after explicit human gate approval.
+			// There is no auto-PR path in Phase 5.
+			prExists, err := rt.hasPRCreatedForPatch(ctx, goal.GoalID, readyPatchID)
+			if err != nil {
+				return verifyAndMergeResult{}, err
+			}
+			if rt.cfg.PR.Enabled && !prExists {
+				if err := rt.createAndSavePR(ctx, goal.GoalID, readyPatchID); err != nil {
+					return verifyAndMergeResult{}, fmt.Errorf("orca: create pr for patch %s: %w", readyPatchID, err)
+				}
+			}
+			for _, pid := range acceptedPatchIDs {
+				applied, err := rt.hasMergeAppliedEvent(ctx, goal.GoalID, pid)
+				if err != nil {
+					return verifyAndMergeResult{}, err
+				}
+				if applied {
+					continue
+				}
+				if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
+					return verifyAndMergeResult{}, err
+				}
+			}
+		} else {
+			// Apply all accepted patches to the working directory.
+			for _, pid := range acceptedPatchIDs {
+				if err := rt.applyPatchToWorkDir(ctx, pid); err != nil {
+					return verifyAndMergeResult{}, fmt.Errorf("orca: apply patch %s: %w", pid, err)
+				}
+			}
+			// The reconciler already emitted merge_applied for every patch where
+			// MergeReady=true && !HumanGateRequired. Emit only for earlier accepted
+			// patches that did not receive a reconciler merge_applied.
+			for _, pid := range acceptedPatchIDs {
+				if reconcilerMergeEmitted[pid] {
+					continue
+				}
+				if err := rt.appendMergeApplied(ctx, goal.GoalID, pid); err != nil {
+					return verifyAndMergeResult{}, err
+				}
+			}
+		}
+		if err := rt.updateGoalStatus(ctx, goal.GoalID, schema.GoalStatusComplete); err != nil {
+			return verifyAndMergeResult{}, err
+		}
+		return verifyAndMergeResult{GoalComplete: true}, nil
+	}
+
+	if len(followUpIDs) > 0 {
+		return verifyAndMergeResult{FollowUpObligationIDs: followUpIDs}, nil
+	}
+	return verifyAndMergeResult{BlockingReason: blockingReason}, nil
 }
 
 // ── PR creation helpers ──────────────────────────────────────────────────────
@@ -1417,8 +1500,15 @@ func activeGoalError(goal *schema.GoalIR) error {
   Status: %s
 
 To start a new goal, first complete or cancel the current one:
+  orca resume
   orca cancel
   orca status`, goal.GoalID, goal.OriginalIntent, goal.Status)
+}
+
+// activeGoalBlockedError is used by runGoal when a new goal is requested but
+// an active goal already exists. It includes orca resume as the first option.
+func activeGoalBlockedError(goal *schema.GoalIR) error {
+	return activeGoalError(goal)
 }
 
 func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
@@ -1780,6 +1870,19 @@ func (rt *runtime) applyPatchToWorkDir(ctx context.Context, patchID string) erro
 		return nil
 	}
 	projectRoot := filepath.Dir(rt.orcaDir)
+	checkCmd := exec.CommandContext(ctx, "git", "apply", "--check", "--whitespace=nowarn", patch.DiffPath)
+	checkCmd.Dir = projectRoot
+	if out, err := checkCmd.CombinedOutput(); err != nil {
+		reverseCmd := exec.CommandContext(ctx, "git", "apply", "--reverse", "--check", "--whitespace=nowarn", patch.DiffPath)
+		reverseCmd.Dir = projectRoot
+		if reverseOut, reverseErr := reverseCmd.CombinedOutput(); reverseErr == nil {
+			rt.emit(ctx, UIEvent{Kind: EventKindMergeApplied, PatchID: patchID, Summary: "patch " + patchID + ": already applied to working directory"})
+			return nil
+		} else {
+			return fmt.Errorf("git apply check in %s: %w\n%s\nreverse check: %v\n%s",
+				projectRoot, err, strings.TrimSpace(string(out)), reverseErr, strings.TrimSpace(string(reverseOut)))
+		}
+	}
 	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patch.DiffPath)
 	cmd.Dir = projectRoot
 	out, err := cmd.CombinedOutput()
@@ -1804,6 +1907,32 @@ func (rt *runtime) appendMergeApplied(ctx context.Context, goalID, patchID strin
 		return fmt.Errorf("orca: append merge_applied: %w", err)
 	}
 	return nil
+}
+
+func (rt *runtime) hasPRCreatedForPatch(ctx context.Context, goalID, patchID string) (bool, error) {
+	var seq int64
+	for {
+		events, err := rt.eventLog.ReadForGoal(ctx, goalID, seq, 200)
+		if err != nil {
+			return false, fmt.Errorf("orca: read events for pr_created: %w", err)
+		}
+		if len(events) == 0 {
+			return false, nil
+		}
+		for _, ev := range events {
+			if ev.Type != schema.EventPRCreated {
+				continue
+			}
+			var pr schema.PRRecord
+			if err := json.Unmarshal(ev.Payload, &pr); err != nil {
+				return false, fmt.Errorf("orca: decode pr_created payload for event %s: %w", ev.EventID, err)
+			}
+			if pr.PatchID == patchID {
+				return true, nil
+			}
+		}
+		seq = events[len(events)-1].SequenceNum
+	}
 }
 
 func (rt *runtime) compileAgentProjection(ctx context.Context, capsule *schema.ExecutionCapsule) (*schema.ContextProjection, error) {

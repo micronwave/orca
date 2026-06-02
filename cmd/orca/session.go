@@ -217,8 +217,7 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 	case line == "/cancel" || line == "cancel":
 		return s.handleCancel(ctx)
 	case line == "/resume":
-		fmt.Fprintln(s.out, "/resume: not yet implemented (Phase 5)")
-		return nil
+		return s.handleResume(ctx)
 	case line == "/config":
 		fmt.Fprintf(s.out, "Config: %s\n", filepath.Join(s.orcaDir, "config.yaml"))
 		return nil
@@ -246,7 +245,13 @@ func (s *Supervisor) startGoal(ctx context.Context, goalText string) error {
 		return fmt.Errorf("load active goal: %w", err)
 	}
 	if active != nil {
-		fmt.Fprintln(s.errout, activeGoalError(active).Error())
+		cp, cpErr := s.rt.deriveCheckpoint(ctx, active)
+		if cpErr == nil {
+			s.rt.showActiveGoalResumePrompt(ctx, s.errout, active, cp)
+			fmt.Fprintln(s.errout, "\nType /resume to continue, /cancel to cancel, or /status for details.")
+		} else {
+			fmt.Fprintln(s.errout, activeGoalError(active).Error())
+		}
 		return nil
 	}
 
@@ -279,6 +284,63 @@ func (s *Supervisor) startGoal(ctx context.Context, goalText string) error {
 		}
 	}()
 
+	return nil
+}
+
+// handleResume derives the checkpoint for the active goal and resumes the
+// pipeline in the same background-goroutine pattern as startGoal.
+func (s *Supervisor) handleResume(ctx context.Context) error {
+	s.goalMu.Lock()
+	alreadyActive := s.goalActive.Load()
+	s.goalMu.Unlock()
+	if alreadyActive {
+		fmt.Fprintln(s.errout, "A goal is already running. Use /cancel to cancel it first.")
+		return nil
+	}
+
+	goal, err := s.rt.store.LoadActiveGoal(ctx)
+	if err != nil {
+		return fmt.Errorf("resume: load active goal: %w", err)
+	}
+	if goal == nil {
+		fmt.Fprintln(s.out, "No active goal to resume.")
+		return nil
+	}
+
+	cp, err := s.rt.deriveCheckpoint(ctx, goal)
+	if err != nil {
+		return fmt.Errorf("resume: derive checkpoint: %w", err)
+	}
+
+	s.rt.showActiveGoalResumePrompt(ctx, s.out, goal, cp)
+
+	s.goalMu.Lock()
+	goalCtx, cancel := context.WithCancel(ctx)
+	s.goalCtx = goalCtx
+	s.goalCancel = cancel
+	s.goalActive.Store(true)
+	s.cancelRequested.Store(false)
+	s.goalMu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			s.goalMu.Lock()
+			s.goalActive.Store(false)
+			s.cancelRequested.Store(false)
+			s.goalCtx = nil
+			s.goalCancel = nil
+			s.goalMu.Unlock()
+			fmt.Fprint(s.errout, "\n> ")
+		}()
+		if runErr := s.rt.resumeFromCheckpoint(goalCtx, cp); runErr != nil {
+			if !errors.Is(runErr, context.Canceled) {
+				fmt.Fprintf(s.errout, "[orca] resume error: %v\n", runErr)
+			}
+		} else {
+			fmt.Fprintln(s.errout, "[orca] goal resumed and completed.")
+		}
+	}()
 	return nil
 }
 
