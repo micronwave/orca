@@ -2,6 +2,7 @@ package budget_test
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -72,6 +73,15 @@ func (e *budgetEnv) seedCapsule(t *testing.T, maxTokens, maxWallSeconds, maxRetr
 	}
 }
 
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return b
+}
+
 func TestCheckCapsuleBudget_AllowsZeroTokenSpend(t *testing.T) {
 	e := newBudgetEnv(t)
 	e.seedCapsule(t, 1, 60, 1)
@@ -139,19 +149,17 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	e := newBudgetEnv(t)
 	e.seedCapsule(t, 1000, 60, 1)
 	record := &schema.BudgetRecord{
-		BudgetID:                "BUD-1",
-		GoalID:                  "G-1",
-		CapsuleID:               "CAP-1",
-		TokensSpent:             100,
-		Retries:                 1,
-		DuplicatedFileReads:     2,
-		OverlappingEdits:        3,
-		HumanInterventions:      4,
-		ObligationsDischarged:   1,
-		PatchesAccepted:         1,
-		EvidenceArtifactsReused: 1,
-		CreatedAt:               time.Now().UTC(),
-		UpdatedAt:               time.Now().UTC(),
+		BudgetID:              "BUD-1",
+		GoalID:                "G-1",
+		CapsuleID:             "CAP-1",
+		TokensSpent:           100,
+		Retries:               1,
+		DuplicatedFileReads:   2,
+		OverlappingEdits:      3,
+		HumanInterventions:    4,
+		ObligationsDischarged: 1,
+		CreatedAt:             time.Now().UTC(),
+		UpdatedAt:             time.Now().UTC(),
 	}
 	if err := e.st.SaveBudgetRecord(e.ctx, record); err != nil {
 		t.Fatalf("SaveBudgetRecord: %v", err)
@@ -163,6 +171,15 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	if err := e.st.UpdateBudgetRecord(e.ctx, record); err != nil {
 		t.Fatalf("UpdateBudgetRecord: %v", err)
 	}
+	// PatchesAccepted is now derived from raw patch_accepted events, not BudgetRecord.
+	if _, err := e.log.Append(e.ctx, schema.Event{
+		Type:       schema.EventPatchAccepted,
+		GoalID:     "G-1",
+		ArtifactID: "PATCH-1",
+		Payload:    mustMarshal(t, schema.PatchStatusPayload{PatchID: "PATCH-1"}),
+	}); err != nil {
+		t.Fatalf("Append patch_accepted: %v", err)
+	}
 
 	roi, err := e.ctl.ComputeROI(e.ctx, "G-1")
 	if err != nil {
@@ -173,6 +190,9 @@ func TestComputeROI_UsesLatestBudgetRecordEvent(t *testing.T) {
 	}
 	if roi.TotalCoordinationCost != 12 {
 		t.Fatalf("TotalCoordinationCost = %d, want 12", roi.TotalCoordinationCost)
+	}
+	if roi.PatchesAccepted != 1 {
+		t.Fatalf("PatchesAccepted = %d, want 1 (from patch_accepted event)", roi.PatchesAccepted)
 	}
 	if roi.VerifiedValuePer1KTokens <= 0 {
 		t.Fatalf("VerifiedValuePer1KTokens = %f, want non-zero", roi.VerifiedValuePer1KTokens)
@@ -241,5 +261,97 @@ func TestCheckCapsuleBudget_RejectsExhaustedTokens(t *testing.T) {
 	}
 	if check.Allowed || check.Reason != "token budget exhausted" {
 		t.Fatalf("check = %+v, want token budget exhausted", check)
+	}
+}
+
+// TestComputeROI_EventDrivenValueCounts verifies that PatchesAccepted,
+// PatchesRejected, and EvidenceArtifactsReused are derived from raw events
+// rather than from reconciler-written BudgetRecord counters, preventing silent
+// ROI drift when reconciler snapshots diverge from the event history.
+func TestComputeROI_EventDrivenValueCounts(t *testing.T) {
+	e := newBudgetEnv(t)
+	e.seedCapsule(t, 1000, 60, 3)
+	now := time.Now().UTC()
+	// BudgetRecord carries inflated counts — these must not be used for the
+	// value fields that are now event-driven.
+	if err := e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+		BudgetID:                "BUD-1",
+		GoalID:                  "G-1",
+		CapsuleID:               "CAP-1",
+		TokensSpent:             500,
+		ObligationsDischarged:   3,
+		PatchesAccepted:         99,
+		PatchesRejected:         99,
+		EvidenceArtifactsReused: 99,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveBudgetRecord: %v", err)
+	}
+	appendEvent := func(eventType schema.EventType, payload any) {
+		t.Helper()
+		if _, err := e.log.Append(e.ctx, schema.Event{
+			Type:    eventType,
+			GoalID:  "G-1",
+			Payload: mustMarshal(t, payload),
+		}); err != nil {
+			t.Fatalf("Append %s: %v", eventType, err)
+		}
+	}
+	appendEvent(schema.EventPatchAccepted, schema.PatchStatusPayload{PatchID: "PATCH-1"})
+	appendEvent(schema.EventPatchAccepted, schema.PatchStatusPayload{PatchID: "PATCH-2"})
+	appendEvent(schema.EventPatchRejected, schema.PatchStatusPayload{PatchID: "PATCH-3"})
+	// One evidence artifact with ReusedFromID set (reused), one without (fresh).
+	appendEvent(schema.EventEvidenceArtifactCreated, schema.EvidenceArtifact{
+		EvidenceID:   "EV-reused",
+		Type:         schema.EvidenceTestResult,
+		ReusedFromID: "EV-original",
+	})
+	appendEvent(schema.EventEvidenceArtifactCreated, schema.EvidenceArtifact{
+		EvidenceID: "EV-fresh",
+		Type:       schema.EvidenceTestResult,
+	})
+
+	roi, err := e.ctl.ComputeROI(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("ComputeROI: %v", err)
+	}
+	if roi.PatchesAccepted != 2 {
+		t.Errorf("PatchesAccepted = %d, want 2 (from events, not BudgetRecord)", roi.PatchesAccepted)
+	}
+	if roi.PatchesRejected != 1 {
+		t.Errorf("PatchesRejected = %d, want 1 (from events)", roi.PatchesRejected)
+	}
+	if roi.EvidenceArtifactsReused != 1 {
+		t.Errorf("EvidenceArtifactsReused = %d, want 1 (from evidence events with reused_from_id)", roi.EvidenceArtifactsReused)
+	}
+	// ObligationsDischarged still comes from BudgetRecord.
+	if roi.ObligationsDischarged != 3 {
+		t.Errorf("ObligationsDischarged = %d, want 3 (from BudgetRecord)", roi.ObligationsDischarged)
+	}
+}
+
+// TestComputeROI_ToolCallsIncludedInROI verifies that tool-call burn from
+// BudgetRecord is exposed in the ROI summary as TotalToolCalls.
+func TestComputeROI_ToolCallsIncludedInROI(t *testing.T) {
+	e := newBudgetEnv(t)
+	e.seedCapsule(t, 1000, 60, 1)
+	now := time.Now().UTC()
+	if err := e.st.SaveBudgetRecord(e.ctx, &schema.BudgetRecord{
+		BudgetID:  "BUD-1",
+		GoalID:    "G-1",
+		CapsuleID: "CAP-1",
+		ToolCalls: 7,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveBudgetRecord: %v", err)
+	}
+	roi, err := e.ctl.ComputeROI(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("ComputeROI: %v", err)
+	}
+	if roi.TotalToolCalls != 7 {
+		t.Errorf("TotalToolCalls = %d, want 7", roi.TotalToolCalls)
 	}
 }

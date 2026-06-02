@@ -70,19 +70,24 @@ func (s *Controller) ComputeROI(ctx context.Context, goalID string) (ROI, error)
 	if err != nil {
 		return ROI{}, err
 	}
+	counts, err := s.rawValueCountsFromEvents(ctx, goalID)
+	if err != nil {
+		return ROI{}, err
+	}
 	roi := ROI{
-		TotalTokensSpent:      spend.TokensUsed,
-		TotalWallTimeSeconds:  spend.WallTimeSeconds,
-		TotalCoordinationCost: spend.CoordinationCostUnits,
+		TotalTokensSpent:        spend.TokensUsed,
+		TotalWallTimeSeconds:    spend.WallTimeSeconds,
+		TotalToolCalls:          spend.ToolCalls,
+		TotalCoordinationCost:   spend.CoordinationCostUnits,
+		PatchesAccepted:         counts.patchesAccepted,
+		PatchesRejected:         counts.patchesRejected,
+		EvidenceArtifactsReused: counts.evidenceReused,
 	}
 	for _, record := range records {
 		if record.ObligationID != "" {
 			continue
 		}
 		roi.ObligationsDischarged += record.ObligationsDischarged
-		roi.PatchesAccepted += record.PatchesAccepted
-		roi.PatchesRejected += record.PatchesRejected
-		roi.EvidenceArtifactsReused += record.EvidenceArtifactsReused
 		roi.AvoidedRetries += record.AvoidedRetries
 		roi.HumanInterventions += record.HumanInterventions
 	}
@@ -91,6 +96,49 @@ func (s *Controller) ComputeROI(ctx context.Context, goalID string) (ROI, error)
 		roi.VerifiedValuePer1KTokens = float64(value) * 1000 / float64(roi.TotalTokensSpent)
 	}
 	return roi, nil
+}
+
+// rawValueCounts holds value-signal counts derived directly from raw events.
+type rawValueCounts struct {
+	patchesAccepted int
+	patchesRejected int
+	evidenceReused  int
+}
+
+// rawValueCountsFromEvents scans patch_accepted, patch_rejected, and
+// evidence_artifact_created events to derive value counts independent of
+// reconciler-written BudgetRecord snapshots. This prevents silent drift when
+// reconciler counters diverge from the authoritative event history.
+func (s *Controller) rawValueCountsFromEvents(ctx context.Context, goalID string) (rawValueCounts, error) {
+	var counts rawValueCounts
+	var seq int64
+	for {
+		events, err := s.log.ReadForGoal(ctx, goalID, seq, 200)
+		if err != nil {
+			return rawValueCounts{}, fmt.Errorf("budget: read events for goal %s: %w", goalID, err)
+		}
+		if len(events) == 0 {
+			break
+		}
+		for _, event := range events {
+			switch event.Type {
+			case schema.EventPatchAccepted:
+				counts.patchesAccepted++
+			case schema.EventPatchRejected:
+				counts.patchesRejected++
+			case schema.EventEvidenceArtifactCreated:
+				var ev schema.EvidenceArtifact
+				if err := json.Unmarshal(event.Payload, &ev); err != nil {
+					return rawValueCounts{}, fmt.Errorf("budget: unmarshal evidence_artifact_created payload %s: %w", event.ArtifactID, err)
+				}
+				if ev.ReusedFromID != "" {
+					counts.evidenceReused++
+				}
+			}
+		}
+		seq = events[len(events)-1].SequenceNum
+	}
+	return counts, nil
 }
 
 func (s *Controller) loadCapsuleFromLog(ctx context.Context, capsuleID string) (schema.ExecutionCapsule, string, error) {

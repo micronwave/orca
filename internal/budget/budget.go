@@ -60,6 +60,7 @@ type ROI struct {
 
 	TotalTokensSpent        int
 	TotalWallTimeSeconds    float64
+	TotalToolCalls          int
 	TotalCoordinationCost   int
 	ObligationsDischarged   int
 	PatchesAccepted         int
