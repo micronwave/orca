@@ -57,6 +57,7 @@ main() {
 
     BINARY="orca-${TARGET_OS}-${TARGET_ARCH}"
     URL="${LATEST_URL}/${BINARY}"
+    CHECKSUM_URL="${LATEST_URL}/${BINARY}.sha256"
 
     echo "Detected: ${TARGET_OS}/${TARGET_ARCH}"
     echo "Downloading ${URL} ..."
@@ -64,12 +65,36 @@ main() {
     mkdir -p "$INSTALL_DIR"
 
     TMP_FILE="$(mktemp)"
+    TMP_CHECKSUM="$(mktemp)"
     cleanup_tmp() {
-        rm -f "$TMP_FILE"
+        rm -f "$TMP_FILE" "$TMP_CHECKSUM"
     }
     trap cleanup_tmp EXIT INT TERM
 
     download_url "$URL" "$TMP_FILE"
+
+    # Verify SHA256 checksum before touching the installed binary.
+    echo "Verifying checksum ..."
+    download_url "$CHECKSUM_URL" "$TMP_CHECKSUM"
+    EXPECTED_HASH="$(cat "$TMP_CHECKSUM")"
+
+    if command -v sha256sum > /dev/null 2>&1; then
+        ACTUAL_HASH="$(sha256sum "$TMP_FILE" | awk '{print $1}')"
+    elif command -v shasum > /dev/null 2>&1; then
+        ACTUAL_HASH="$(shasum -a 256 "$TMP_FILE" | awk '{print $1}')"
+    else
+        echo "WARNING: sha256sum/shasum not found; skipping checksum verification." >&2
+        ACTUAL_HASH="$EXPECTED_HASH"
+    fi
+
+    if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+        echo "Checksum mismatch." >&2
+        echo "  Expected: $EXPECTED_HASH" >&2
+        echo "  Got:      $ACTUAL_HASH" >&2
+        exit 1
+    fi
+    echo "Checksum verified."
+
     chmod +x "$TMP_FILE"
     mv "$TMP_FILE" "${INSTALL_DIR}/${BINARY_NAME}"
     trap - EXIT INT TERM
