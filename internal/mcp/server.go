@@ -37,14 +37,20 @@ type LogReader interface {
 
 // Server is a read-only MCP HTTP server. Create with New; start with ListenAndServe.
 type Server struct {
-	store StoreReader
-	log   LogReader
-	srv   *http.Server
+	store   StoreReader
+	log     LogReader
+	workDir string // project root for read-only git operations
+	srv     *http.Server
 }
 
-// New creates a Server backed by st and log. No goroutines are started.
-func New(st StoreReader, log LogReader) *Server {
-	s := &Server{store: st, log: log}
+// New creates a Server backed by st and log. workDir is the project root used
+// for read-only git tools; pass "" to disable git tools. No goroutines are started.
+func New(st StoreReader, log LogReader, workDir ...string) *Server {
+	var wdir string
+	if len(workDir) > 0 {
+		wdir = workDir[0]
+	}
+	s := &Server{store: st, log: log, workDir: wdir}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRPC)
 	s.srv = &http.Server{Handler: mux}

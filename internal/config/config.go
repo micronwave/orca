@@ -128,10 +128,21 @@ func (c VerifierConfig) ValidateGates() error {
 	return nil
 }
 
+// TierTargetedTests, TierPackage, TierWorkspace are valid Tier values for VerifierGate.
+// Gates without a Tier do not contribute to green-level classification. orca.md Phase B §4.
+const (
+	TierTargetedTests = "targeted_tests"
+	TierPackage       = "package"
+	TierWorkspace     = "workspace"
+)
+
 type VerifierGate struct {
 	Name     string
 	Command  string
 	Blocking bool
+	// Tier annotates this gate with a verification level for green-contract classification.
+	// Valid values: "targeted_tests", "package", "workspace". Empty means no tier.
+	Tier string
 }
 
 type GateConfig struct {
@@ -614,6 +625,13 @@ func setVerifierGateField(gate *VerifierGate, key, value string, lineNum int) er
 			return fmt.Errorf("config: invalid boolean on line %d: %w", lineNum, err)
 		}
 		gate.Blocking = blocking
+	case "tier":
+		switch value {
+		case TierTargetedTests, TierPackage, TierWorkspace, "":
+			gate.Tier = value
+		default:
+			return fmt.Errorf("config: invalid tier %q on line %d (want targeted_tests|package|workspace)", value, lineNum)
+		}
 	default:
 		return fmt.Errorf("config: unknown verifier gate field %q on line %d", key, lineNum)
 	}

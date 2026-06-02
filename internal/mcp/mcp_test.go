@@ -287,6 +287,8 @@ func TestMCP_ToolsList_ReturnsAllTools(t *testing.T) {
 		"orca_get_verifier_result_for_patch",
 		"orca_get_budget_for_goal",
 		"orca_get_merge_readiness",
+		"orca_repo_status",
+		"orca_repo_diff",
 	}
 	if len(tools) != len(want) {
 		t.Fatalf("tool count = %d, want %d", len(tools), len(want))

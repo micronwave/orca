@@ -398,6 +398,24 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		if result.BlockingReason == "" {
 			result.MergeReady = true
 		}
+		if blocker := mergeReadyBlocker("", vr); blocker != "" {
+			result.MergeReady = false
+			result.BlockingReason = blocker
+		}
+		// Elevate GreenContract to merge_ready when all obligations are met
+		// and persist the updated contract back to the verifier result.
+		if vr.GreenContract != nil {
+			if result.MergeReady &&
+				schema.GreenLevelOrdinal(vr.GreenContract.ObservedGreenLevel) >= schema.GreenLevelOrdinal(schema.GreenLevelWorkspace) {
+				vr.GreenContract.ObservedGreenLevel = schema.GreenLevelMergeReady
+			} else if !result.MergeReady {
+				// Record why merge_ready was not achieved even at workspace tier.
+				vr.GreenContract.MergeReadyBlocker = mergeReadyBlocker(result.BlockingReason, vr)
+			}
+			if err := s.store.UpdateVerifierResult(ctx, vr); err != nil {
+				return ReconcileResult{}, fmt.Errorf("reconciler: update verifier result %s green contract: %w", vr.VerifierResultID, err)
+			}
+		}
 	}
 	// Scope violations require human approval regardless of risk level; they are
 	// not cleared by passing other gates.
@@ -944,6 +962,29 @@ func saveOrUpdateBudgetRecord(ctx context.Context, st *store.FileStore, record *
 		return st.UpdateBudgetRecord(ctx, record)
 	}
 	return st.SaveBudgetRecord(ctx, record)
+}
+
+// mergeReadyBlocker derives a human-readable explanation for why merge_ready
+// was not achieved, highlighting stale-branch and CI-timeout signals so they
+// are visible in the green contract. orca.md Phase B §4.
+func mergeReadyBlocker(blockingReason string, vr *schema.VerifierResult) string {
+	if vr != nil {
+		for _, w := range vr.Warnings {
+			wl := strings.ToLower(w)
+			if strings.Contains(wl, "stale") || strings.Contains(wl, "ci timeout") ||
+				strings.Contains(wl, "ci_timeout") {
+				return w
+			}
+		}
+		for _, f := range vr.BlockingFailures {
+			fl := strings.ToLower(f)
+			if strings.Contains(fl, "stale") || strings.Contains(fl, "ci timeout") ||
+				strings.Contains(fl, "ci_timeout") {
+				return f
+			}
+		}
+	}
+	return blockingReason
 }
 
 func recommendationBlockingReason(vr *schema.VerifierResult) string {

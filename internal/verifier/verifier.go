@@ -295,6 +295,8 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		warnings         []string
 		blockingFailures []string
 		failureIDs       []string
+		// gateEvidencePairs tracks (gate, evidenceArtifact, exitCode) for green level computation.
+		gateEvidencePairs []gateEvidencePair
 	)
 
 	if strings.TrimSpace(patch.BaseCommit) == "" {
@@ -338,6 +340,9 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 			return nil, fmt.Errorf("verifier: patch %s capsule %s: %w", patchID, capsule.CapsuleID, err)
 		}
 		createdEvidence = append(createdEvidence, evidence...)
+		if gate.Tier != "" {
+			gateEvidencePairs = append(gateEvidencePairs, greenGateEvidencePair(gate, exitCode, evidence))
+		}
 		if gate.Blocking && exitCode != 0 {
 			summary := fmt.Sprintf("static gate %q failed", gate.Name)
 			blockingFailures = append(blockingFailures, summary)
@@ -356,6 +361,9 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 			return nil, fmt.Errorf("verifier: patch %s capsule %s: %w", patchID, capsule.CapsuleID, err)
 		}
 		createdEvidence = append(createdEvidence, evidence...)
+		if testGate.Tier != "" {
+			gateEvidencePairs = append(gateEvidencePairs, greenGateEvidencePair(testGate, exitCode, evidence))
+		}
 		if testGate.Blocking && exitCode != 0 {
 			summary := fmt.Sprintf("test gate %q failed", testGate.Name)
 			blockingFailures = append(blockingFailures, summary)
@@ -495,6 +503,8 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 	}
 	warnings = append(warnings, reviewFindings.warnings...)
 
+	greenContract := computeGreenContract(gateEvidencePairs)
+
 	result := &schema.VerifierResult{
 		VerifierResultID:        idgen.New("VR"),
 		PatchID:                 patch.PatchID,
@@ -505,6 +515,7 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		Warnings:                warnings,
 		RecommendedAction:       recommendedAction,
 		RecommendationRationale: recommendationRationale,
+		GreenContract:           greenContract,
 		CreatedAt:               time.Now().UTC(),
 	}
 	if err := s.store.SaveVerifierResult(ctx, result); err != nil {
@@ -980,6 +991,94 @@ func evidenceContentHash(
 		snapshotID,
 	}, "\x00")))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// gateEvidencePair links a passing annotated gate to the evidence it produced.
+type gateEvidencePair struct {
+	gate       config.VerifierGate
+	evidenceID string
+	exitCode   int
+}
+
+func greenGateEvidencePair(gate config.VerifierGate, exitCode int, evidence []*schema.EvidenceArtifact) gateEvidencePair {
+	pair := gateEvidencePair{gate: gate, exitCode: exitCode}
+	if len(evidence) > 0 && evidence[0] != nil {
+		pair.evidenceID = evidence[0].EvidenceID
+	}
+	return pair
+}
+
+// computeGreenContract derives the highest green tier from annotated gates.
+// Returns nil when no gates carry a tier annotation.
+func computeGreenContract(pairs []gateEvidencePair) *schema.GreenContract {
+	if len(pairs) == 0 {
+		return nil
+	}
+	var evidence []schema.GreenEvidence
+	annotated := make([]gateEvidencePair, 0, len(pairs))
+	for _, p := range pairs {
+		tier := schema.GreenLevel(p.gate.Tier)
+		if schema.GreenLevelOrdinal(tier) == 0 {
+			continue
+		}
+		annotated = append(annotated, p)
+		if p.exitCode == 0 {
+			evidence = append(evidence, schema.GreenEvidence{
+				GateName:   p.gate.Name,
+				Tier:       p.gate.Tier,
+				EvidenceID: p.evidenceID,
+			})
+		}
+	}
+	if len(annotated) == 0 {
+		return nil
+	}
+	highest := highestSatisfiedGreenLevel(annotated)
+	if highest == schema.GreenLevelNone {
+		return nil
+	}
+	return &schema.GreenContract{
+		ObservedGreenLevel: highest,
+		Evidence:           evidence,
+	}
+}
+
+func highestSatisfiedGreenLevel(pairs []gateEvidencePair) schema.GreenLevel {
+	levels := []schema.GreenLevel{
+		schema.GreenLevelTargetedTests,
+		schema.GreenLevelPackage,
+		schema.GreenLevelWorkspace,
+	}
+	var highest schema.GreenLevel
+	for _, level := range levels {
+		if annotatedGatesPassThroughLevel(pairs, level) {
+			highest = level
+		}
+	}
+	return highest
+}
+
+func annotatedGatesPassThroughLevel(pairs []gateEvidencePair, level schema.GreenLevel) bool {
+	targetOrdinal := schema.GreenLevelOrdinal(level)
+	var sawGateAtOrBelow bool
+	var sawGateAtLevel bool
+	for _, p := range pairs {
+		gateOrdinal := schema.GreenLevelOrdinal(schema.GreenLevel(p.gate.Tier))
+		if gateOrdinal == 0 {
+			continue
+		}
+		if gateOrdinal > targetOrdinal {
+			continue
+		}
+		sawGateAtOrBelow = true
+		if gateOrdinal == targetOrdinal {
+			sawGateAtLevel = true
+		}
+		if p.exitCode != 0 {
+			return false
+		}
+	}
+	return sawGateAtOrBelow && sawGateAtLevel
 }
 
 func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {

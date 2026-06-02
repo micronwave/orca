@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/micronwave/orca/internal/gittools"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -19,6 +20,32 @@ type toolDef struct {
 
 func toolDefinitions() []toolDef {
 	return []toolDef{
+		{
+			Name:        "orca_repo_status",
+			Description: "Read-only git status for the project working tree (branch, staged/unstaged/untracked files).",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			Name:        "orca_repo_diff",
+			Description: "Read-only git diff for the project working tree. Returns changed files and diff text.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"staged": map[string]any{
+						"type":        "boolean",
+						"description": "If true, show staged (cached) changes only. Default false.",
+					},
+					"paths": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Limit diff to these relative file paths. Empty means all.",
+					},
+				},
+			},
+		},
 		{
 			Name:        "orca_get_goal",
 			Description: "Load the active goal or a specific goal by ID.",
@@ -134,9 +161,49 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolGetBudgetForGoal(ctx, args)
 	case "orca_get_merge_readiness":
 		return s.toolGetMergeReadiness(ctx, args)
+	case "orca_repo_status":
+		return s.toolRepoStatus(ctx, args)
+	case "orca_repo_diff":
+		return s.toolRepoDiff(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+func (s *Server) toolRepoStatus(ctx context.Context, _ json.RawMessage) (string, error) {
+	if s.workDir == "" {
+		return "", fmt.Errorf("repo status: no working directory configured")
+	}
+	result, err := gittools.Status(ctx, s.workDir)
+	if err != nil {
+		return "", fmt.Errorf("repo status: %w", err)
+	}
+	return marshalResult(result)
+}
+
+func (s *Server) toolRepoDiff(ctx context.Context, args json.RawMessage) (string, error) {
+	if s.workDir == "" {
+		return "", fmt.Errorf("repo diff: no working directory configured")
+	}
+	var params struct {
+		Staged bool     `json:"staged"`
+		Paths  []string `json:"paths"`
+	}
+	if err := unmarshalArgs(args, &params); err != nil {
+		return "", err
+	}
+	result, err := gittools.Diff(ctx, s.workDir, params.Staged, params.Paths)
+	if err != nil {
+		return "", fmt.Errorf("repo diff: %w", err)
+	}
+	// Return structured result without the full diff text to keep response size manageable.
+	return marshalResult(struct {
+		ChangedFiles []string `json:"changed_files"`
+		DiffLength   int      `json:"diff_length"`
+	}{
+		ChangedFiles: result.ChangedFiles,
+		DiffLength:   len(result.DiffText),
+	})
 }
 
 func (s *Server) toolGetGoal(ctx context.Context, args json.RawMessage) (string, error) {

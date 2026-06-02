@@ -24,6 +24,7 @@ import (
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
+	"github.com/micronwave/orca/internal/gittools"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/intent"
@@ -33,6 +34,7 @@ import (
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/prwriter"
 	"github.com/micronwave/orca/internal/reconciler"
+	"github.com/micronwave/orca/internal/recovery"
 	"github.com/micronwave/orca/internal/runner"
 	"github.com/micronwave/orca/internal/runner/adapters/claude"
 	"github.com/micronwave/orca/internal/runner/adapters/codex"
@@ -393,7 +395,7 @@ func openRuntime(orcaDir string, noLearning bool) (*runtime, func() error, error
 		if listenErr != nil {
 			return nil, nil, errors.Join(fmt.Errorf("orca: mcp server: %w", listenErr), log.Close())
 		}
-		mcpServer := mcp.New(artifactStore, log)
+		mcpServer := mcp.New(artifactStore, log, filepath.Dir(orcaDir))
 		mcpCtx, cancel := context.WithCancel(context.Background())
 		mcpCancel = cancel
 		go func() {
@@ -563,7 +565,10 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 	if err != nil {
 		return fmt.Errorf("orca: load goal %s: %w", goalID, err)
 	}
+	maxRetries := rt.cfg.Budget.DefaultMaxRetries
+	planIterations := 0
 	for {
+		planIterations++
 		if err := rt.reconciler.FreshnessCheck(ctx, goal.GoalID); err != nil {
 			return fmt.Errorf("orca: freshness check for goal %s: %w", goal.GoalID, err)
 		}
@@ -638,18 +643,9 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				return err
 			}
 			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": running agent"})
-			runResult, err := rt.runner.Run(ctx, capsuleID)
-			if err != nil {
-				rt.emit(ctx, UIEvent{
-					Kind:      EventKindCapsuleFailed,
-					GoalID:    goal.GoalID,
-					CapsuleID: capsuleID,
-					Summary:   "capsule " + capsuleID + ": failed",
-					Detail:    err.Error(),
-					Status:    "failed",
-					Severity:  "error",
-				})
-				return err
+			runResult, runErr := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule)
+			if runErr != nil {
+				return runErr
 			}
 			rt.emit(ctx, UIEvent{
 				Kind:      EventKindCapsuleCompleted,
@@ -683,9 +679,75 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 			return nil
 		}
 		if len(vmResult.FollowUpObligationIDs) > 0 {
+			// Enforce MaxRetries: if plan iterations exceed the configured limit,
+			// record an escalated recovery entry and stop.
+			if maxRetries > 0 && planIterations > maxRetries {
+				// Use the first patch's capsule for the ledger entry.
+				var capsuleID string
+				if len(patchIDs) > 0 {
+					if p, pErr := rt.store.LoadPatch(ctx, patchIDs[0]); pErr == nil {
+						capsuleID = p.CapsuleID
+					}
+				}
+				if capsuleID != "" {
+					_, _ = recovery.RecordAttempt(
+						ctx, rt.store, goal.GoalID, capsuleID,
+						schema.RecoveryProviderFailure, "max_retries_exceeded",
+						maxRetries, "", "plan loop iteration limit reached",
+					)
+				}
+				return fmt.Errorf("orca: goal %s exceeded max_retries=%d plan iterations",
+					goal.GoalID, maxRetries)
+			}
 			continue
 		}
 		return fmt.Errorf("orca: reconciliation stopped: %s", vmResult.BlockingReason)
+	}
+}
+
+func (rt *runtime) runCapsuleWithRecovery(ctx context.Context, goalID string, capsule *schema.ExecutionCapsule) (runner.RunResult, error) {
+	if capsule == nil {
+		return runner.RunResult{}, fmt.Errorf("orca: capsule is required")
+	}
+	maxRetries := capsule.Budget.MaxRetries
+	for {
+		runResult, runErr := rt.runner.Run(ctx, capsule.CapsuleID)
+		if runErr == nil {
+			return runResult, nil
+		}
+		rt.emit(ctx, UIEvent{
+			Kind:      EventKindCapsuleFailed,
+			GoalID:    goalID,
+			CapsuleID: capsule.CapsuleID,
+			Summary:   "capsule " + capsule.CapsuleID + ": failed",
+			Detail:    runErr.Error(),
+			Status:    "failed",
+			Severity:  "error",
+		})
+		failureClass := recovery.ClassifyRunError(runErr)
+		scenario := recovery.ClassifyScenario(schema.CapsuleRuntimeFailureClass(failureClass))
+		if scenario == "" {
+			scenario = schema.RecoveryProviderFailure
+		}
+		recEntry, recErr := recovery.RecordAttempt(
+			ctx, rt.store, goalID, capsule.CapsuleID,
+			scenario, failureClass, maxRetries,
+			string(capsule.Agent), runErr.Error(),
+		)
+		if recErr != nil {
+			return runResult, errors.Join(runErr, recErr)
+		}
+		if recovery.IsEscalated(recEntry) {
+			return runResult, fmt.Errorf("orca: capsule %s failed and max_retries=%d exhausted: %w; %s",
+				capsule.CapsuleID, maxRetries, runErr, recEntry.EscalationReason)
+		}
+		rt.emit(ctx, UIEvent{
+			Kind:      EventKindCapsuleRunning,
+			GoalID:    goalID,
+			CapsuleID: capsule.CapsuleID,
+			Summary:   fmt.Sprintf("capsule %s: retrying recovery attempt %d/%d", capsule.CapsuleID, recEntry.AttemptNum, recEntry.MaxAttempts),
+			Status:    "retrying",
+		})
 	}
 }
 
@@ -1043,11 +1105,29 @@ func (rt *runtime) buildPRContent(ctx context.Context, goalID, patchID string) (
 			}
 		}
 		sb.WriteString("\n")
+		if vr.GreenContract != nil && vr.GreenContract.ObservedGreenLevel != "" {
+			fmt.Fprintf(&sb, "**Green level:** %s", vr.GreenContract.ObservedGreenLevel)
+			if vr.GreenContract.MergeReadyBlocker != "" {
+				fmt.Fprintf(&sb, " _(blocked: %s)_", vr.GreenContract.MergeReadyBlocker)
+			}
+			sb.WriteString("\n\n")
+		}
 		if vr.RecommendationRationale != "" {
 			sb.WriteString("## Merge Rationale\n\n")
 			sb.WriteString(vr.RecommendationRationale)
 			sb.WriteString("\n\n")
 		}
+	}
+
+	// Include recovery context if any attempts were recorded.
+	recoveryEntries, recErr := rt.store.LoadRecoveryEntriesForGoal(ctx, goalID)
+	if recErr == nil && len(recoveryEntries) > 0 {
+		sb.WriteString("## Recovery History\n\n")
+		for _, entry := range recoveryEntries {
+			fmt.Fprintf(&sb, "- attempt %d/%d [%s]: %s → %s\n",
+				entry.AttemptNum, entry.MaxAttempts, entry.Scenario, entry.FailureClass, entry.Outcome)
+		}
+		sb.WriteString("\n")
 	}
 
 	sb.WriteString("---\n*Generated by Orca*\n")
@@ -1066,6 +1146,39 @@ func (rt *runtime) emitCycleStartSnapshot(ctx context.Context, goalID string, la
 	if err := rt.store.SaveSnapshot(ctx, snapshot); err != nil {
 		return fmt.Errorf("orca: save cycle snapshot for goal %s: %w", goalID, err)
 	}
+
+	// Capture repo status for verifier diff provenance. Non-fatal on failure.
+	projectRoot := filepath.Dir(rt.orcaDir)
+	if status, err := gittools.Status(ctx, projectRoot); err == nil {
+		staged, unstaged, untracked := 0, 0, 0
+		for _, f := range status.Files {
+			switch {
+			case f.Untracked:
+				untracked++
+			case f.Staged && f.Unstaged:
+				staged++
+				unstaged++
+			case f.Staged:
+				staged++
+			case f.Unstaged:
+				unstaged++
+			}
+		}
+		snap := &schema.RepoStatusSnapshot{
+			SnapshotID:     idgen.New("REPO-SNAP"),
+			GoalID:         goalID,
+			WorkDir:        projectRoot,
+			Branch:         status.Branch,
+			Clean:          status.Clean,
+			StagedCount:    staged,
+			UnstagedCount:  unstaged,
+			UntrackedCount: untracked,
+			CreatedAt:      now,
+		}
+		// Best-effort; errors are not propagated to avoid breaking the cycle.
+		_ = rt.store.SaveRepoStatusSnapshot(ctx, snap)
+	}
+
 	return nil
 }
 
@@ -1591,6 +1704,13 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 			fmt.Fprintf(out, " summary=%q", latestVerifier.RecommendationRationale)
 		}
 		fmt.Fprintln(out)
+		if latestVerifier.GreenContract != nil && latestVerifier.GreenContract.ObservedGreenLevel != "" {
+			fmt.Fprintf(out, "Green level: %s", latestVerifier.GreenContract.ObservedGreenLevel)
+			if latestVerifier.GreenContract.MergeReadyBlocker != "" {
+				fmt.Fprintf(out, " (blocked: %s)", latestVerifier.GreenContract.MergeReadyBlocker)
+			}
+			fmt.Fprintln(out)
+		}
 	}
 	writeAdvancedStatus(out, rt.cfg.Advanced, latestVerifier)
 	falsePositives, totalFindings, err := rt.computeAdvancedFalsePositiveRate(ctx, goal.GoalID)
@@ -2008,7 +2128,7 @@ func (rt *runtime) latestVerifierResultForGoal(ctx context.Context, goalID strin
 			break
 		}
 		for _, event := range events {
-			if event.Type != schema.EventVerifierResultCreated {
+			if event.Type != schema.EventVerifierResultCreated && event.Type != schema.EventVerifierResultUpdated {
 				continue
 			}
 			var result schema.VerifierResult

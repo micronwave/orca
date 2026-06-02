@@ -50,5 +50,8 @@ type VerifierResult struct {
 	Invalidates             []string          `json:"invalidates,omitempty"`
 	RecommendedAction       RecommendedAction `json:"recommended_action"`
 	RecommendationRationale string            `json:"recommendation_rationale"`
-	CreatedAt               time.Time         `json:"created_at"`
+	// GreenContract captures the highest verification tier achieved from annotated
+	// gates. nil when no gates carry a tier annotation. orca.md Phase B §4.
+	GreenContract *GreenContract `json:"green_contract,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
 }

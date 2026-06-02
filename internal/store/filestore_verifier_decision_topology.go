@@ -57,6 +57,33 @@ func (s *FileStore) LoadVerifierResultForPatch(ctx context.Context, patchID stri
 	return nil, ErrNotFound
 }
 
+// UpdateVerifierResult persists an existing verifier result and emits a
+// verifier_result_updated event so reconciler-computed green-contract state is
+// replayable.
+func (s *FileStore) UpdateVerifierResult(ctx context.Context, r *schema.VerifierResult) error {
+	if r == nil {
+		return fmt.Errorf("store: verifier result is required")
+	}
+	if err := validateArtifactID("verifier result", r.VerifierResultID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.artifactPath(dirVerifierResults, r.VerifierResultID)
+	if _, err := readFile[schema.VerifierResult](path); err != nil {
+		return err
+	}
+	goalID, err := s.goalIDForCapsule(ctx, r.CapsuleID)
+	if err != nil {
+		return fmt.Errorf("store: UpdateVerifierResult: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventVerifierResultUpdated, goalID, r.VerifierResultID, r)
+	if err != nil {
+		return err
+	}
+	return materializationError(ev, s.writeFile(path, r))
+}
+
 // ── Decision Records ─────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) error {

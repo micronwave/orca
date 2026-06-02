@@ -487,9 +487,8 @@ func (rt *runtime) runExistingCapsules(ctx context.Context, goal *schema.GoalIR,
 		}
 
 		rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": running agent"})
-		runResult, err := rt.runner.Run(ctx, capsuleID)
+		runResult, err := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule)
 		if err != nil {
-			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleFailed, GoalID: goal.GoalID, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": failed", Detail: err.Error(), Status: "failed", Severity: "error"})
 			return err
 		}
 		rt.emit(ctx, UIEvent{Kind: EventKindCapsuleCompleted, GoalID: goal.GoalID, CapsuleID: capsuleID, PatchID: runResult.PatchID, Summary: "capsule " + capsuleID + ": completed", Status: "completed"})

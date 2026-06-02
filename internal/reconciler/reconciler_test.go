@@ -1261,6 +1261,7 @@ type scenarioOptions struct {
 	recommendedAction    schema.RecommendedAction
 	recommendation       string
 	verifierInvalidates  []string
+	greenContract        *schema.GreenContract
 }
 
 type scenarioIDs struct {
@@ -1360,6 +1361,7 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		Warnings:                append([]string(nil), opts.warnings...),
 		RecommendedAction:       pickRecommendedAction(opts.recommendedAction),
 		RecommendationRationale: pickRecommendationRationale(opts.recommendation),
+		GreenContract:           opts.greenContract,
 		CreatedAt:               now,
 	}); err != nil {
 		t.Fatalf("SaveVerifierResult: %v", err)
@@ -1368,6 +1370,84 @@ func saveReconcileScenario(t *testing.T, env *testEnv, opts scenarioOptions) sce
 		t.Fatal("scenario must create an active goal")
 	}
 	return ids
+}
+
+func TestReconcileElevatesWorkspaceGreenContractToMergeReady(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "GREENREADY",
+		evidenceIDs:  []string{"EV-GREENREADY"},
+		saveEvidence: true,
+		greenContract: &schema.GreenContract{
+			ObservedGreenLevel: schema.GreenLevelWorkspace,
+			Evidence: []schema.GreenEvidence{{
+				GateName:   "go_build",
+				Tier:       string(schema.GreenLevelWorkspace),
+				EvidenceID: "EV-GREENREADY",
+			}},
+		},
+	})
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.MergeReady {
+		t.Fatalf("MergeReady = false, reason=%q", result.BlockingReason)
+	}
+	reloaded, err := env.st.LoadVerifierResult(env.ctx, ids.verifierResultID)
+	if err != nil {
+		t.Fatalf("LoadVerifierResult: %v", err)
+	}
+	if reloaded.GreenContract == nil || reloaded.GreenContract.ObservedGreenLevel != schema.GreenLevelMergeReady {
+		t.Fatalf("persisted GreenContract = %+v, want merge_ready", reloaded.GreenContract)
+	}
+	events, err := env.log.ReadByType(env.ctx, schema.EventVerifierResultUpdated, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadByType verifier_result_updated: %v", err)
+	}
+	if len(events) != 1 || events[0].ArtifactID != ids.verifierResultID {
+		t.Fatalf("verifier_result_updated events = %+v, want one for %s", events, ids.verifierResultID)
+	}
+}
+
+func TestReconcileStaleBranchBlocksWorkspaceGreenContract(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "GREENSTALE",
+		evidenceIDs:  []string{"EV-GREENSTALE"},
+		saveEvidence: true,
+		warnings:     []string{"stale branch: base branch is behind origin/main"},
+		greenContract: &schema.GreenContract{
+			ObservedGreenLevel: schema.GreenLevelWorkspace,
+			Evidence: []schema.GreenEvidence{{
+				GateName:   "go_build",
+				Tier:       string(schema.GreenLevelWorkspace),
+				EvidenceID: "EV-GREENSTALE",
+			}},
+		},
+	})
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.MergeReady {
+		t.Fatal("MergeReady = true, want false for stale branch warning")
+	}
+	reloaded, err := env.st.LoadVerifierResult(env.ctx, ids.verifierResultID)
+	if err != nil {
+		t.Fatalf("LoadVerifierResult: %v", err)
+	}
+	if reloaded.GreenContract == nil {
+		t.Fatal("expected persisted GreenContract")
+	}
+	if reloaded.GreenContract.ObservedGreenLevel != schema.GreenLevelWorkspace {
+		t.Fatalf("ObservedGreenLevel = %s, want workspace", reloaded.GreenContract.ObservedGreenLevel)
+	}
+	if !strings.Contains(reloaded.GreenContract.MergeReadyBlocker, "stale branch") {
+		t.Fatalf("MergeReadyBlocker = %q, want stale branch warning", reloaded.GreenContract.MergeReadyBlocker)
+	}
 }
 
 func pickRecommendedAction(action schema.RecommendedAction) schema.RecommendedAction {

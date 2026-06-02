@@ -1503,6 +1503,41 @@ func TestVerifierResult_SaveEmitsEvent(t *testing.T) {
 	}
 }
 
+func TestVerifierResult_UpdateEmitsEventAndPersists(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedPatch(t, "PATCH-1", "CAP-1")
+	vr := &schema.VerifierResult{
+		VerifierResultID:  "VR-1",
+		PatchID:           "PATCH-1",
+		CapsuleID:         "CAP-1",
+		RecommendedAction: schema.ActionAccept,
+		GreenContract: &schema.GreenContract{
+			ObservedGreenLevel: schema.GreenLevelWorkspace,
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := e.st.SaveVerifierResult(e.ctx, vr); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	vr.GreenContract.ObservedGreenLevel = schema.GreenLevelMergeReady
+	if err := e.st.UpdateVerifierResult(e.ctx, vr); err != nil {
+		t.Fatalf("UpdateVerifierResult: %v", err)
+	}
+	if n := e.countEvents(t, schema.EventVerifierResultUpdated); n != 1 {
+		t.Fatalf("verifier_result_updated events = %d, want 1", n)
+	}
+	got, err := e.st.LoadVerifierResult(e.ctx, "VR-1")
+	if err != nil {
+		t.Fatalf("LoadVerifierResult: %v", err)
+	}
+	if got.GreenContract == nil || got.GreenContract.ObservedGreenLevel != schema.GreenLevelMergeReady {
+		t.Fatalf("GreenContract = %+v, want merge_ready", got.GreenContract)
+	}
+}
+
 func TestVerifierResult_LoadForPatch(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")

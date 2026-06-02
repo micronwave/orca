@@ -160,7 +160,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.writeFile(s.artifactPath(dirFailures, v.FailureID), &v)
 
-	case schema.EventVerifierResultCreated:
+	case schema.EventVerifierResultCreated, schema.EventVerifierResultUpdated:
 		var v schema.VerifierResult
 		if err := json.Unmarshal(e.Payload, &v); err != nil {
 			return fmt.Errorf("unmarshal VerifierResult: %w", err)
@@ -378,6 +378,26 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 
 	// ── events that require no artifact file change ──────────────────────────
 
+	case schema.EventRecoveryLedgerSaved:
+		var v schema.RecoveryLedgerEntry
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal RecoveryLedgerEntry: %w", err)
+		}
+		if err := validateArtifactID("recovery entry", v.EntryID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirRecoveryLedger, v.EntryID), &v)
+
+	case schema.EventRepoStatusSnapshotSaved:
+		var v schema.RepoStatusSnapshot
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal RepoStatusSnapshot: %w", err)
+		}
+		if err := validateArtifactID("repo status snapshot", v.SnapshotID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirRepoStatus, v.SnapshotID), &v)
+
 	case schema.EventTopologySelected,
 		schema.EventMergeApplied,
 		schema.EventArtifactInvalidated:
@@ -496,6 +516,7 @@ func ReplayDir(root string) []string {
 		dirFailures, dirDecisions, dirVerifierResults, dirTopologyOutcomes,
 		dirPRs, dirCIStatus, dirIntake,
 		dirCapsuleRuntime, dirStartupBundles,
+		dirRecoveryLedger, dirRepoStatus,
 	}
 	out := make([]string, len(dirs))
 	for i, d := range dirs {

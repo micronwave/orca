@@ -31,6 +31,7 @@ const (
 	EventEvidenceArtifactCreated   EventType = "evidence_artifact_created"
 	EventClaimCreated              EventType = "claim_created"
 	EventVerifierResultCreated     EventType = "verifier_result_created"
+	EventVerifierResultUpdated     EventType = "verifier_result_updated"
 	EventFailureFingerprintCreated EventType = "failure_fingerprint_created"
 	EventDecisionRecordCreated     EventType = "decision_record_created"
 	EventBudgetRecordSaved         EventType = "budget_record_saved"
@@ -57,6 +58,12 @@ const (
 	// EventStartupBundleCreated is emitted by the runner when a startup timeout
 	// produces a StartupEvidenceBundle. Payload is the StartupEvidenceBundle.
 	EventStartupBundleCreated EventType = "startup_bundle_created"
+	// EventRecoveryLedgerSaved is emitted when a RecoveryLedgerEntry is persisted.
+	// Payload is the RecoveryLedgerEntry. orca.md Phase B §5.
+	EventRecoveryLedgerSaved EventType = "recovery_ledger_saved"
+	// EventRepoStatusSnapshotSaved is emitted when a RepoStatusSnapshot is written.
+	// Payload is the RepoStatusSnapshot. orca.md Phase B §3.
+	EventRepoStatusSnapshotSaved EventType = "repo_status_snapshot_saved"
 )
 
 // Event is one entry in the append-only event log.
