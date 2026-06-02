@@ -119,6 +119,9 @@ func runGoal(args []string) (err error) {
 	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	noLearning := fs.Bool("no-learning", false, "disable adaptive reuse (learning layer)")
 	fromIssue := fs.Int("from-issue", 0, "GitHub issue number to use as goal input")
+	flagPlain := fs.Bool("plain", false, "use plain text progress output (default)")
+	flagVerbose := fs.Bool("verbose", false, "use plain text progress output with extra detail")
+	flagJSON := fs.Bool("json", false, "emit lifecycle events as newline-delimited JSON to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -147,6 +150,16 @@ func runGoal(args []string) (err error) {
 			err = closeErr
 		}
 	}()
+	switch {
+	case *flagJSON:
+		rt.notifier = newJSONNotifier(os.Stderr)
+	case *flagVerbose:
+		rt.notifier = newPlainNotifier(os.Stderr, true)
+	default:
+		// --plain is the default; preserves the previous [orca] stderr lines.
+		_ = flagPlain
+		rt.notifier = newPlainNotifier(os.Stderr, false)
+	}
 	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
 		return err
 	}
@@ -167,6 +180,7 @@ func runGoal(args []string) (err error) {
 func runStatus(args []string) (err error) {
 	fs := flag.NewFlagSet("orca status", flag.ContinueOnError)
 	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
+	raw := fs.Bool("raw", false, "show detailed operational dump (artifact IDs, budget, MCP, CI)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -182,7 +196,10 @@ func runStatus(args []string) (err error) {
 			err = closeErr
 		}
 	}()
-	return rt.printStatus(context.Background(), os.Stdout)
+	if *raw {
+		return rt.printStatus(context.Background(), os.Stdout)
+	}
+	return rt.printStatusConcise(context.Background(), os.Stdout)
 }
 
 func runCancel(args []string, in io.Reader, out io.Writer) (err error) {
@@ -389,6 +406,11 @@ type runtime struct {
 	orcaDir    string
 	noLearning bool
 
+	// notifier is set by the CLI layer before any control-loop method runs.
+	// A nil notifier is treated as no-op; use rt.emit rather than calling
+	// rt.notifier directly.
+	notifier Notifier
+
 	eventLog *eventlog.FileLog
 	store    *store.FileStore
 
@@ -407,6 +429,13 @@ type runtime struct {
 	// prWriterBaseURL overrides the GitHub API base URL used by prwriter.
 	// Empty in production; set to a mock server URL in tests.
 	prWriterBaseURL string
+}
+
+// emit delivers a lifecycle event through the notifier. A nil notifier is a no-op.
+func (rt *runtime) emit(ctx context.Context, ev UIEvent) {
+	if rt.notifier != nil {
+		rt.notifier.Step(ctx, ev)
+	}
 }
 
 func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventlog.FileLog, st *store.FileStore) (*runtime, error) {
@@ -458,12 +487,12 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 // compileGoal compiles the raw intent into a GoalIR and proposes initial obligations.
 // It does not run the planning loop.
 func (rt *runtime) compileGoal(ctx context.Context, rawIntent string) (*schema.GoalIR, error) {
-	fmt.Fprintf(os.Stderr, "[orca] compiling intent\n")
+	rt.emit(ctx, UIEvent{Kind: EventKindGoalCompiling, Summary: "compiling intent"})
 	goal, err := rt.intentCompiler.Compile(ctx, rawIntent)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "[orca] goal %s: proposing obligations\n", goal.GoalID)
+	rt.emit(ctx, UIEvent{Kind: EventKindGoalPlanning, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s: proposing obligations", goal.GoalID)})
 	if _, err := rt.verifierEngine.ProposeObligations(ctx, goal.GoalID); err != nil {
 		return nil, err
 	}
@@ -484,7 +513,7 @@ func (rt *runtime) runFromIssue(ctx context.Context, issueNumber int) error {
 // record, and returns the created GoalIR. It does not run the planning loop.
 // Tests call this directly to verify intake behavior without running agents.
 func (rt *runtime) intakeIssue(ctx context.Context, issueNumber int) (*schema.GoalIR, error) {
-	fmt.Fprintf(os.Stderr, "[orca] fetching github issue #%d\n", issueNumber)
+	rt.emit(ctx, UIEvent{Kind: EventKindSetupStarted, Summary: fmt.Sprintf("fetching github issue #%d", issueNumber)})
 	text, err := rt.intakeFetcher.Fetch(ctx, rt.cfg.Intake, issueNumber)
 	if err != nil {
 		return nil, fmt.Errorf("orca: fetch issue %d: %w", issueNumber, err)
@@ -505,7 +534,7 @@ func (rt *runtime) intakeIssue(ctx context.Context, issueNumber int) (*schema.Go
 	if err := rt.store.SaveIntakeRecord(ctx, goal.GoalID, ir); err != nil {
 		return nil, fmt.Errorf("orca: save intake record for issue %d: %w", issueNumber, err)
 	}
-	fmt.Fprintf(os.Stderr, "[orca] goal %s created from issue #%d\n", goal.GoalID, issueNumber)
+	rt.emit(ctx, UIEvent{Kind: EventKindSetupReady, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s created from issue #%d", goal.GoalID, issueNumber)})
 	return goal, nil
 }
 
@@ -526,7 +555,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 		if err := rt.reconciler.FreshnessCheck(ctx, goal.GoalID); err != nil {
 			return fmt.Errorf("orca: freshness check for goal %s: %w", goal.GoalID, err)
 		}
-		fmt.Fprintf(os.Stderr, "[orca] goal %s: planning\n", goal.GoalID)
+		rt.emit(ctx, UIEvent{Kind: EventKindGoalPlanning, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s: planning", goal.GoalID)})
 		plan, err := rt.planner.Plan(ctx, goal.GoalID)
 		if err != nil {
 			return err
@@ -538,6 +567,15 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 		if err != nil {
 			return err
 		}
+		rt.emit(ctx, UIEvent{
+			Kind:    EventKindTopologySelected,
+			GoalID:  goal.GoalID,
+			Summary: fmt.Sprintf("goal %s: selected topology %s", goal.GoalID, plan.Topology),
+			Fields: map[string]string{
+				"topology":    string(plan.Topology),
+				"decision_id": plan.DecisionID,
+			},
+		})
 		if err := rt.emitCycleStartSnapshot(ctx, goal.GoalID, topologyEvent); err != nil {
 			return err
 		}
@@ -550,7 +588,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 			if err != nil {
 				return fmt.Errorf("orca: load capsule %s: %w", capsuleID, err)
 			}
-			fmt.Fprintf(os.Stderr, "[orca] capsule %s: compiling projections\n", capsuleID)
+			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleCreated, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": compiling projections"})
 			if _, err := rt.projector.CompileHumanSummary(ctx, capsuleID); err != nil {
 				return err
 			}
@@ -561,7 +599,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 			// different components and may disagree.
 			if capsule.Role == schema.RoleExecutor && gate.ShouldReviewProjection(plan.Topology, plan.MaxObligationRisk) {
 				reviewWindow := gate.ReviewWindowFor(plan.Topology, plan.MaxObligationRisk, time.Duration(rt.cfg.Gate.ReviewWindowSeconds)*time.Second)
-				fmt.Fprintf(os.Stderr, "[orca] capsule %s: awaiting projection review (window %s)\n", capsuleID, reviewWindow)
+				rt.emit(ctx, UIEvent{Kind: EventKindCapsuleWaitingForGate, CapsuleID: capsuleID, Summary: fmt.Sprintf("capsule %s: awaiting projection review (window %s)", capsuleID, reviewWindow)})
 				decision, err := rt.gatekeeper.ReviewProjection(ctx, capsuleID, reviewWindow)
 				if err != nil {
 					return err
@@ -571,7 +609,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				}
 			}
 
-			fmt.Fprintf(os.Stderr, "[orca] capsule %s: checking budget\n", capsuleID)
+			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": checking budget"})
 			check, err := rt.budget.CheckCapsuleBudget(ctx, capsuleID)
 			if err != nil {
 				return err
@@ -579,7 +617,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 			if !check.Allowed {
 				return fmt.Errorf("orca: budget rejected capsule %s: %s", capsuleID, check.Reason)
 			}
-			fmt.Fprintf(os.Stderr, "[orca] capsule %s (%s): compiling agent projection\n", capsuleID, capsule.Role)
+			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: fmt.Sprintf("capsule %s (%s): compiling agent projection", capsuleID, capsule.Role)})
 			agentProjection, err := rt.compileAgentProjection(ctx, capsule)
 			if err != nil {
 				return err
@@ -587,11 +625,28 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 			if err := rt.store.UpdateCapsuleProjectionID(ctx, capsuleID, agentProjection.ContextProjectionID); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "[orca] capsule %s: running agent\n", capsuleID)
+			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": running agent"})
 			runResult, err := rt.runner.Run(ctx, capsuleID)
 			if err != nil {
+				rt.emit(ctx, UIEvent{
+					Kind:      EventKindCapsuleFailed,
+					GoalID:    goal.GoalID,
+					CapsuleID: capsuleID,
+					Summary:   "capsule " + capsuleID + ": failed",
+					Detail:    err.Error(),
+					Status:    "failed",
+					Severity:  "error",
+				})
 				return err
 			}
+			rt.emit(ctx, UIEvent{
+				Kind:      EventKindCapsuleCompleted,
+				GoalID:    goal.GoalID,
+				CapsuleID: capsuleID,
+				PatchID:   runResult.PatchID,
+				Summary:   "capsule " + capsuleID + ": completed",
+				Status:    "completed",
+			})
 			if capsule.Role != schema.RoleExecutor {
 				if len(runResult.EvidenceIDs) == 0 && len(runResult.ClaimIDs) == 0 {
 					return fmt.Errorf("orca: %s capsule %s produced no review evidence or claims", capsule.Role, capsuleID)
@@ -622,11 +677,12 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 		// orchestrator must not re-emit for these when backfilling earlier accepted patches.
 		reconcilerMergeEmitted := make(map[string]bool)
 		for _, patchID := range patchIDs {
-			fmt.Fprintf(os.Stderr, "[orca] patch %s: verifying\n", patchID)
+			rt.emit(ctx, UIEvent{Kind: EventKindVerifierRunning, PatchID: patchID, Summary: "patch " + patchID + ": verifying"})
 			verifyResult, err := rt.verifyPatch(ctx, patchID, supplementalEvidenceIDs, supplementalClaimIDs)
 			if err != nil {
 				return err
 			}
+			rt.emit(ctx, verifierUIEvent(goal.GoalID, verifyResult))
 			var reconcileIn reconciler.ReconcileInput
 			if len(verifyResult.BlockingFailures) > 0 {
 				waivers, waiverErr := rt.collectWaivers(ctx, verifyResult)
@@ -635,11 +691,18 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				}
 				reconcileIn.Waivers = waivers
 			}
-			fmt.Fprintf(os.Stderr, "[orca] patch %s: reconciling (recommended action: %s)\n", verifyResult.PatchID, verifyResult.RecommendedAction)
+			rt.emit(ctx, UIEvent{
+				Kind:    EventKindReconcileRunning,
+				GoalID:  goal.GoalID,
+				PatchID: verifyResult.PatchID,
+				Summary: fmt.Sprintf("patch %s: reconciling (recommended action: %s)", verifyResult.PatchID, verifyResult.RecommendedAction),
+				Fields:  map[string]string{"recommended_action": string(verifyResult.RecommendedAction)},
+			})
 			result, err := rt.reconciler.Reconcile(ctx, verifyResult.PatchID, reconcileIn)
 			if err != nil {
 				return err
 			}
+			rt.emit(ctx, reconcileUIEvent(goal.GoalID, verifyResult.PatchID, result))
 			if result.PatchAccepted {
 				acceptedPatchIDs = append(acceptedPatchIDs, verifyResult.PatchID)
 			}
@@ -657,12 +720,19 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				blockingReason = result.BlockingReason
 			}
 		}
-		fmt.Fprintf(os.Stderr, "[orca] goal %s: computing ROI\n", goal.GoalID)
+		rt.emit(ctx, UIEvent{Kind: EventKindGoalPlanning, GoalID: goal.GoalID, Summary: fmt.Sprintf("goal %s: computing ROI", goal.GoalID)})
 		if _, err := rt.budget.ComputeROI(ctx, goal.GoalID); err != nil {
 			return err
 		}
 
 		if readyResult.MergeReady {
+			rt.emit(ctx, UIEvent{
+				Kind:    EventKindMergeReady,
+				GoalID:  goal.GoalID,
+				PatchID: readyPatchID,
+				Summary: fmt.Sprintf("patch %s: merge ready", readyPatchID),
+				Status:  "ready",
+			})
 			if readyResult.HumanGateRequired {
 				// Gate on the last merge-ready patch; merge all accepted patches on approval.
 				decision, err := rt.gatekeeper.ReviewMerge(ctx, readyPatchID)
@@ -763,7 +833,7 @@ func (rt *runtime) createAndSavePR(ctx context.Context, goalID, patchID string) 
 	if err := rt.store.SavePRRecord(ctx, goalID, record); err != nil {
 		return fmt.Errorf("save pr record: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[orca] pr created: %s\n", record.PRURL)
+	rt.emit(ctx, UIEvent{Kind: EventKindPRCreated, GoalID: goalID, PatchID: patchID, Summary: "pr created: " + record.PRURL})
 	return nil
 }
 
@@ -913,6 +983,98 @@ func (rt *runtime) verifyPatch(ctx context.Context, patchID string, supplemental
 	})
 }
 
+func verifierUIEvent(goalID string, result *schema.VerifierResult) UIEvent {
+	if result == nil {
+		return UIEvent{
+			Kind:     EventKindVerifierFailed,
+			GoalID:   goalID,
+			Summary:  "verification failed",
+			Status:   "failed",
+			Severity: "error",
+		}
+	}
+	if verifierResultPassed(result) {
+		return UIEvent{
+			Kind:    EventKindVerifierPassed,
+			GoalID:  goalID,
+			PatchID: result.PatchID,
+			Summary: "patch " + result.PatchID + ": verification passed",
+			Status:  "passed",
+			Fields:  map[string]string{"recommended_action": string(result.RecommendedAction)},
+		}
+	}
+	return UIEvent{
+		Kind:     EventKindVerifierFailed,
+		GoalID:   goalID,
+		PatchID:  result.PatchID,
+		Summary:  "patch " + result.PatchID + ": verification failed",
+		Detail:   strings.Join(result.BlockingFailures, "; "),
+		Status:   "failed",
+		Severity: "error",
+		Fields:   map[string]string{"recommended_action": string(result.RecommendedAction)},
+	}
+}
+
+func verifierResultPassed(result *schema.VerifierResult) bool {
+	if result == nil {
+		return false
+	}
+	switch result.RecommendedAction {
+	case schema.ActionReject, schema.ActionRetry, schema.ActionSplit:
+		return false
+	}
+	if len(result.BlockingFailures) > 0 {
+		return false
+	}
+	for _, verdict := range result.ObligationResults {
+		if verdict.Verdict != schema.VerdictSatisfied && verdict.Verdict != schema.VerdictWaived {
+			return false
+		}
+	}
+	return true
+}
+
+func reconcileUIEvent(goalID, patchID string, result reconciler.ReconcileResult) UIEvent {
+	fields := map[string]string{
+		"patch_accepted": fmt.Sprintf("%t", result.PatchAccepted),
+		"merge_ready":    fmt.Sprintf("%t", result.MergeReady),
+	}
+	if result.DecisionID != "" {
+		fields["decision_id"] = result.DecisionID
+	}
+	if len(result.FollowUpObligationIDs) > 0 {
+		return UIEvent{
+			Kind:    EventKindReconcileFollowUp,
+			GoalID:  goalID,
+			PatchID: patchID,
+			Summary: fmt.Sprintf("patch %s: follow-up required (%d obligation(s))", patchID, len(result.FollowUpObligationIDs)),
+			Detail:  strings.Join(result.FollowUpObligationIDs, ", "),
+			Status:  "follow_up",
+			Fields:  fields,
+		}
+	}
+	if result.PatchAccepted {
+		return UIEvent{
+			Kind:    EventKindReconcileAccepted,
+			GoalID:  goalID,
+			PatchID: patchID,
+			Summary: "patch " + patchID + ": accepted",
+			Status:  "accepted",
+			Fields:  fields,
+		}
+	}
+	return UIEvent{
+		Kind:     EventKindReconcileBlocked,
+		GoalID:   goalID,
+		PatchID:  patchID,
+		Summary:  "patch " + patchID + ": blocked",
+		Detail:   result.BlockingReason,
+		Status:   "blocked",
+		Severity: "error",
+		Fields:   fields,
+	}
+}
+
 // collectWaivers presents a ReviewWaiver gate for each blocking obligation in
 // vr whose verifier verdict is VerdictFailed. Gate-level failures (static/test
 // gate summaries) that appear in BlockingFailures but not in ObligationResults
@@ -1054,6 +1216,14 @@ func autoInit(orcaDir string) (err error) {
 }
 
 func autoInitWithConfirmation(orcaDir string, in io.Reader, out io.Writer) error {
+	interactive := false
+	if f, ok := in.(*os.File); ok && isatty(f) {
+		interactive = true
+	}
+	return autoInitConfirm(orcaDir, in, out, interactive)
+}
+
+func autoInitConfirm(orcaDir string, in io.Reader, out io.Writer, interactive bool) error {
 	configPath := filepath.Join(orcaDir, "config.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		return nil
@@ -1061,10 +1231,6 @@ func autoInitWithConfirmation(orcaDir string, in io.Reader, out io.Writer) error
 	absOrcaDir, err := filepath.Abs(orcaDir)
 	if err != nil {
 		absOrcaDir = orcaDir
-	}
-	interactive := false
-	if f, ok := in.(*os.File); ok && isatty(f) {
-		interactive = true
 	}
 	if !interactive {
 		fmt.Fprintf(out, "Initializing .orca/ at %s\n", absOrcaDir)
@@ -1342,6 +1508,57 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// printStatusConcise writes a human-friendly status summary that hides raw
+// artifact IDs, budget numbers, and infrastructure configuration. For the full
+// operational dump use printStatus (exposed via orca status --raw).
+func (rt *runtime) printStatusConcise(ctx context.Context, out io.Writer) error {
+	goal, err := rt.store.LoadActiveGoal(ctx)
+	if err != nil {
+		return fmt.Errorf("orca status: load active goal: %w", err)
+	}
+	if goal == nil {
+		_, err := fmt.Fprintln(out, "No active goal.")
+		return err
+	}
+	obligations, err := rt.store.LoadOpenObligations(ctx, goal.GoalID)
+	if err != nil {
+		return fmt.Errorf("orca status: load open obligations: %w", err)
+	}
+	capsules, err := rt.activeCapsulesForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	latestVerifier, err := rt.latestVerifierResultForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	humanDecisions, err := rt.blockingHumanDecisions(ctx, goal, capsules, latestVerifier, obligations)
+	if err != nil {
+		return err
+	}
+	readiness, err := rt.mergeReadiness(ctx, latestVerifier, obligations, humanDecisions)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Goal:    %s\n", goal.OriginalIntent)
+	fmt.Fprintf(out, "Status:  %s\n", goal.Status)
+	fmt.Fprintf(out, "Merge:   %s\n", readiness)
+	if len(obligations) > 0 {
+		fmt.Fprintf(out, "Open:    %d obligation(s)\n", len(obligations))
+	}
+	if len(capsules) > 0 {
+		fmt.Fprintf(out, "Active:  %d capsule(s) running\n", len(capsules))
+	}
+	if len(humanDecisions) > 0 {
+		fmt.Fprintln(out, "Waiting:")
+		for _, d := range humanDecisions {
+			fmt.Fprintf(out, "  %s\n", d)
+		}
+	}
+	return nil
+}
+
 func writeAdvancedStatus(out io.Writer, adv config.AdvancedConfig, latest *schema.VerifierResult) {
 	status := "disabled"
 	if adv.Enabled {
@@ -1531,7 +1748,7 @@ func (rt *runtime) applyPatchToWorkDir(ctx context.Context, patchID string) erro
 	if err != nil {
 		return fmt.Errorf("git apply in %s: %w\n%s", projectRoot, err, strings.TrimSpace(string(out)))
 	}
-	fmt.Fprintf(os.Stderr, "[orca] patch %s: applied to working directory\n", patchID)
+	rt.emit(ctx, UIEvent{Kind: EventKindMergeApplied, PatchID: patchID, Summary: "patch " + patchID + ": applied to working directory"})
 	return nil
 }
 

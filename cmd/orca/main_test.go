@@ -1970,8 +1970,8 @@ func TestIsattyReturnsFalseForRegularFile(t *testing.T) {
 
 func TestFindProjectRoot(t *testing.T) {
 	tests := []struct {
-		name      string
-		setupFn   func(t *testing.T) (startDir, wantRoot string)
+		name    string
+		setupFn func(t *testing.T) (startDir, wantRoot string)
 	}{
 		{
 			name: "git_root_found",
@@ -2024,6 +2024,7 @@ func TestFindProjectRoot(t *testing.T) {
 func TestAutoInitWithConfirmation(t *testing.T) {
 	tests := []struct {
 		name        string
+		interactive bool
 		setup       func(t *testing.T, orcaDir string)
 		input       string
 		wantErr     bool
@@ -2045,37 +2046,72 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 			wantErr:    false,
 			wantConfig: true,
 		},
+		// Non-TTY path: proceeds regardless of reader content.
 		{
-			// Non-TTY always auto-proceeds regardless of reader content.
 			name:       "non_tty_y_input_proceeds",
-			setup:      nil,
 			input:      "y\n",
 			wantErr:    false,
 			wantConfig: true,
 		},
 		{
-			// Non-TTY does not read from in, so "n" does not abort.
+			// "n" does not abort in non-TTY mode; input is never read.
 			name:       "non_tty_n_input_proceeds",
-			setup:      nil,
 			input:      "n\n",
 			wantErr:    false,
 			wantConfig: true,
 		},
 		{
-			// Non-TTY does not read from in, so empty input does not abort.
 			name:       "non_tty_empty_input_proceeds",
-			setup:      nil,
 			input:      "\n",
 			wantErr:    false,
 			wantConfig: true,
 		},
 		{
-			// Non-TTY with EOF (like < /dev/null) also proceeds.
+			// EOF (e.g. < /dev/null) also proceeds in non-TTY mode.
 			name:       "non_tty_eof_proceeds",
-			setup:      nil,
 			input:      "",
 			wantErr:    false,
 			wantConfig: true,
+		},
+		// TTY (interactive) path: input is read and evaluated.
+		{
+			name:        "confirmed_y",
+			interactive: true,
+			input:       "y\n",
+			wantErr:     false,
+			wantConfig:  true,
+		},
+		{
+			name:        "confirmed_Y",
+			interactive: true,
+			input:       "Y\n",
+			wantErr:     false,
+			wantConfig:  true,
+		},
+		{
+			name:        "denied_n",
+			interactive: true,
+			input:       "n\n",
+			wantErr:     true,
+			errContains: "aborted",
+			wantConfig:  false,
+		},
+		{
+			name:        "denied_empty",
+			interactive: true,
+			input:       "\n",
+			wantErr:     true,
+			errContains: "aborted",
+			wantConfig:  false,
+		},
+		{
+			// EOF with no input also aborts in interactive mode.
+			name:        "denied_eof",
+			interactive: true,
+			input:       "",
+			wantErr:     true,
+			errContains: "aborted",
+			wantConfig:  false,
 		},
 	}
 	for _, tt := range tests {
@@ -2086,17 +2122,17 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 				tt.setup(t, orcaDir)
 			}
 			var out strings.Builder
-			err := autoInitWithConfirmation(orcaDir, strings.NewReader(tt.input), &out)
+			err := autoInitConfirm(orcaDir, strings.NewReader(tt.input), &out, tt.interactive)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("autoInitWithConfirmation = nil, want error containing %q", tt.errContains)
+					t.Fatalf("autoInitConfirm = nil, want error containing %q", tt.errContains)
 				}
 				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.errContains)
 				}
 			} else {
 				if err != nil {
-					t.Fatalf("autoInitWithConfirmation = %v, want nil", err)
+					t.Fatalf("autoInitConfirm = %v, want nil", err)
 				}
 			}
 			configPath := filepath.Join(orcaDir, "config.yaml")
