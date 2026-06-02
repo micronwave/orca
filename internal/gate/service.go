@@ -111,8 +111,6 @@ func (s *Gatekeeper) startReader() {
 		}
 	}
 	go func() {
-		fmt.Fprintf(os.Stderr, "gate: stdin reader started\n")
-		defer fmt.Fprintf(os.Stderr, "gate: stdin reader stopped\n")
 		for {
 			// Snapshot the epoch BEFORE blocking on ReadString. If the timer fires
 			// while the read is in progress, the epoch will increment after this
@@ -127,12 +125,10 @@ func (s *Gatekeeper) startReader() {
 			line, err := r.ReadString('\n')
 			if err == io.EOF && line == "" {
 				readErr := fmt.Errorf("gate: stdin closed unexpectedly: %w", io.ErrUnexpectedEOF)
-				fmt.Fprintf(os.Stderr, "gate: stdin reader error: %v\n", readErr)
 				send(lineResult{err: readErr, epoch: epoch})
 				return
 			}
 			if err != nil && err != io.EOF {
-				fmt.Fprintf(os.Stderr, "gate: stdin reader error: %v\n", err)
 				send(lineResult{err: err, epoch: epoch})
 				return
 			}
@@ -198,7 +194,7 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 		return false, false, "", err
 	}
 	if reviewWindow <= 0 {
-		if _, err := fmt.Fprint(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject.]\n"); err != nil {
+		if _, err := fmt.Fprint(s.out, "\n[Actions: press ENTER to approve · type 'reject' to reject · type 'cancel' to abort]\n"); err != nil {
 			return false, false, "", err
 		}
 		for {
@@ -269,11 +265,12 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 
 // parseApproval interprets a trimmed input line as approve or reject.
 // Rejections: text starting with "reject" (handles "reject because X"),
-// or the tokens "no" / "n". Everything else approves, with the text as notes.
+// the token "cancel" (abort), or the tokens "no" / "n". Everything else
+// approves, with the text as notes.
 func parseApproval(line string) (approved bool, proceeded bool, notes string) {
 	text := strings.TrimSpace(line)
 	lower := strings.ToLower(text)
-	if strings.HasPrefix(lower, "reject") || lower == "no" || lower == "n" {
+	if strings.HasPrefix(lower, "reject") || lower == "cancel" || lower == "no" || lower == "n" {
 		return false, false, text
 	}
 	return true, false, text
@@ -319,14 +316,45 @@ func renderProjection(p *schema.HumanSummaryProjection) string {
 	if p.Topology.Rationale != "" {
 		fmt.Fprintf(&b, "Rationale: %s\n", p.Topology.Rationale)
 	}
+	// Why approval is required — derived from the topology chosen.
+	fmt.Fprintf(&b, "\nWhy approval is required:\n")
+	switch p.Topology.Selected {
+	case schema.TopologyHumanGated:
+		fmt.Fprintf(&b, "  This goal is configured as human-gated. Explicit approval is required before any agent runs.\n")
+	case schema.TopologyImplementerReviewer:
+		fmt.Fprintf(&b, "  One or more obligations carry medium or high risk. Approval is required before the implementer agent runs.\n")
+	case schema.TopologySingle:
+		fmt.Fprintf(&b, "  This goal uses the single-agent topology with an active review window. You may approve or wait for auto-proceed.\n")
+	default:
+		fmt.Fprintf(&b, "  A gate condition requires your review before execution continues.\n")
+	}
 	fmt.Fprintf(&b, "\nObligations:\n")
 	for _, obligation := range p.ObligationsAddressed {
-		fmt.Fprintf(&b, "- %s (%s): %s\n", obligation.ObligationID, obligation.RiskLevel, obligation.Description)
+		fmt.Fprintf(&b, "  - [%s] %s: %s\n", obligation.RiskLevel, obligation.ObligationID, obligation.Description)
+	}
+	// Verifier gates that will run after the capsule completes.
+	fmt.Fprintf(&b, "\nVerifier gates:\n")
+	if len(p.EvidencePlan.VerifierGates) > 0 {
+		for _, g := range p.EvidencePlan.VerifierGates {
+			fmt.Fprintf(&b, "  - %s\n", g)
+		}
+	} else {
+		fmt.Fprintf(&b, "  (none configured)\n")
 	}
 	fmt.Fprintf(&b, "\nExpected files:\n")
 	writeList(&b, "read", p.ExpectedFileScope.ToRead)
 	writeList(&b, "write", p.ExpectedFileScope.ToWrite)
 	writeList(&b, "create", p.ExpectedFileScope.ToCreate)
+	// Budget limits declared for this capsule.
+	if p.Budget.MaxTokens > 0 || p.Budget.MaxWallTimeSeconds > 0 {
+		fmt.Fprintf(&b, "\nBudget limits:\n")
+		if p.Budget.MaxTokens > 0 {
+			fmt.Fprintf(&b, "  Max tokens:    %d\n", p.Budget.MaxTokens)
+		}
+		if p.Budget.MaxWallTimeSeconds > 0 {
+			fmt.Fprintf(&b, "  Max wall time: %ds\n", p.Budget.MaxWallTimeSeconds)
+		}
+	}
 	if len(p.EvidencePlan.AdvancedChecks) > 0 {
 		fmt.Fprintln(&b)
 		for _, check := range p.EvidencePlan.AdvancedChecks {
@@ -336,7 +364,13 @@ func renderProjection(p *schema.HumanSummaryProjection) string {
 	if len(p.PreExecutionRisks) > 0 {
 		fmt.Fprintf(&b, "\nRisks:\n")
 		for _, risk := range p.PreExecutionRisks {
-			fmt.Fprintf(&b, "- %s: %s\n", risk.Source, risk.Description)
+			fmt.Fprintf(&b, "  - %s: %s\n", risk.Source, risk.Description)
+		}
+	}
+	if len(p.RequiredApprovals) > 0 {
+		fmt.Fprintf(&b, "\nRequired approvals:\n")
+		for _, a := range p.RequiredApprovals {
+			fmt.Fprintf(&b, "  - %s\n", a)
 		}
 	}
 	return b.String()

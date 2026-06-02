@@ -406,3 +406,115 @@ func TestReviewMerge_RendersPatches(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewProjection_RendersHumanReviewModel verifies that ReviewProjection
+// output includes all fields required by the Phase 3 human review model:
+// topology rationale, planned agent approach, projected write scope,
+// obligations with risks, verifier gates, budget limits, why approval is
+// required, and action options.
+func TestReviewProjection_RendersHumanReviewModel(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	if err := e.st.SaveHumanSummaryProjection(e.ctx, &schema.HumanSummaryProjection{
+		ContextProjection: schema.ContextProjection{
+			ContextProjectionID: "CTX-HRM",
+			SourceArtifactIDs:   []string{"CAP-1"},
+			CreatedAt:           time.Now().UTC(),
+		},
+		GoalPlain:              "Add unit tests for the auth middleware",
+		ImplementationApproach: "Add table-driven tests covering the rounding edge case",
+		Topology: schema.TopologyDecision{
+			Selected:  schema.TopologyImplementerReviewer,
+			Rationale: "medium-risk obligation requires dual-agent review",
+		},
+		ObligationsAddressed: []schema.ObligationRef{{
+			ObligationID: "OB-1",
+			Description:  "prove the middleware defect is fixed",
+			RiskLevel:    schema.RiskMedium,
+		}},
+		ExpectedFileScope: schema.ExpectedFileScope{
+			ToRead:   []string{"internal/auth/middleware.go"},
+			ToWrite:  []string{"internal/auth/middleware_test.go"},
+			ToCreate: []string{},
+		},
+		EvidencePlan: schema.EvidencePlan{
+			VerifierGates: []string{"go test ./internal/auth/...", "go vet ./..."},
+		},
+		Budget: schema.ProjectionBudget{
+			MaxTokens:          50000,
+			MaxWallTimeSeconds: 600,
+		},
+		RequiredApprovals: []string{"projection_review: implementer capsule"},
+		PreExecutionRisks: []schema.PreExecutionRisk{{
+			Source:      "obligation_risk",
+			Description: "medium-risk change to production auth path",
+		}},
+	}); err != nil {
+		t.Fatalf("SaveHumanSummaryProjection: %v", err)
+	}
+
+	var out bytes.Buffer
+	g := gate.NewWithIO(e.st, strings.NewReader("\n"), &out)
+	decision, err := g.ReviewProjection(e.ctx, "CAP-1", 0)
+	if err != nil {
+		t.Fatalf("ReviewProjection: %v", err)
+	}
+	if !decision.Approved {
+		t.Fatalf("decision = %+v, want approved", decision)
+	}
+
+	rendered := out.String()
+	wants := []string{
+		// Topology rationale.
+		"medium-risk obligation requires dual-agent review",
+		// Why approval is required (derived from topology).
+		"Why approval is required",
+		"medium or high risk",
+		// Planned agent approach.
+		"table-driven tests",
+		// Projected write scope.
+		"middleware_test.go",
+		// Obligations with risk.
+		"OB-1",
+		"prove the middleware defect",
+		// Verifier gates.
+		"Verifier gates",
+		"go test ./internal/auth",
+		"go vet ./...",
+		// Budget limits.
+		"Budget limits",
+		"50000",
+		"600",
+		// Required approvals.
+		"projection_review",
+		// Action options (from the gate prompt).
+		"approve",
+		"reject",
+		"cancel",
+	}
+	for _, want := range wants {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("human review model missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestReviewProjection_Cancel_RejectsGate verifies that typing "cancel" in the
+// gate prompt is treated as a rejection (same as "reject").
+func TestReviewProjection_Cancel_RejectsGate(t *testing.T) {
+	e := newGateEnv(t)
+	e.seedCore(t)
+	e.seedProjection(t)
+	var out bytes.Buffer
+	g := gate.NewWithIO(e.st, strings.NewReader("cancel\n"), &out)
+	decision, err := g.ReviewProjection(e.ctx, "CAP-1", 0)
+	if err != nil {
+		t.Fatalf("ReviewProjection: %v", err)
+	}
+	if decision.Approved {
+		t.Fatalf("cancel input should reject the gate (Approved=true, want false)")
+	}
+	if decision.Notes != "cancel" {
+		t.Fatalf("Notes = %q, want cancel", decision.Notes)
+	}
+}

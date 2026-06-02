@@ -119,7 +119,7 @@ func runGoal(args []string) (err error) {
 	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	noLearning := fs.Bool("no-learning", false, "disable adaptive reuse (learning layer)")
 	fromIssue := fs.Int("from-issue", 0, "GitHub issue number to use as goal input")
-	flagPlain := fs.Bool("plain", false, "use plain text progress output (default)")
+	flagPlain := fs.Bool("plain", false, "use plain text output without colors or live updates")
 	flagVerbose := fs.Bool("verbose", false, "use plain text progress output with extra detail")
 	flagJSON := fs.Bool("json", false, "emit lifecycle events as newline-delimited JSON to stderr")
 	if err := fs.Parse(args); err != nil {
@@ -155,10 +155,15 @@ func runGoal(args []string) (err error) {
 		rt.notifier = newJSONNotifier(os.Stderr)
 	case *flagVerbose:
 		rt.notifier = newPlainNotifier(os.Stderr, true)
-	default:
-		// --plain is the default; preserves the previous [orca] stderr lines.
-		_ = flagPlain
+	case *flagPlain:
 		rt.notifier = newPlainNotifier(os.Stderr, false)
+	default:
+		// Auto-detect: TTY gets the live ANSI renderer; non-TTY gets plain lines.
+		if isatty(os.Stderr) {
+			rt.notifier = newLiveRenderer(os.Stderr)
+		} else {
+			rt.notifier = newPlainNotifier(os.Stderr, false)
+		}
 	}
 	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
 		return err
@@ -1263,7 +1268,11 @@ func runInteractive(orcaDir string) error {
 		return err
 	}
 	defer closeFn()
-	rt.notifier = newPlainNotifier(os.Stderr, false)
+	if isatty(os.Stderr) {
+		rt.notifier = newLiveRenderer(os.Stderr)
+	} else {
+		rt.notifier = newPlainNotifier(os.Stderr, false)
+	}
 	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
 		return err
 	}
