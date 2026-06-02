@@ -134,7 +134,8 @@ func TestCompileExecutorLabelsReusedPriorEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileExecutor: %v", err)
 	}
-	if !projectionIncludes(projection, "EV-proj-reused(type=test_result exit=0 reused=EV-proj-source)") {
+	// Phase C: evidence labels now include cmd= provenance before reused=.
+	if !projectionIncludes(projection, "EV-proj-reused(type=test_result exit=0 cmd=go test ./internal/projector reused=EV-proj-source)") {
 		t.Fatalf("projection missing reused evidence label: %+v", projection.IncludedSections)
 	}
 }
@@ -937,5 +938,368 @@ func seedGoalScenario(t *testing.T, env projectorEnv, goalID, conditionID, oblig
 		Status:           schema.ObligationOpen,
 	}); err != nil {
 		t.Fatalf("SaveObligation: %v", err)
+	}
+}
+
+// ── Phase C §7: projection compaction, hashing, and reuse tests ──────────────
+
+// TestProjectionHash_sameGraphProducesSameHash verifies that
+// computeSourceHash is deterministic and order-independent, and that
+// computeContentHash is stable for identical content.
+func TestProjectionHash_sameGraphProducesSameHash(t *testing.T) {
+	t.Parallel()
+
+	ids1 := []string{"CAP-h1", "OB-h1", "GC-h1", "EV-h1"}
+	ids2 := []string{"OB-h1", "EV-h1", "CAP-h1", "GC-h1"} // same IDs, different order
+	freshness := "SNAP-h1"
+
+	sourceSections := []string{"obligations: OB-1: fix bug", "scope: allowed=internal/foo"}
+	h1 := computeSourceHash(ids1, freshness, sourceSections)
+	h2 := computeSourceHash(ids2, freshness, sourceSections)
+	if h1 != h2 {
+		t.Fatalf("computeSourceHash: same IDs in different order should produce same hash; h1=%s h2=%s", h1, h2)
+	}
+	if h1 == "" {
+		t.Fatal("computeSourceHash: returned empty hash")
+	}
+
+	sections := []string{"obligations: OB-1: fix bug", "scope: allowed=internal/foo"}
+	c1 := computeContentHash(sections)
+	c2 := computeContentHash(sections)
+	if c1 != c2 {
+		t.Fatalf("computeContentHash: identical content should produce identical hash; c1=%s c2=%s", c1, c2)
+	}
+	if c1 == "" {
+		t.Fatal("computeContentHash: returned empty hash")
+	}
+}
+
+// TestProjectionHash_freshSnapshotInvalidatesReuse verifies that changing the
+// FreshnessBase (new snapshot) produces a different SourceHash, preventing stale reuse.
+func TestProjectionHash_freshSnapshotInvalidatesReuse(t *testing.T) {
+	t.Parallel()
+
+	ids := []string{"CAP-snap", "OB-snap"}
+
+	sourceSections := []string{"obligations: OB-1: fix bug"}
+	h1 := computeSourceHash(ids, "SNAP-old", sourceSections)
+	h2 := computeSourceHash(ids, "SNAP-new", sourceSections)
+	if h1 == h2 {
+		t.Fatalf("different snapshots must produce different source hashes; both = %s", h1)
+	}
+
+	// Empty freshness base produces a distinct hash from a named snapshot.
+	h3 := computeSourceHash(ids, "", sourceSections)
+	if h3 == h1 || h3 == h2 {
+		t.Fatalf("empty freshness base should produce a hash distinct from named snapshots")
+	}
+}
+
+// TestProjectionHash_evidenceWithoutCommandNotPreservedAsProof verifies that
+// evidence artifacts lacking a Command field are labeled [no-provenance] in
+// the projection, and that evidence with a command includes the cmd= field.
+func TestProjectionHash_evidenceWithoutCommandNotPreservedAsProof(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-prov"
+		conditionID = "GC-prov"
+		obligation  = "OB-prov"
+		capsuleID   = "CAP-prov"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	// Evidence with a command — has provenance.
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-prov-cmd",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./internal/projector",
+		ExitCode:   0,
+		Summary:    "tests pass",
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence with-command: %v", err)
+	}
+	// Evidence without a command — no provenance.
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-prov-noprov",
+		Type:       schema.EvidenceTestResult,
+		Source:     "external",
+		Command:    "", // no command
+		ExitCode:   0,
+		Summary:    "externally verified",
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence no-command: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	proj, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+
+	if !projectionIncludes(proj, "EV-prov-cmd") {
+		t.Fatalf("projection missing evidence with command: %+v", proj.IncludedSections)
+	}
+	if !projectionIncludes(proj, "cmd=go test ./internal/projector") {
+		t.Fatalf("projection missing cmd= provenance label: %+v", proj.IncludedSections)
+	}
+	if !projectionIncludes(proj, "EV-prov-noprov") {
+		t.Fatalf("projection missing no-provenance evidence ID: %+v", proj.IncludedSections)
+	}
+	if !projectionIncludes(proj, "[no-provenance]") {
+		t.Fatalf("projection must label evidence with empty command as [no-provenance]: %+v", proj.IncludedSections)
+	}
+}
+
+// TestProjectionBudget_omissionsAreDeterministic verifies that calling
+// enforceProjectionBudget with the same sections twice produces identical output.
+func TestProjectionBudget_omissionsAreDeterministic(t *testing.T) {
+	t.Parallel()
+
+	sections := []projectionSection{
+		{key: "required", text: "this section is always kept"},
+		{key: "optional_a", text: strings.Repeat("long removable content a ", 20), removable: true},
+		{key: "optional_b", text: strings.Repeat("long removable content b ", 20), removable: true},
+	}
+
+	// Very tight budget to force omissions.
+	budget := 50
+
+	included1, omitted1 := enforceProjectionBudget(sections, budget)
+	included2, omitted2 := enforceProjectionBudget(sections, budget)
+
+	if strings.Join(included1, "|") != strings.Join(included2, "|") {
+		t.Fatalf("enforceProjectionBudget: included sections differ across identical calls:\n  run1: %v\n  run2: %v", included1, included2)
+	}
+	omittedKeys1 := make([]string, len(omitted1))
+	omittedKeys2 := make([]string, len(omitted2))
+	for i, o := range omitted1 {
+		omittedKeys1[i] = o.key + ":" + o.reason
+	}
+	for i, o := range omitted2 {
+		omittedKeys2[i] = o.key + ":" + o.reason
+	}
+	if strings.Join(omittedKeys1, "|") != strings.Join(omittedKeys2, "|") {
+		t.Fatalf("enforceProjectionBudget: omitted sections differ across identical calls:\n  run1: %v\n  run2: %v", omittedKeys1, omittedKeys2)
+	}
+	if len(omitted1) == 0 {
+		t.Fatal("expected at least one omission under tight budget, got none")
+	}
+	for _, o := range omitted1 {
+		if o.reason == "" {
+			t.Errorf("omitted section %q has empty reason", o.key)
+		}
+	}
+}
+
+// TestProjectionBudget_humanSummaryAndExecutorAreDistinct verifies that
+// CompileHumanSummary and CompileExecutor produce separate artifacts that
+// are never merged. orca.md §5.4.
+func TestProjectionBudget_humanSummaryAndExecutorAreDistinct(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-two-docs"
+		conditionID = "GC-two-docs"
+		obligation  = "OB-two-docs"
+		capsuleID   = "CAP-two-docs"
+		decisionID  = "DEC-two-docs"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID: decisionID,
+		Context:    "topology_selection",
+		Decision:   string(schema.TopologySingle),
+		Rationale:  "low risk single obligation",
+		MadeBy:     "system",
+		RelatedIDs: []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:          capsuleID,
+		ObligationIDs:      []string{obligation},
+		AllowedPaths:       []string{"internal/projector"},
+		Budget:             schema.CapsuleBudget{MaxTokens: 32000, MaxWallTimeSeconds: 60},
+		State:              schema.CapsuleStatePending,
+		TopologyDecisionID: decisionID,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	executorProj, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	humanProj, err := compiler.CompileHumanSummary(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileHumanSummary: %v", err)
+	}
+
+	// Must be separate documents with distinct IDs.
+	if executorProj.ContextProjectionID == humanProj.ContextProjectionID {
+		t.Fatalf("executor and human summary share the same projection ID %s — they must be separate artifacts", executorProj.ContextProjectionID)
+	}
+	// The human summary must have a GoalPlain field; the executor projection has none.
+	if humanProj.GoalPlain == "" {
+		t.Fatal("HumanSummaryProjection.GoalPlain is empty")
+	}
+	// Roles must differ.
+	if executorProj.Role == humanProj.Role {
+		t.Fatalf("executor and human summary have the same Role %s — they must be distinct", executorProj.Role)
+	}
+	if executorProj.Role != schema.ProjectionRoleExecutor {
+		t.Fatalf("executor projection Role = %s, want executor", executorProj.Role)
+	}
+	if humanProj.Role != schema.ProjectionRoleHumanSummary {
+		t.Fatalf("human summary projection Role = %s, want human_summary", humanProj.Role)
+	}
+
+	// Phase C: executor projection must carry SourceHash and ContentHash.
+	if executorProj.SourceHash == "" {
+		t.Fatal("executor projection SourceHash is empty — must be set after Phase C")
+	}
+	if executorProj.ContentHash == "" {
+		t.Fatal("executor projection ContentHash is empty — must be set after Phase C")
+	}
+	if humanProj.SourceHash == "" {
+		t.Fatal("human summary projection SourceHash is empty — must be set after Phase C")
+	}
+	if humanProj.ContentHash == "" {
+		t.Fatal("human summary projection ContentHash is empty — must be set after Phase C")
+	}
+}
+
+// TestProjectionReuse_sameSourceHashReturnsCachedProjection verifies that
+// compiling a projection for the same capsule twice (with no snapshot change)
+// returns the original projection on the second call and records a reuse entry.
+func TestProjectionReuse_sameSourceHashReturnsCachedProjection(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-reuse-detect"
+		conditionID = "GC-reuse-detect"
+		obligation  = "OB-reuse-detect"
+		capsuleID   = "CAP-reuse-detect"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+
+	// First compilation: creates a new projection.
+	p1, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("first CompileExecutor: %v", err)
+	}
+	if p1.SourceHash == "" {
+		t.Fatal("first projection SourceHash is empty")
+	}
+
+	// Second compilation with the same capsule and no snapshot change:
+	// the source hash is identical, so the projector should return p1.
+	p2, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("second CompileExecutor: %v", err)
+	}
+	if p2.ContextProjectionID != p1.ContextProjectionID {
+		t.Fatalf("second compilation returned different projection %s, want reuse of %s",
+			p2.ContextProjectionID, p1.ContextProjectionID)
+	}
+
+	// A reuse record must have been saved.
+	reuseRecords, err := env.st.LoadProjectionReuseRecordsForGoal(env.ctx, goalID)
+	if err != nil {
+		t.Fatalf("LoadProjectionReuseRecordsForGoal: %v", err)
+	}
+	if len(reuseRecords) == 0 {
+		t.Fatal("no projection reuse records saved — expected one after second CompileExecutor call")
+	}
+	r := reuseRecords[0]
+	if r.OriginalProjectionID != p1.ContextProjectionID {
+		t.Fatalf("reuse record OriginalProjectionID = %s, want %s", r.OriginalProjectionID, p1.ContextProjectionID)
+	}
+	if r.SourceHash != p1.SourceHash {
+		t.Fatalf("reuse record SourceHash = %s, want %s", r.SourceHash, p1.SourceHash)
+	}
+}
+
+func TestProjectionReuse_changedRenderedSourceDoesNotReuseStaleProjection(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-reuse-source-change"
+		conditionID = "GC-reuse-source-change"
+		obligation  = "OB-reuse-source-change"
+		capsuleID   = "CAP-reuse-source-change"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	p1, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("first CompileExecutor: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-reuse-source-change",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./internal/projector",
+		ExitCode:   0,
+		Summary:    "tests pass",
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	p2, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("second CompileExecutor: %v", err)
+	}
+	if p2.ContextProjectionID == p1.ContextProjectionID {
+		t.Fatalf("changed source context reused stale projection %s", p1.ContextProjectionID)
+	}
+	if p2.SourceHash == p1.SourceHash {
+		t.Fatalf("SourceHash did not change after rendered source context changed")
+	}
+	if !projectionIncludes(p2, "EV-reuse-source-change") {
+		t.Fatalf("new projection missing newly added evidence: %+v", p2.IncludedSections)
 	}
 }

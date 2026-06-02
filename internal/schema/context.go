@@ -12,6 +12,13 @@ const (
 	ProjectionRoleTester       ProjectionRole = "tester"
 )
 
+// OmittedSection records a section removed during budget enforcement together
+// with the reason it was omitted. Phase C §7.
+type OmittedSection struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"` // "budget_exceeded" | "content_truncated" | "empty"
+}
+
 // ContextProjection is the base set of fields shared by all projection types.
 // A projection is a deterministic, role-specific briefing compiled from the
 // artifact graph — agents do not receive raw transcripts by default. orca.md §5.4.
@@ -25,6 +32,40 @@ type ContextProjection struct {
 	// FreshnessBase is the state_snapshot_id this projection was compiled from.
 	FreshnessBase string    `json:"freshness_base"`
 	CreatedAt     time.Time `json:"created_at"`
+
+	// Phase C §7: compaction metrics and stable hashes.
+
+	// SourceHash is SHA-256 of sorted(SourceArtifactIDs) + "|" + FreshnessBase.
+	// Stable across identical artifact graphs; changes when the snapshot changes.
+	SourceHash string `json:"source_hash,omitempty"`
+	// ContentHash is SHA-256 of the joined included section texts.
+	// Two projections with the same SourceHash must have the same ContentHash.
+	ContentHash string `json:"content_hash,omitempty"`
+	// TokensBefore is the estimated token count before budget enforcement.
+	TokensBefore int `json:"tokens_before,omitempty"`
+	// TokensAfter is the estimated token count after budget enforcement.
+	TokensAfter int `json:"tokens_after,omitempty"`
+	// OmittedWithReasons carries the omitted sections with structured reasons,
+	// complementing the legacy OmittedSections string slice.
+	OmittedWithReasons []OmittedSection `json:"omitted_with_reasons,omitempty"`
+	// ReuseKey is a stable cache key: "{role}|{sourceHash}".
+	// Identical ReuseKey means the projection content is reproducible from cache.
+	ReuseKey string `json:"reuse_key,omitempty"`
+}
+
+// ProjectionReuseRecord is saved when a previously compiled projection is
+// reused instead of recomputed. Visible in status --raw. Phase C §7.
+type ProjectionReuseRecord struct {
+	ReuseID              string         `json:"reuse_id"`
+	CapsuleID            string         `json:"capsule_id"`
+	GoalID               string         `json:"goal_id"`
+	Role                 ProjectionRole `json:"role"`
+	SourceHash           string         `json:"source_hash"`
+	OriginalProjectionID string         `json:"original_projection_id"`
+	// TokensSaved is the TokensAfter of the original projection — tokens that
+	// were not spent because the projection was reused.
+	TokensSaved int       `json:"tokens_saved"`
+	RecordedAt  time.Time `json:"recorded_at"`
 }
 
 // ConditionRef is a lightweight reference to a goal condition used inside

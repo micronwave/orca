@@ -2,6 +2,8 @@ package projector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -99,22 +101,112 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 		{key: "failure_fingerprints", text: "failure fingerprints: " + summarizeFailures(failures), removable: true},
 	}
 
+	sourceHash := computeSourceHash(sourceArtifactIDs, freshnessBase, sectionTexts(filterNonEmpty(sections)))
+	reuseKey := string(role) + "|" + sourceHash
 	tokenBudget := capsule.Budget.MaxTokens / 2
-	included, omitted := enforceProjectionBudget(sections, tokenBudget)
+	included, omittedRaw := enforceProjectionBudget(sections, tokenBudget)
+	contentHash := computeContentHash(included)
+
+	// Reuse detection: if the rendered source context is identical for this role,
+	// record reuse and return the stored projection instead of creating a duplicate.
+	if existing, lookupErr := s.store.LoadProjectionBySourceHashAndRole(ctx, role, sourceHash); lookupErr == nil && existing.ContentHash == contentHash {
+		reuseRecord := &schema.ProjectionReuseRecord{
+			ReuseID:              idgen.New("REUSE"),
+			CapsuleID:            capsuleID,
+			GoalID:               goal.GoalID,
+			Role:                 role,
+			SourceHash:           sourceHash,
+			OriginalProjectionID: existing.ContextProjectionID,
+			TokensSaved:          existing.TokensAfter,
+			RecordedAt:           time.Now().UTC(),
+		}
+		// Best-effort: a failed reuse-record save must not block returning the projection.
+		_ = s.store.SaveProjectionReuseRecord(ctx, reuseRecord)
+		return existing, nil
+	}
+
+	tokensBefore := projectionBytes(filterNonEmpty(sections))
+	tokensAfter := sumLengths(included)
+
+	// Build both legacy string slice and structured slice for OmittedWithReasons.
+	omittedKeys := make([]string, 0, len(omittedRaw))
+	omittedWithReasons := make([]schema.OmittedSection, 0, len(omittedRaw))
+	for _, o := range omittedRaw {
+		omittedKeys = append(omittedKeys, o.key)
+		omittedWithReasons = append(omittedWithReasons, schema.OmittedSection{Key: o.key, Reason: o.reason})
+	}
+
 	projection := &schema.ContextProjection{
 		ContextProjectionID: idgen.New("CTX"),
 		Role:                role,
 		SourceArtifactIDs:   sourceArtifactIDs,
 		IncludedSections:    included,
-		OmittedSections:     omitted,
+		OmittedSections:     omittedKeys,
 		TokenBudget:         tokenBudget,
 		FreshnessBase:       freshnessBase,
 		CreatedAt:           time.Now().UTC(),
+		SourceHash:          sourceHash,
+		ContentHash:         contentHash,
+		TokensBefore:        tokensBefore,
+		TokensAfter:         tokensAfter,
+		OmittedWithReasons:  omittedWithReasons,
+		ReuseKey:            reuseKey,
 	}
 	if err := s.store.SaveProjection(ctx, projection); err != nil {
 		return nil, fmt.Errorf("projector: save %s projection %s: %w", role, projection.ContextProjectionID, err)
 	}
 	return projection, nil
+}
+
+// omittedSectionResult carries an omitted section key and the reason it was removed.
+type omittedSectionResult struct {
+	key    string
+	reason string
+}
+
+// computeSourceHash returns a stable SHA-256 hex digest of the projection source
+// state: sorted source IDs, freshness base, and the rendered pre-budget source
+// sections. Including rendered source text prevents stale reuse when an artifact
+// is updated in place without changing its ID.
+func computeSourceHash(sourceArtifactIDs []string, freshnessBase string, sourceSections []string) string {
+	sorted := make([]string, len(sourceArtifactIDs))
+	copy(sorted, sourceArtifactIDs)
+	sort.Strings(sorted)
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s|%s", strings.Join(sorted, "|"), freshnessBase)
+	for _, section := range sourceSections {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(section))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// computeContentHash returns a stable SHA-256 hex digest of the included
+// section texts joined with newlines. Identical content → identical hash.
+func computeContentHash(sections []string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(strings.Join(sections, "\n")))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// filterNonEmpty returns only sections with non-empty text.
+func filterNonEmpty(sections []projectionSection) []projectionSection {
+	out := make([]projectionSection, 0, len(sections))
+	for _, s := range sections {
+		if strings.TrimSpace(s.text) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// sumLengths returns the total byte length of a slice of strings.
+func sumLengths(sections []string) int {
+	total := 0
+	for _, s := range sections {
+		total += len(s)
+	}
+	return total
 }
 
 func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error) {
@@ -226,10 +318,47 @@ func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*
 		},
 		RequiredApprovals: requiredApprovals(topology, obligations),
 	}
+	humanSections := humanSummaryContentSections(summary)
+	summary.SourceHash = computeSourceHash(sourceArtifactIDs, freshnessBase, humanSections)
+	summary.ContentHash = computeContentHash(humanSections)
+	summary.TokensBefore = sumLengths(humanSections)
+	summary.TokensAfter = summary.TokensBefore
+	summary.ReuseKey = string(schema.ProjectionRoleHumanSummary) + "|" + summary.SourceHash
 	if err := s.store.SaveHumanSummaryProjection(ctx, summary); err != nil {
 		return nil, fmt.Errorf("projector: save human summary projection %s: %w", summary.ContextProjectionID, err)
 	}
 	return summary, nil
+}
+
+func humanSummaryContentSections(summary *schema.HumanSummaryProjection) []string {
+	if summary == nil {
+		return nil
+	}
+	sections := []string{
+		"goal: " + summary.GoalPlain,
+		"approach: " + summary.ImplementationApproach,
+		"topology: " + string(summary.Topology.Selected) + " " + summary.Topology.Rationale,
+		"scope_read: " + strings.Join(summary.ExpectedFileScope.ToRead, ","),
+		"scope_write: " + strings.Join(summary.ExpectedFileScope.ToWrite, ","),
+		"scope_create: " + strings.Join(summary.ExpectedFileScope.ToCreate, ","),
+		"exclusions: " + strings.Join(summary.ExplicitExclusions, ","),
+	}
+	for _, condition := range summary.ConditionsAddressed {
+		sections = append(sections, "condition: "+condition.ConditionID+" "+condition.Description)
+	}
+	for _, obligation := range summary.ObligationsAddressed {
+		sections = append(sections, "obligation: "+obligation.ObligationID+" "+obligation.Description+" "+string(obligation.RiskLevel))
+	}
+	for _, risk := range summary.PreExecutionRisks {
+		sections = append(sections, "risk: "+risk.Description+" "+risk.Source)
+	}
+	sections = append(sections,
+		"verifier_gates: "+strings.Join(summary.EvidencePlan.VerifierGates, ","),
+		"tests: "+strings.Join(summary.EvidencePlan.TestsToRun, ","),
+		"static_checks: "+strings.Join(summary.EvidencePlan.StaticChecks, ","),
+		"required_approvals: "+strings.Join(summary.RequiredApprovals, ","),
+	)
+	return sections
 }
 
 type projectionSection struct {
@@ -238,7 +367,7 @@ type projectionSection struct {
 	removable bool
 }
 
-func enforceProjectionBudget(sections []projectionSection, tokenBudget int) ([]string, []string) {
+func enforceProjectionBudget(sections []projectionSection, tokenBudget int) ([]string, []omittedSectionResult) {
 	included := make([]projectionSection, 0, len(sections))
 	for _, section := range sections {
 		if strings.TrimSpace(section.text) == "" {
@@ -250,21 +379,21 @@ func enforceProjectionBudget(sections []projectionSection, tokenBudget int) ([]s
 		return sectionTexts(included), nil
 	}
 	limit := tokenBudget * 4
-	omitted := make([]string, 0, 3)
+	omitted := make([]omittedSectionResult, 0, 3)
 	for projectionBytes(included) > limit {
 		removed := false
 		for i := range included {
 			if !included[i].removable {
 				continue
 			}
-			omitted = append(omitted, included[i].key)
+			omitted = append(omitted, omittedSectionResult{key: included[i].key, reason: "budget_exceeded"})
 			included = append(included[:i], included[i+1:]...)
 			removed = true
 			break
 		}
 		if !removed {
 			trimToLimit(&included, limit)
-			omitted = append(omitted, "content_truncated")
+			omitted = append(omitted, omittedSectionResult{key: "content_truncated", reason: "content_truncated"})
 			break
 		}
 	}
@@ -401,6 +530,17 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 		var supports, weakens []string
 		for _, item := range evidence {
 			label := fmt.Sprintf("%s(type=%s exit=%d", item.EvidenceID, item.Type, item.ExitCode)
+			// Command provenance: must always accompany an evidence result so
+			// readers know which tool produced it. Evidence without a command is
+			// labeled [no-provenance] and must not be treated as proof.
+			if cmd := strings.TrimSpace(item.Command); cmd != "" {
+				if len(cmd) > 60 {
+					cmd = cmd[:57] + "..."
+				}
+				label += " cmd=" + cmd
+			} else {
+				label += " [no-provenance]"
+			}
 			if strings.TrimSpace(item.ReusedFromID) != "" {
 				label += " reused=" + item.ReusedFromID
 			}
