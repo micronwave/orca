@@ -25,6 +25,7 @@ import (
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/gittools"
+	"github.com/micronwave/orca/internal/hooks"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/intent"
@@ -493,12 +494,12 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 		store:      st,
 
 		intentCompiler: newIntentCompiler(st),
-		verifierEngine: newVerifierEngine(st, verifierCfg, cfg.Advanced, noLearning),
+		verifierEngine: newVerifierEngine(st, verifierCfg, cfg.Advanced, cfg.Hooks, noLearning),
 		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, cfg.Permission, orcaDir, noLearning),
 		projector:      newProjector(st, verifierCfg, cfg.Advanced),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
-		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, cfg.Remote, cfg.Permission, noLearning),
+		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, cfg.Remote, cfg.Permission, cfg.Hooks, noLearning),
 		reconciler:     newReconciler(st, log, noLearning),
 		intakeFetcher:  &intake.Fetcher{},
 	}, nil
@@ -2476,12 +2477,13 @@ func newIntentCompiler(st *store.FileStore) *intent.Compiler {
 	return intent.New(st)
 }
 
-func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, adv config.AdvancedConfig, noLearning bool) *verifier.Engine {
+func newVerifierEngine(st *store.FileStore, cfg config.VerifierConfig, adv config.AdvancedConfig, hookCfg config.HooksConfig, noLearning bool) *verifier.Engine {
 	return verifier.NewWithConfig(st, verifier.Config{
-		Gates:      cfg.Gates,
-		WorkingDir: cfg.WorkingDir,
-		NoLearning: noLearning,
-		Advanced:   adv,
+		Gates:          cfg.Gates,
+		WorkingDir:     cfg.WorkingDir,
+		NoLearning:     noLearning,
+		Advanced:       adv,
+		PostVerifyHook: hookConfigFromConfig(hookCfg.PostVerify),
 	}, nil)
 }
 
@@ -2527,7 +2529,7 @@ func newBudgetController(log *eventlog.FileLog, _ config.BudgetConfig) *budget.C
 	return budget.New(log)
 }
 
-func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, remoteCfg config.RemoteConfig, permissionCfg config.PermissionConfig, noLearning bool) *runner.Runner {
+func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, remoteCfg config.RemoteConfig, permissionCfg config.PermissionConfig, hookCfg config.HooksConfig, noLearning bool) *runner.Runner {
 	adapters := []runner.Adapter{
 		codex.New(orcaDir, cfg.CodexPath),
 		claude.New(orcaDir, cfg.ClaudePath),
@@ -2547,9 +2549,20 @@ func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string
 		runner.Config{
 			NoLearning:      noLearning,
 			PermissionRules: permissionRulesFromConfig(permissionCfg.Rules),
+			PreCapsuleHook:  hookConfigFromConfig(hookCfg.PreCapsule),
 		},
 		adapters...,
 	)
+}
+
+func hookConfigFromConfig(cfg *config.HookConfig) *hooks.Config {
+	if cfg == nil {
+		return nil
+	}
+	return &hooks.Config{
+		Command:        cfg.Command,
+		TimeoutSeconds: cfg.TimeoutSeconds,
+	}
 }
 
 func permissionRulesFromConfig(rules []config.PermissionRule) []permission.Rule {

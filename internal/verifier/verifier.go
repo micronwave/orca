@@ -50,6 +50,7 @@ import (
 
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/failurehistory"
+	"github.com/micronwave/orca/internal/hooks"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
@@ -76,6 +77,8 @@ type Engine struct {
 	advanced       config.AdvancedConfig
 	runner         GateRunner
 	commandChecker func(string) error
+	postVerifyHook *hooks.Config
+	hookRunner     *hooks.Runner
 }
 
 // Config defines verifier-owned options that are not part of the repo config
@@ -85,6 +88,9 @@ type Config struct {
 	WorkingDir string
 	NoLearning bool
 	Advanced   config.AdvancedConfig
+	// PostVerifyHook, when non-nil, fires after all gates complete and before
+	// SaveVerifierResult. A deny result overrides the recommendation to reject.
+	PostVerifyHook *hooks.Config
 }
 
 // New returns the default Engine implementation.
@@ -106,6 +112,8 @@ func NewWithConfig(st *store.FileStore, cfg Config, runner GateRunner) *Engine {
 		advanced:       cfg.Advanced,
 		runner:         runner,
 		commandChecker: checkCommandPresent,
+		postVerifyHook: cfg.PostVerifyHook,
+		hookRunner:     hooks.New(),
 	}
 }
 
@@ -504,6 +512,64 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 	warnings = append(warnings, reviewFindings.warnings...)
 
 	greenContract := computeGreenContract(gateEvidencePairs)
+
+	// post_verify hook: fires after gates complete, before SaveVerifierResult.
+	if s.postVerifyHook != nil {
+		hookInput := hooks.Input{
+			HookPoint:     hooks.PointPostVerify,
+			CapsuleID:     capsule.CapsuleID,
+			GoalID:        goalID,
+			ObligationIDs: append([]string(nil), obligationRefs...),
+			WorktreePath:  workingDir,
+		}
+		hookRes, hookErr := s.hookRunner.Run(ctx, *s.postVerifyHook, hookInput)
+		if hookErr != nil {
+			summary := "post_verify hook error: " + hookErr.Error()
+			warnings = append(warnings, summary)
+			failureID, err := s.saveGateFailure(ctx, goalID, capsule.CapsuleID, schema.FailureInfra, "post_verify hook", summary, patch.ChangedFiles)
+			if err != nil {
+				return nil, err
+			}
+			failureIDs = append(failureIDs, failureID)
+		} else {
+			switch hookRes.Kind {
+			case hooks.ResultDeny:
+				reason := hookRes.Reason
+				if reason == "" {
+					reason = "post_verify hook denied"
+				}
+				recommendedAction = schema.ActionReject
+				recommendationRationale = "post_verify hook denied: " + reason
+			case hooks.ResultAttachEvidence:
+				summary := hookRes.EvidenceSummary
+				if summary == "" {
+					summary = "post_verify hook evidence"
+				}
+				source := hookRes.EvidenceSource
+				if source == "" {
+					source = "hook"
+				}
+				ev := &schema.EvidenceArtifact{
+					EvidenceID:   idgen.New("EV"),
+					Type:         schema.EvidenceAgentOutput,
+					Source:       source,
+					Summary:      summary,
+					InlineOutput: summary,
+					Supports:     append([]string(nil), obligationRefs...),
+					CreatedAt:    time.Now().UTC(),
+				}
+				if err := s.store.SaveEvidence(ctx, ev); err != nil {
+					return nil, fmt.Errorf("verifier: save post_verify hook evidence %s: %w", ev.EvidenceID, err)
+				}
+			case hooks.ResultAttachWarning:
+				warning := hookRes.Warning
+				if warning == "" {
+					warning = "post_verify hook warning"
+				}
+				warnings = append(warnings, "hook: "+warning)
+			}
+		}
+	}
 
 	result := &schema.VerifierResult{
 		VerifierResultID:        idgen.New("VR"),

@@ -31,6 +31,14 @@ budget:
 adapters:
   codex_path: ""
   claude_path: "C:/tools/claude.exe"
+
+hooks:
+  pre_capsule:
+    command: "pre-hook"
+    timeout_seconds: 12
+  post_verify:
+    command: "post-hook"
+    timeout_seconds: 34
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -56,6 +64,12 @@ adapters:
 	}
 	if cfg.Adapters.ClaudePath != "C:/tools/claude.exe" {
 		t.Fatalf("ClaudePath = %q", cfg.Adapters.ClaudePath)
+	}
+	if cfg.Hooks.PreCapsule == nil || cfg.Hooks.PreCapsule.Command != "pre-hook" || cfg.Hooks.PreCapsule.TimeoutSeconds != 12 {
+		t.Fatalf("PreCapsule hook = %+v", cfg.Hooks.PreCapsule)
+	}
+	if cfg.Hooks.PostVerify == nil || cfg.Hooks.PostVerify.Command != "post-hook" || cfg.Hooks.PostVerify.TimeoutSeconds != 34 {
+		t.Fatalf("PostVerify hook = %+v", cfg.Hooks.PostVerify)
 	}
 }
 
@@ -426,6 +440,8 @@ func TestPhase5SectionsRejectUnknownKeys(t *testing.T) {
 		{"pr", "pr:\n  enabled: false\n  typo_field: x\n"},
 		{"ci", "ci:\n  provider: \"\"\n  no_such: true\n"},
 		{"remote", "remote:\n  enabled: false\n  extra_key: baz\n"},
+		{"hooks_unknown_point", "hooks:\n  post_capsule:\n    command: hook\n"},
+		{"hooks_unknown_field", "hooks:\n  pre_capsule:\n    extra_key: baz\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.section, func(t *testing.T) {
@@ -649,7 +665,7 @@ func TestDetectProjectType_CurrentDirReturnsGo(t *testing.T) {
 func TestDefaultConfigYAML_IncludesAllRequiredSections(t *testing.T) {
 	for _, pt := range []string{"go", "node", "maven"} {
 		yaml := DefaultConfigYAML(pt)
-		for _, section := range []string{"verifier:", "gate:", "budget:", "adapters:", "advanced:", "permission:", "mcp:", "intake:", "pr:", "ci:", "remote:"} {
+		for _, section := range []string{"verifier:", "gate:", "budget:", "adapters:", "advanced:", "permission:", "hooks:", "mcp:", "intake:", "pr:", "ci:", "remote:"} {
 			if !strings.Contains(yaml, section) {
 				t.Errorf("DefaultConfigYAML(%q) missing section %q", pt, section)
 			}

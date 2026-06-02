@@ -71,7 +71,7 @@ func DefaultConfigYAML(projectType string) string {
 
 	return `# Orca Phase 5 local runtime configuration.
 # Keep this file in the simple shape supported by internal/config.Load:
-# sections, scalar values, and verifier.gates list items only.
+# sections, scalar values, verifier.gates list items, and permission.rules list items.
 
 verifier:
   # Gates run from working_dir when set; empty means the current process directory.
@@ -108,6 +108,14 @@ advanced:
 permission:
   default_mode: "workspace_write"
   rules:
+
+hooks:
+  pre_capsule:
+    command: ""
+    timeout_seconds: 30
+  post_verify:
+    command: ""
+    timeout_seconds: 30
 
 mcp:
   enabled: false

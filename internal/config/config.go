@@ -31,6 +31,26 @@ type Config struct {
 	CI         CIConfig
 	Remote     RemoteConfig
 	Permission PermissionConfig
+	Hooks      HooksConfig
+}
+
+// HooksConfig holds the optional lifecycle hook configuration. A nil HookConfig
+// pointer in a field means the hook for that point is disabled. orca.md Phase D §9.
+type HooksConfig struct {
+	// PreCapsule fires after the permission check passes but before the adapter
+	// preflight. A deny result blocks capsule launch.
+	PreCapsule *HookConfig
+	// PostVerify fires after all verifier gates complete. A deny result overrides
+	// the verifier's recommended action to reject.
+	PostVerify *HookConfig
+}
+
+// HookConfig configures one lifecycle hook executable.
+type HookConfig struct {
+	// Command is the executable path and optional fixed arguments, space-separated.
+	Command string
+	// TimeoutSeconds is the maximum wall time the hook may run. Defaults to 30s.
+	TimeoutSeconds int
 }
 
 // PermissionConfig holds the default permission policy applied to capsules that
@@ -208,6 +228,7 @@ func Load(path string) (*Config, error) {
 	var currentGate *VerifierGate
 	var inPermissionRules bool
 	var currentRule *PermissionRule
+	var hookName string
 
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
@@ -226,6 +247,7 @@ func Load(path string) (*Config, error) {
 			currentGate = nil
 			inPermissionRules = false
 			currentRule = nil
+			hookName = ""
 			continue
 		}
 
@@ -523,6 +545,42 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("config: unknown permission field %q on line %d", key, lineNum)
 			}
 			cfg.Permission.DefaultMode = value
+		case "hooks":
+			if indent == 2 && strings.HasSuffix(line, ":") {
+				hookName = strings.TrimSuffix(line, ":")
+				switch hookName {
+				case "pre_capsule":
+					if cfg.Hooks.PreCapsule == nil {
+						cfg.Hooks.PreCapsule = &HookConfig{}
+					}
+				case "post_verify":
+					if cfg.Hooks.PostVerify == nil {
+						cfg.Hooks.PostVerify = &HookConfig{}
+					}
+				default:
+					return nil, fmt.Errorf("config: unknown hooks field %q on line %d", hookName, lineNum)
+				}
+				continue
+			}
+			if hookName == "" {
+				return nil, fmt.Errorf("config: hook field before hook name on line %d", lineNum)
+			}
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			var hook *HookConfig
+			switch hookName {
+			case "pre_capsule":
+				hook = cfg.Hooks.PreCapsule
+			case "post_verify":
+				hook = cfg.Hooks.PostVerify
+			default:
+				return nil, fmt.Errorf("config: unknown hooks field %q on line %d", hookName, lineNum)
+			}
+			if err := setHookConfigField(hook, key, value, lineNum); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("config: unknown section %q on line %d", section, lineNum)
 		}
@@ -541,6 +599,17 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Gate.ReviewWindowSeconds > maxDurationSeconds {
 		return nil, fmt.Errorf("config: gate.review_window_seconds %d exceeds maximum %d", cfg.Gate.ReviewWindowSeconds, maxDurationSeconds)
+	}
+	for name, hook := range map[string]*HookConfig{
+		"hooks.pre_capsule": cfg.Hooks.PreCapsule,
+		"hooks.post_verify": cfg.Hooks.PostVerify,
+	} {
+		if hook == nil {
+			continue
+		}
+		if hook.TimeoutSeconds > maxDurationSeconds {
+			return nil, fmt.Errorf("config: %s.timeout_seconds %d exceeds maximum %d", name, hook.TimeoutSeconds, maxDurationSeconds)
+		}
 	}
 	return cfg, nil
 }
@@ -634,6 +703,25 @@ func setVerifierGateField(gate *VerifierGate, key, value string, lineNum int) er
 		}
 	default:
 		return fmt.Errorf("config: unknown verifier gate field %q on line %d", key, lineNum)
+	}
+	return nil
+}
+
+func setHookConfigField(hook *HookConfig, key, value string, lineNum int) error {
+	if hook == nil {
+		return fmt.Errorf("config: hook config missing on line %d", lineNum)
+	}
+	switch key {
+	case "command":
+		hook.Command = value
+	case "timeout_seconds":
+		n, err := parseNonNegativeInt(value, lineNum)
+		if err != nil {
+			return err
+		}
+		hook.TimeoutSeconds = n
+	default:
+		return fmt.Errorf("config: unknown hook field %q on line %d", key, lineNum)
 	}
 	return nil
 }

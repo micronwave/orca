@@ -15,6 +15,7 @@ import (
 
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/failurehistory"
+	"github.com/micronwave/orca/internal/hooks"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/orcapath"
 	"github.com/micronwave/orca/internal/permission"
@@ -32,6 +33,8 @@ type Runner struct {
 	orcaDir         string
 	noLearning      bool
 	permissionRules []permission.Rule
+	preCapsuleHook  *hooks.Config // nil means no pre-capsule hook
+	hookRunner      *hooks.Runner
 	adapters        map[schema.AgentType]Adapter
 	nowFn           func() time.Time
 }
@@ -40,6 +43,9 @@ type Runner struct {
 type Config struct {
 	NoLearning      bool
 	PermissionRules []permission.Rule // global config rules applied after capsule-level checks
+	// PreCapsuleHook, when non-nil, fires after the permission check passes and
+	// before adapter.Preflight. A deny result blocks capsule launch.
+	PreCapsuleHook *hooks.Config
 }
 
 // New returns a Runner.
@@ -65,6 +71,8 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 		orcaDir:         strings.TrimSpace(orcaDir),
 		noLearning:      cfg.NoLearning,
 		permissionRules: append([]permission.Rule(nil), cfg.PermissionRules...),
+		preCapsuleHook:  cfg.PreCapsuleHook,
+		hookRunner:      hooks.New(),
 		adapters:        registry,
 		nowFn:           time.Now,
 	}
@@ -205,6 +213,26 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	}
 
 	emitRuntime(schema.RuntimeStatusReadyForPrompt, "", "")
+
+	// pre_capsule hook: fires after permission check, before adapter preflight.
+	if s.preCapsuleHook != nil {
+		hookInput := hooks.Input{
+			HookPoint:     hooks.PointPreCapsule,
+			CapsuleID:     capsule.CapsuleID,
+			GoalID:        goalID,
+			ObligationIDs: append([]string(nil), capsule.ObligationIDs...),
+			WorktreePath:  capsule.Sandbox.WorktreePath,
+		}
+		hookRes, hookErr := s.hookRunner.Run(ctx, *s.preCapsuleHook, hookInput)
+		if hookErr != nil {
+			emitRuntime(schema.RuntimeStatusPreflightWarning, schema.RuntimeFailureToolRuntime,
+				"pre_capsule hook error: "+hookErr.Error())
+			return result, fmt.Errorf("runner: pre_capsule hook for capsule %s: %w", capsule.CapsuleID, hookErr)
+		}
+		if hookRunErr := s.handlePreCapsuleHookResult(ctx, capsule, goalID, hookRes, emitRuntime); hookRunErr != nil {
+			return result, hookRunErr
+		}
+	}
 
 	if err = adapter.Preflight(runCtx, capsule); err != nil {
 		failClass := classifyPreflightError(err)
@@ -416,6 +444,88 @@ func (s *Runner) failCapsule(
 		return "", &store.MaterializationError{Event: failEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateFailed, err)}
 	}
 	return failure.FailureID, nil
+}
+
+// handlePreCapsuleHookResult stores the hook result and returns an error when
+// the hook blocks capsule launch (deny or ask). Allow and attach results are
+// stored and treated as non-blocking.
+func (s *Runner) handlePreCapsuleHookResult(
+	ctx context.Context,
+	capsule *schema.ExecutionCapsule,
+	goalID string,
+	res hooks.Result,
+	emitRuntime func(schema.CapsuleRuntimeStatus, schema.CapsuleRuntimeFailureClass, string),
+) error {
+	switch res.Kind {
+	case hooks.ResultDeny, hooks.ResultAsk:
+		// Persist the block as a DecisionRecord for auditability.
+		reason := res.Reason
+		if reason == "" {
+			reason = res.Prompt
+		}
+		if reason == "" {
+			reason = "hook blocked capsule launch"
+		}
+		dec := &schema.DecisionRecord{
+			DecisionID: idgen.New("DEC"),
+			Context:    "hook_pre_capsule_deny",
+			Decision:   "blocked",
+			Rationale:  reason,
+			MadeBy:     "hook",
+			RelatedIDs: append([]string(nil), capsule.ObligationIDs...),
+			CreatedAt:  s.nowFn().UTC(),
+		}
+		if err := s.store.SaveDecision(ctx, dec); err != nil {
+			return fmt.Errorf("runner: save pre_capsule hook decision for capsule %s: %w", capsule.CapsuleID, err)
+		}
+		emitRuntime(schema.RuntimeStatusPreflightWarning, schema.RuntimeFailurePermissionGate,
+			"pre_capsule hook denied: "+reason)
+		return fmt.Errorf("runner: pre_capsule hook denied capsule %s: %s", capsule.CapsuleID, reason)
+
+	case hooks.ResultAttachEvidence:
+		summary := res.EvidenceSummary
+		if summary == "" {
+			summary = "hook pre_capsule evidence"
+		}
+		source := res.EvidenceSource
+		if source == "" {
+			source = "hook"
+		}
+		ev := &schema.EvidenceArtifact{
+			EvidenceID:   idgen.New("EV"),
+			Type:         schema.EvidenceAgentOutput,
+			Source:       source,
+			Summary:      summary,
+			InlineOutput: summary,
+			Supports:     append([]string(nil), capsule.ObligationIDs...),
+			CreatedAt:    s.nowFn().UTC(),
+		}
+		if err := s.store.SaveEvidence(ctx, ev); err != nil {
+			return fmt.Errorf("runner: save pre_capsule hook evidence for capsule %s: %w", capsule.CapsuleID, err)
+		}
+		return nil
+
+	case hooks.ResultAttachWarning:
+		warning := res.Warning
+		if warning == "" {
+			warning = "hook pre_capsule warning"
+		}
+		claim := &schema.ClaimArtifact{
+			ClaimID:         idgen.New("CLM"),
+			Text:            warning,
+			ClaimType:       schema.ClaimRisk,
+			SourceCapsuleID: capsule.CapsuleID,
+			Status:          schema.ClaimProposed,
+		}
+		if err := s.store.SaveClaim(ctx, claim); err != nil {
+			return fmt.Errorf("runner: save pre_capsule hook warning for capsule %s: %w", capsule.CapsuleID, err)
+		}
+		return nil
+
+	default:
+		// ResultAllow and unknown kinds: continue normally.
+		return nil
+	}
 }
 
 func (s *Runner) saveEvidence(
