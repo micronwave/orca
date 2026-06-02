@@ -188,6 +188,34 @@ func TestSupervisor_CommandInputRemainsActiveDuringGate(t *testing.T) {
 	}
 }
 
+func TestSupervisor_DoctorCommandDoesNotStartGoal(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	sup, cleanup := newTestSupervisor(t, orcaDir, strings.NewReader(""))
+	defer cleanup()
+
+	var outBuf, errBuf bytes.Buffer
+	sup.out = &outBuf
+	sup.errout = &errBuf
+
+	_ = sup.handleLine(context.Background(), "orca doctor")
+	if sup.goalActive.Load() {
+		t.Fatal("orca doctor started a goal")
+	}
+	if strings.Contains(errBuf.String(), "[orca] starting: orca doctor") {
+		t.Fatalf("doctor command was treated as a goal:\n%s", errBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "Orca  doctor") {
+		t.Fatalf("doctor output missing report:\n%s", outBuf.String())
+	}
+}
+
+func TestSupervisor_DoctorCommandRemainsActiveDuringGate(t *testing.T) {
+	if !isSupervisorCommand("orca doctor") {
+		t.Fatal("orca doctor must remain a supervisor command while a gate is waiting")
+	}
+}
+
 // TestSupervisor_GateRejectionRoutedThroughPipe verifies that /reject writes
 // "reject" to the gate pipe when a gate is waiting.
 func TestSupervisor_GateRejectionRoutedThroughPipe(t *testing.T) {

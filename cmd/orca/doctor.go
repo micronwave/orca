@@ -55,6 +55,10 @@ type GateCheck struct {
 
 // runDoctor implements the `orca doctor` subcommand.
 func runDoctor(args []string) error {
+	return runDoctorWithOutput(args, os.Stdout)
+}
+
+func runDoctorWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("orca doctor", flag.ContinueOnError)
 	orcaDir := fs.String("orca-dir", "", "path to the .orca directory")
 	jsonOut := fs.Bool("json", false, "emit setup health as JSON")
@@ -81,11 +85,11 @@ func runDoctor(args []string) error {
 
 	result := runPreflight(*orcaDir, configPath, configExists, cfg)
 	if *jsonOut {
-		if err := printDoctorJSON(os.Stdout, result); err != nil {
+		if err := printDoctorJSON(out, result); err != nil {
 			return err
 		}
 	} else {
-		printDoctorOutput(os.Stdout, result)
+		printDoctorOutput(out, result)
 	}
 
 	if len(result.BlockingErrors) > 0 {
