@@ -8,6 +8,8 @@ const (
 	AgentClaude  AgentType = "claude"
 	AgentCopilot AgentType = "copilot"
 	AgentTool    AgentType = "tool"
+	// AgentMock is the agent type used by the deterministic test adapter.
+	AgentMock AgentType = "mock"
 )
 
 // CapsuleRole is the functional role the agent plays inside the capsule.

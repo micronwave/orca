@@ -147,7 +147,7 @@ func (a *AgentType) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	switch AgentType(s) {
-	case AgentCodex, AgentClaude, AgentCopilot, AgentTool:
+	case AgentCodex, AgentClaude, AgentCopilot, AgentTool, AgentMock:
 		*a = AgentType(s)
 		return nil
 	}
