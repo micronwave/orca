@@ -1084,7 +1084,7 @@ func computeGreenContract(pairs []gateEvidencePair) *schema.GreenContract {
 	annotated := make([]gateEvidencePair, 0, len(pairs))
 	for _, p := range pairs {
 		tier := schema.GreenLevel(p.gate.Tier)
-		if schema.GreenLevelOrdinal(tier) == 0 {
+		if greenLevelOrdinal(tier) == 0 {
 			continue
 		}
 		annotated = append(annotated, p)
@@ -1125,11 +1125,11 @@ func highestSatisfiedGreenLevel(pairs []gateEvidencePair) schema.GreenLevel {
 }
 
 func annotatedGatesPassThroughLevel(pairs []gateEvidencePair, level schema.GreenLevel) bool {
-	targetOrdinal := schema.GreenLevelOrdinal(level)
+	targetOrdinal := greenLevelOrdinal(level)
 	var sawGateAtOrBelow bool
 	var sawGateAtLevel bool
 	for _, p := range pairs {
-		gateOrdinal := schema.GreenLevelOrdinal(schema.GreenLevel(p.gate.Tier))
+		gateOrdinal := greenLevelOrdinal(schema.GreenLevel(p.gate.Tier))
 		if gateOrdinal == 0 {
 			continue
 		}
@@ -1145,6 +1145,21 @@ func annotatedGatesPassThroughLevel(pairs []gateEvidencePair, level schema.Green
 		}
 	}
 	return sawGateAtOrBelow && sawGateAtLevel
+}
+
+func greenLevelOrdinal(l schema.GreenLevel) int {
+	switch l {
+	case schema.GreenLevelTargetedTests:
+		return 1
+	case schema.GreenLevelPackage:
+		return 2
+	case schema.GreenLevelWorkspace:
+		return 3
+	case schema.GreenLevelMergeReady:
+		return 4
+	default:
+		return 0
+	}
 }
 
 func findScopeViolations(changedFiles, allowedPaths, forbiddenPaths []string) []string {

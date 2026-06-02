@@ -406,7 +406,7 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		// and persist the updated contract back to the verifier result.
 		if vr.GreenContract != nil {
 			if result.MergeReady &&
-				schema.GreenLevelOrdinal(vr.GreenContract.ObservedGreenLevel) >= schema.GreenLevelOrdinal(schema.GreenLevelWorkspace) {
+				greenLevelOrdinal(vr.GreenContract.ObservedGreenLevel) >= greenLevelOrdinal(schema.GreenLevelWorkspace) {
 				vr.GreenContract.ObservedGreenLevel = schema.GreenLevelMergeReady
 			} else if !result.MergeReady {
 				// Record why merge_ready was not achieved even at workspace tier.
@@ -1155,4 +1155,19 @@ func sameStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func greenLevelOrdinal(l schema.GreenLevel) int {
+	switch l {
+	case schema.GreenLevelTargetedTests:
+		return 1
+	case schema.GreenLevelPackage:
+		return 2
+	case schema.GreenLevelWorkspace:
+		return 3
+	case schema.GreenLevelMergeReady:
+		return 4
+	default:
+		return 0
+	}
 }

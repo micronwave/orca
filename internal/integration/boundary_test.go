@@ -161,6 +161,49 @@ func TestBoundary_SchemaImportsNoInternalPackages(t *testing.T) {
 	}
 }
 
+// TestBoundary_SchemaHasNoExportedFreeFunctions asserts that internal/schema
+// contains no exported free functions (top-level func declarations without a
+// receiver). The only functions permitted in schema are methods that implement
+// stdlib interfaces on the enum types — specifically UnmarshalJSON([]byte)error,
+// which cannot be moved because Go requires methods to live in the same package
+// as their receiver type.
+//
+// This test catches logic helpers like ordinal/ranking functions that belong in
+// the consumer package (verifier, reconciler) rather than in the data layer.
+func TestBoundary_SchemaHasNoExportedFreeFunctions(t *testing.T) {
+	root := findOrcaRoot(t)
+	schemaDir := filepath.Join(root, "internal", "schema")
+
+	for _, goFile := range goFilesIn(t, schemaDir) {
+		content, err := os.ReadFile(goFile)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", goFile, err)
+		}
+		rel, _ := filepath.Rel(root, goFile)
+		lines := strings.Split(string(content), "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			// A top-level exported free function starts with "func [A-Z]".
+			// Method declarations start with "func (" — those are allowed.
+			if !strings.HasPrefix(trimmed, "func ") {
+				continue
+			}
+			rest := strings.TrimPrefix(trimmed, "func ")
+			if strings.HasPrefix(rest, "(") {
+				// method — allowed
+				continue
+			}
+			// Free function: exported if first rune is uppercase.
+			if len(rest) == 0 || rest[0] < 'A' || rest[0] > 'Z' {
+				continue
+			}
+			t.Errorf("boundary violation: schema file %s line %d defines exported free function %q "+
+				"(schema must be data-only; logic helpers belong in the consumer package)",
+				rel, i+1, trimmed)
+		}
+	}
+}
+
 // TestBoundary_StoreEmitsOneEventPerSave verifies that SavePRRecord,
 // SaveCIStatusRecord, and SaveIntakeRecord each contain exactly one
 // s.appendEvent call (store emits exactly one event per Save* call).

@@ -14,22 +14,6 @@ const (
 	GreenLevelMergeReady    GreenLevel = "merge_ready"
 )
 
-// greenLevelOrdinal maps a GreenLevel to a numeric rank for comparison.
-func GreenLevelOrdinal(l GreenLevel) int {
-	switch l {
-	case GreenLevelTargetedTests:
-		return 1
-	case GreenLevelPackage:
-		return 2
-	case GreenLevelWorkspace:
-		return 3
-	case GreenLevelMergeReady:
-		return 4
-	default:
-		return 0
-	}
-}
-
 // GreenEvidence links one passing annotated gate to its evidence artifact.
 type GreenEvidence struct {
 	GateName   string `json:"gate_name"`
