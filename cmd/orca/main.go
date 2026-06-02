@@ -418,7 +418,7 @@ type runtime struct {
 	verifierEngine *verifier.Engine
 	planner        *planner.Planner
 	projector      *projector.Compiler
-	gatekeeper     *gate.Gatekeeper
+	gatekeeper     gateService
 	budget         *budget.Controller
 	runner         *runner.Runner
 	reconciler     *reconciler.Reconciler
@@ -1172,9 +1172,15 @@ func mustAbs(path string) string {
 
 func printHelp() {
 	fmt.Println("Commands:")
-	fmt.Println("  <goal text>   run a goal")
-	fmt.Println("  /status       show active goal status")
-	fmt.Println("  /cancel       cancel active goal")
+	fmt.Println("  <goal text>   start a new goal (runs in background)")
+	fmt.Println("  /status       show active goal status (concise)")
+	fmt.Println("  /details      show active goal status (full/raw)")
+	fmt.Println("  /logs         show agent or verifier logs (Phase 3)")
+	fmt.Println("  /approve      approve the current waiting gate")
+	fmt.Println("  /reject       reject the current waiting gate")
+	fmt.Println("  /cancel       cancel the active goal")
+	fmt.Println("  /resume       resume a cancelled goal (Phase 5)")
+	fmt.Println("  /config       show config path")
 	fmt.Println("  /help         show this help")
 	fmt.Println("  exit / quit   exit orca")
 }
@@ -1252,36 +1258,20 @@ func runInteractive(orcaDir string) error {
 	if err := autoInitWithConfirmation(orcaDir, os.Stdin, os.Stderr); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print("> ")
-		if !scanner.Scan() {
-			break
-		}
-		line := strings.TrimSpace(scanner.Text())
-		switch {
-		case line == "":
-			continue
-		case line == "exit" || line == "quit":
-			return nil
-		case line == "/status", line == "status":
-			if err := runStatus([]string{"--orca-dir", orcaDir}); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
-			}
-		case line == "/cancel", line == "cancel":
-			if err := runCancel([]string{"--orca-dir", orcaDir}, os.Stdin, os.Stdout); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
-			}
-		case line == "/help", line == "help":
-			printHelp()
-		default:
-			if err := runGoal([]string{"--orca-dir", orcaDir, line}); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
-			}
-		}
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		return err
 	}
-	return scanner.Err()
+	defer closeFn()
+	rt.notifier = newPlainNotifier(os.Stderr, false)
+	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup := newSupervisor(orcaDir, rt, os.Stdin, os.Stdout, os.Stderr)
+	return sup.Run(ctx)
 }
 
 func runUI(args []string) error {
@@ -2177,7 +2167,7 @@ func newProjector(st *store.FileStore, cfg config.VerifierConfig, adv config.Adv
 	return projector.NewWithConfig(st, cfg, adv)
 }
 
-func newGatekeeper(st *store.FileStore, _ config.GateConfig) *gate.Gatekeeper {
+func newGatekeeper(st *store.FileStore, _ config.GateConfig) gateService {
 	return gate.New(st)
 }
 
