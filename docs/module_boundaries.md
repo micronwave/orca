@@ -1,7 +1,5 @@
 # Module Boundary Map
 
-**Phase 3 design artifact. Authoritative until superseded by a Phase 1 ADR.**
-
 ---
 
 ## Dependency Graph
