@@ -64,6 +64,9 @@ const (
 	// EventRepoStatusSnapshotSaved is emitted when a RepoStatusSnapshot is written.
 	// Payload is the RepoStatusSnapshot. orca.md Phase B §3.
 	EventRepoStatusSnapshotSaved EventType = "repo_status_snapshot_saved"
+	// EventProjectionReuseRecorded is emitted when a previously compiled projection
+	// is reused instead of recomputed. Payload is the ProjectionReuseRecord. Phase C §7.
+	EventProjectionReuseRecorded EventType = "projection_reuse_recorded"
 )
 
 // Event is one entry in the append-only event log.

@@ -59,6 +59,7 @@ const (
 	dirBudgets          = "artifacts/budgets"
 	dirVerifierResults  = "artifacts/verifier_results"
 	dirTopologyOutcomes  = "artifacts/topology_outcomes"
+	dirProjReuse         = "artifacts/projections/reuse"
 	dirPRs               = "artifacts/prs"
 	dirCIStatus          = "artifacts/ci_status"
 	dirIntake            = "artifacts/intake"
@@ -94,7 +95,7 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
 		dirPatches, dirEvidence, dirClaims,
-		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
+		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester, dirProjReuse,
 		dirFailures, dirDecisions, dirBudgets, dirVerifierResults, dirTopologyOutcomes,
 		dirPRs, dirCIStatus, dirIntake,
 		dirCapsuleRuntime, dirStartupBundles,

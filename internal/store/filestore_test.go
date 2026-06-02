@@ -2204,6 +2204,35 @@ func TestReplay_ProjectionsByRole(t *testing.T) {
 	}
 }
 
+func TestReplay_ReconstructsProjectionReuseRecord(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	if err := e.st.SaveProjectionReuseRecord(e.ctx, &schema.ProjectionReuseRecord{
+		ReuseID:              "REUSE-1",
+		CapsuleID:            "CAP-1",
+		GoalID:               "G-1",
+		Role:                 schema.ProjectionRoleExecutor,
+		SourceHash:           "abc123",
+		OriginalProjectionID: "CTX-1",
+		TokensSaved:          120,
+		RecordedAt:           time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveProjectionReuseRecord: %v", err)
+	}
+
+	wipeArtifacts(t, e)
+	if err := store.Replay(e.ctx, e.log, e.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	records, err := e.st.LoadProjectionReuseRecordsForGoal(e.ctx, "G-1")
+	if err != nil {
+		t.Fatalf("LoadProjectionReuseRecordsForGoal after replay: %v", err)
+	}
+	if len(records) != 1 || records[0].ReuseID != "REUSE-1" || records[0].TokensSaved != 120 {
+		t.Fatalf("replayed projection reuse records = %+v, want REUSE-1", records)
+	}
+}
+
 func TestReplay_ReconstructsBudgetAndSnapshot(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")

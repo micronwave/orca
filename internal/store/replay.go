@@ -210,6 +210,16 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.writeFile(s.artifactPath(dirTopologyOutcomes, v.OutcomeID), &v)
 
+	case schema.EventProjectionReuseRecorded:
+		var v schema.ProjectionReuseRecord
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal ProjectionReuseRecord: %w", err)
+		}
+		if err := validateArtifactID("projection reuse record", v.ReuseID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirProjReuse, v.ReuseID), &v)
+
 	case schema.EventPRCreated:
 		var v schema.PRRecord
 		if err := json.Unmarshal(e.Payload, &v); err != nil {
@@ -511,7 +521,7 @@ func (s *FileStore) updatePatchStatusNoLock(patchID string, status schema.PatchS
 func ReplayDir(root string) []string {
 	dirs := []string{
 		dirGoals, dirObligations, dirCapsules, dirSnapshots,
-		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester,
+		dirProjExecutor, dirProjHuman, dirProjReviewer, dirProjTester, dirProjReuse,
 		dirPatches, dirEvidence, dirClaims, dirBudgets,
 		dirFailures, dirDecisions, dirVerifierResults, dirTopologyOutcomes,
 		dirPRs, dirCIStatus, dirIntake,
