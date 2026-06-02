@@ -42,6 +42,7 @@ import (
 	"github.com/micronwave/orca/internal/runner/adapters/remote"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
+	"github.com/micronwave/orca/internal/ui"
 	"github.com/micronwave/orca/internal/verifier"
 )
 
@@ -103,6 +104,9 @@ func runInit(args []string) (err error) {
 	if *orcaDir == "" {
 		*orcaDir = filepath.Join(findProjectRoot("."), ".orca")
 	}
+
+	ui.PrintBanner(os.Stdout)
+
 	if err := ensureInitTarget(*orcaDir); err != nil {
 		return err
 	}
@@ -126,6 +130,18 @@ func runInit(args []string) (err error) {
 	if err := os.WriteFile(configPath, []byte(config.DefaultConfigYAML(projectType)), 0o644); err != nil {
 		return fmt.Errorf("orca init: write config.yaml: %w", err)
 	}
+
+	fmt.Printf("\n%s\n\n", ui.Success("Orca initialized successfully!"))
+	fmt.Println("Created project structure:")
+	fmt.Printf("%s/\n", ui.Colorize(os.Stdout, ui.OrcaBlue, ui.IconFolder+" "+filepath.Base(*orcaDir)))
+	fmt.Printf("  %s %s config.yaml  %s\n", ui.TreePrefix(false), ui.IconFile, ui.Colorize(os.Stdout, ui.Black+ui.Bold, "(Edit this to add verifiers)"))
+	fmt.Printf("  %s %s events.log\n", ui.TreePrefix(false), ui.IconFile)
+	fmt.Printf("  %s %s capsules/\n", ui.TreePrefix(true), ui.IconFolder)
+
+	fmt.Printf("\n%s Next steps:\n", ui.IconStep)
+	fmt.Printf("  1. Review and edit %s\n", ui.Colorize(os.Stdout, ui.Bold, configPath))
+	fmt.Printf("  2. Run %s to verify your environment\n", ui.Colorize(os.Stdout, ui.Cyan, "orca doctor"))
+
 	return nil
 }
 
@@ -1810,6 +1826,21 @@ func (rt *runtime) writeProjectionTokenDeltas(ctx context.Context, out io.Writer
 	}
 }
 
+// mergeReadinessColor returns the readiness string colorized to reflect its
+// meaning: green for actionable states, yellow for human-review, red for blocked.
+func mergeReadinessColor(w io.Writer, readiness string) string {
+	switch readiness {
+	case "ready":
+		return ui.Colorize(w, ui.Green, readiness)
+	case "needs_human_review":
+		return ui.Colorize(w, ui.Yellow, readiness)
+	case "blocked":
+		return ui.Colorize(w, ui.Red, readiness)
+	default:
+		return readiness
+	}
+}
+
 // printStatusConcise writes a human-friendly status summary that hides raw
 // artifact IDs, budget numbers, and infrastructure configuration. For the full
 // operational dump use printStatus (exposed via orca status --raw).
@@ -1819,7 +1850,7 @@ func (rt *runtime) printStatusConcise(ctx context.Context, out io.Writer) error 
 		return fmt.Errorf("orca status: load active goal: %w", err)
 	}
 	if goal == nil {
-		_, err := fmt.Fprintln(out, "No active goal.")
+		_, err := fmt.Fprintln(out, ui.Colorize(out, ui.Black+ui.Bold, "No active goal."))
 		return err
 	}
 	obligations, err := rt.store.LoadOpenObligations(ctx, goal.GoalID)
@@ -1843,19 +1874,25 @@ func (rt *runtime) printStatusConcise(ctx context.Context, out io.Writer) error 
 		return err
 	}
 
-	fmt.Fprintf(out, "Goal:    %s\n", goal.OriginalIntent)
-	fmt.Fprintf(out, "Status:  %s\n", goal.Status)
-	fmt.Fprintf(out, "Merge:   %s\n", readiness)
+	// field pre-pads s to 8 visible chars before colorizing so that %-Ns
+	// alignment isn't thrown off by invisible ANSI escape sequences.
+	field := func(s string) string { return ui.Colorize(out, ui.Bold, fmt.Sprintf("%-8s", s)) }
+
+	fmt.Fprintf(out, "%s %s\n", ui.IconOrca, ui.Colorize(out, ui.OrcaBlue+ui.Bold, "Active Goal Status"))
+	fmt.Fprintf(out, "  %s %s\n", field("Goal:"), goal.OriginalIntent)
+	fmt.Fprintf(out, "  %s %s\n", field("Status:"), ui.Colorize(out, ui.Cyan, string(goal.Status)))
+	fmt.Fprintf(out, "  %s %s\n", field("Merge:"), mergeReadinessColor(out, readiness))
+
 	if len(obligations) > 0 {
-		fmt.Fprintf(out, "Open:    %d obligation(s)\n", len(obligations))
+		fmt.Fprintf(out, "  %s %d obligation(s)\n", field("Open:"), len(obligations))
 	}
 	if len(capsules) > 0 {
-		fmt.Fprintf(out, "Active:  %d capsule(s) running\n", len(capsules))
+		fmt.Fprintf(out, "  %s %d capsule(s) running\n", field("Active:"), len(capsules))
 	}
 	if len(humanDecisions) > 0 {
-		fmt.Fprintln(out, "Waiting:")
+		fmt.Fprintf(out, "  %s\n", ui.Colorize(out, ui.Yellow+ui.Bold, "Waiting for review:"))
 		for _, d := range humanDecisions {
-			fmt.Fprintf(out, "  %s\n", d)
+			fmt.Fprintf(out, "    %s %s\n", ui.IconStep, d)
 		}
 	}
 	return nil

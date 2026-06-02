@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/micronwave/orca/internal/ui"
 )
 
 // CommandSpec describes a single CLI top-level command or REPL slash command.
@@ -209,30 +211,47 @@ func isReservedREPLCommand(line string) bool {
 // printHelp writes the REPL interactive-session help to stderr.
 // It is generated from replCommands so the registry stays in sync.
 func printHelp() {
-	fmt.Println("Commands:")
-	fmt.Println("  <goal text>   start a new goal (runs in background)")
+	fmt.Println(ui.Colorize(os.Stdout, ui.Bold, "Interactive Commands:"))
+	fmt.Printf("  %s%s%s\n",
+		ui.Colorize(os.Stdout, ui.Cyan, "<goal text>"),
+		strings.Repeat(" ", max(0, 22-len("<goal text>"))),
+		"start a new goal")
 	for _, cmd := range replCommands {
-		name := cmd.Name
+		nameStr := cmd.Name
 		if cmd.ArgHint != "" {
-			name = name + " " + cmd.ArgHint
+			nameStr += " " + cmd.ArgHint
 		}
-		fmt.Printf("  %-22s%s\n", name, cmd.Summary)
+		coloredName := ui.Colorize(os.Stdout, ui.Cyan, cmd.Name)
+		if cmd.ArgHint != "" {
+			coloredName += " " + ui.Colorize(os.Stdout, ui.Black+ui.Bold, cmd.ArgHint)
+		}
+		pad := strings.Repeat(" ", max(0, 32-len(nameStr)))
+		fmt.Printf("  %s%s%s\n", coloredName, pad, cmd.Summary)
 	}
-	fmt.Println("  exit / quit   exit orca")
+	fmt.Printf("  %s%s%s\n",
+		ui.Colorize(os.Stdout, ui.Cyan, "exit / quit"),
+		strings.Repeat(" ", max(0, 32-len("exit / quit"))),
+		"exit orca")
 }
 
 // printCLIHelp writes the top-level orca CLI help to w.
 func printCLIHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: orca <command> [args]")
+	fmt.Fprintf(w, "%s %s orca <command> [args]\n", ui.IconOrca, ui.Colorize(w, ui.Bold, "Usage:"))
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "Commands:"))
 	for _, cmd := range cliCommands {
-		hint := ""
+		hintPlain := ""
+		hintColored := ""
 		if cmd.ArgHint != "" {
-			hint = " " + cmd.ArgHint
+			hintPlain = " " + cmd.ArgHint
+			hintColored = " " + ui.Colorize(w, ui.Black+ui.Bold, cmd.ArgHint)
 		}
-		fmt.Fprintf(w, "  %-10s%s%s\n", cmd.Name, hint, cmd.Summary)
+		pad := strings.Repeat(" ", max(0, 20-len(cmd.Name+hintPlain)))
+		fmt.Fprintf(w, "  %s%s%s%s\n",
+			ui.Colorize(w, ui.Cyan, cmd.Name), hintColored, pad, cmd.Summary)
 	}
+	fmt.Fprintln(w, "")
+	fmt.Fprintf(w, "Run %s for detailed environment health.\n", ui.Colorize(w, ui.Cyan, "orca doctor"))
 }
 
 // writeCommandsJSON writes the full command manifest as JSON to w.
@@ -244,7 +263,7 @@ func writeCommandsJSON(w io.Writer) error {
 
 // writeCommandsTable writes a human-readable command table to w.
 func writeCommandsTable(w io.Writer) error {
-	fmt.Fprintln(w, "CLI commands (orca <cmd>):")
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "CLI commands (orca <cmd>):"))
 	for _, cmd := range cliCommands {
 		hint := ""
 		if cmd.ArgHint != "" {
@@ -252,12 +271,14 @@ func writeCommandsTable(w io.Writer) error {
 		}
 		active := ""
 		if cmd.ActiveOK {
-			active = " [active-ok]"
+			active = ui.Colorize(w, ui.Green, " [active-ok]")
 		}
-		fmt.Fprintf(w, "  %-12s%-30s%s%s\n", cmd.Name, hint, cmd.Summary, active)
+		coloredName := ui.Colorize(w, ui.Cyan, fmt.Sprintf("%-12s", cmd.Name))
+		coloredHint := ui.Colorize(w, ui.Black+ui.Bold, fmt.Sprintf("%-30s", hint))
+		fmt.Fprintf(w, "  %s%s%s%s\n", coloredName, coloredHint, cmd.Summary, active)
 	}
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "REPL slash commands (/cmd):")
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "REPL slash commands (/cmd):"))
 	for _, cmd := range replCommands {
 		hint := ""
 		if cmd.ArgHint != "" {
@@ -265,9 +286,11 @@ func writeCommandsTable(w io.Writer) error {
 		}
 		active := ""
 		if cmd.ActiveOK {
-			active = " [active-ok]"
+			active = ui.Colorize(w, ui.Green, " [active-ok]")
 		}
-		fmt.Fprintf(w, "  %-14s%-28s%s%s\n", cmd.Name, hint, cmd.Summary, active)
+		coloredName := ui.Colorize(w, ui.Cyan, fmt.Sprintf("%-14s", cmd.Name))
+		coloredHint := ui.Colorize(w, ui.Black+ui.Bold, fmt.Sprintf("%-28s", hint))
+		fmt.Fprintf(w, "  %s%s%s%s\n", coloredName, coloredHint, cmd.Summary, active)
 	}
 	return nil
 }

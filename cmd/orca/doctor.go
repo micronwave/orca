@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/micronwave/orca/internal/config"
+	"github.com/micronwave/orca/internal/ui"
 )
 
 // PreflightResult captures setup health for the orca doctor command and the
@@ -227,27 +228,29 @@ func runPreflight(_ string, configPath string, configExists bool, cfg *config.Co
 
 // printDoctorOutput writes the doctor report to w.
 func printDoctorOutput(w io.Writer, r *PreflightResult) {
-	fmt.Fprintln(w, "Orca  doctor")
-	fmt.Fprintln(w, "============")
+	fmt.Fprintf(w, "%s %s\n", ui.IconOrca, ui.Colorize(w, ui.OrcaBlue+ui.Bold, "Orca  doctor"))
+	fmt.Fprintln(w, ui.Colorize(w, ui.OrcaBlue, "============"))
 	fmt.Fprintln(w)
 
 	// Environment.
-	fmt.Fprintln(w, "Environment")
-	gitStatus := "not found"
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "Environment"))
+	gitStatus := ui.Colorize(w, ui.Red, "not found")
 	if r.GitPresent {
 		if r.WorktreeDirty {
-			gitStatus = "present  [dirty]"
+			gitStatus = ui.Colorize(w, ui.Yellow, "present  [dirty]")
 		} else {
-			gitStatus = "present  [clean]"
+			gitStatus = ui.Colorize(w, ui.Green, "present  [clean]")
 		}
 	}
 	projectType := r.ProjectType
 	if projectType == "" {
-		projectType = "(unknown)"
+		projectType = ui.Colorize(w, ui.Black+ui.Bold, "(unknown)")
+	} else {
+		projectType = ui.Colorize(w, ui.Cyan, projectType)
 	}
-	configStatus := "not found"
+	configStatus := ui.Colorize(w, ui.Red, "not found")
 	if r.ConfigExists {
-		configStatus = "present"
+		configStatus = ui.Colorize(w, ui.Green, "present")
 	}
 	fmt.Fprintf(w, "  Project root:  %s\n", r.ProjectRoot)
 	fmt.Fprintf(w, "  Project type:  %s\n", projectType)
@@ -256,37 +259,38 @@ func printDoctorOutput(w io.Writer, r *PreflightResult) {
 	fmt.Fprintln(w)
 
 	// Adapters.
-	fmt.Fprintln(w, "Adapters")
-	fmt.Fprintf(w, "  codex:  %s\n", adapterStatus(r.CodexPath, r.CodexAvailable))
-	fmt.Fprintf(w, "  claude: %s\n", adapterStatus(r.ClaudePath, r.ClaudeAvailable))
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "Adapters"))
+	fmt.Fprintf(w, "  codex:  %s\n", adapterStatus(w, r.CodexPath, r.CodexAvailable))
+	fmt.Fprintf(w, "  claude: %s\n", adapterStatus(w, r.ClaudePath, r.ClaudeAvailable))
 	fmt.Fprintln(w)
 
 	// Verifier gates.
-	fmt.Fprintln(w, "Verifier gates")
+	fmt.Fprintln(w, ui.Colorize(w, ui.Bold, "Verifier gates"))
 	if len(r.GateChecks) == 0 {
 		fmt.Fprintln(w, "  (none configured)")
 	}
 	for _, gc := range r.GateChecks {
-		avail := "ok"
+		avail := ui.Colorize(w, ui.Green, "ok")
 		if !gc.Available {
-			avail = fmt.Sprintf("MISSING executable %q", gc.Executable)
+			avail = ui.Colorize(w, ui.Red, fmt.Sprintf("MISSING executable %q", gc.Executable))
 		}
 		blocking := ""
 		if !gc.Blocking {
-			blocking = " (non-blocking)"
+			blocking = ui.Colorize(w, ui.Black+ui.Bold, " (non-blocking)")
 		}
 		risk := ""
 		if gc.PathRisk {
-			risk = " [path-space-risk]"
+			risk = ui.Colorize(w, ui.Yellow, " [path-space-risk]")
 		}
-		fmt.Fprintf(w, "  %-14s %-36s [%s]%s%s\n", gc.Name, fmt.Sprintf("(%s)", gc.Command), avail, blocking, risk)
+		cmdDisplay := ui.Colorize(w, ui.Black+ui.Bold, fmt.Sprintf("%-36s", fmt.Sprintf("(%s)", gc.Command)))
+		fmt.Fprintf(w, "  %-14s %s [%s]%s%s\n", gc.Name, cmdDisplay, avail, blocking, risk)
 	}
 	fmt.Fprintln(w)
 
 	// Verdict sections.
-	writeSection(w, "BLOCKING ISSUES", r.BlockingErrors, r.InferredFixes)
-	writeSection(w, "Warnings", r.Warnings, nil)
-	writeSection(w, "Optional unavailable", r.OptionalUnavailable, nil)
+	writeSection(w, ui.Colorize(w, ui.Red+ui.Bold, "BLOCKING ISSUES"), ui.IconCross, r.BlockingErrors, r.InferredFixes)
+	writeSection(w, ui.Colorize(w, ui.Yellow+ui.Bold, "Warnings"), ui.IconWarning, r.Warnings, nil)
+	writeSection(w, ui.Colorize(w, ui.Cyan+ui.Bold, "Optional unavailable"), ui.IconStep, r.OptionalUnavailable, nil)
 }
 
 func printDoctorJSON(w io.Writer, r *PreflightResult) error {
@@ -295,8 +299,8 @@ func printDoctorJSON(w io.Writer, r *PreflightResult) error {
 	return enc.Encode(r)
 }
 
-func writeSection(w io.Writer, header string, items []string, fixes []string) {
-	fmt.Fprintf(w, "%s\n", header)
+func writeSection(w io.Writer, header string, icon string, items []string, fixes []string) {
+	fmt.Fprintf(w, "%s %s\n", icon, header)
 	if len(items) == 0 {
 		fmt.Fprintln(w, "  none")
 	} else {
@@ -309,11 +313,11 @@ func writeSection(w io.Writer, header string, items []string, fixes []string) {
 			}
 		}
 		if len(fixes) > 0 {
-			fmt.Fprintln(w, "  Suggested fixes:")
+			fmt.Fprintln(w, "\n  Suggested fixes:")
 			for _, fix := range fixes {
 				lines := strings.Split(fix, "\n")
 				for _, line := range lines {
-					fmt.Fprintf(w, "  %s\n", line)
+					fmt.Fprintf(w, "  %s\n", ui.Colorize(w, ui.Green, line))
 				}
 			}
 		}
@@ -321,14 +325,14 @@ func writeSection(w io.Writer, header string, items []string, fixes []string) {
 	fmt.Fprintln(w)
 }
 
-func adapterStatus(path string, available bool) string {
+func adapterStatus(w io.Writer, path string, available bool) string {
 	if !available {
-		return "not found in PATH"
+		return ui.Colorize(w, ui.Red, "not found in PATH")
 	}
 	if path == "" {
-		return "found"
+		return ui.Colorize(w, ui.Green, "found")
 	}
-	return fmt.Sprintf("found (%s)", path)
+	return ui.Colorize(w, ui.Green, "found") + " " + ui.Colorize(w, ui.Black+ui.Bold, fmt.Sprintf("(%s)", path))
 }
 
 // checkGitState returns whether dir is inside a git worktree and whether that
