@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2241,5 +2242,197 @@ func TestAutoInitWithConfirmation(t *testing.T) {
 				t.Fatal("config.yaml exists but should not have been created")
 			}
 		})
+	}
+}
+
+// ── run() top-level dispatch boundary tests ───────────────────────────────────
+
+// TestRun_NoArgs_NonTTY_ReturnsCommandRequired verifies that run with no
+// arguments and non-TTY stdin returns the "command is required" guidance error
+// rather than attempting to start an interactive session.
+func TestRun_NoArgs_NonTTY_ReturnsCommandRequired(t *testing.T) {
+	if isatty(os.Stdin) {
+		t.Skip("test requires non-TTY stdin")
+	}
+	err := run([]string{})
+	if err == nil {
+		t.Fatal("run() with no args = nil, want 'command is required' error")
+	}
+	if !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("run() error = %q, want it to contain 'command is required'", err.Error())
+	}
+}
+
+// TestRun_HelpAliases_ReturnNil verifies that the three help-alias forms all
+// print help and return nil (not an unknown-command error).
+func TestRun_HelpAliases_ReturnNil(t *testing.T) {
+	for _, alias := range []string{"help", "-h", "--help"} {
+		t.Run(alias, func(t *testing.T) {
+			if err := run([]string{alias}); err != nil {
+				t.Fatalf("run(%q) = %v, want nil", alias, err)
+			}
+		})
+	}
+}
+
+// TestRun_FlagFirstGoalRouting_DispatchesToRunGoal verifies that a leading
+// flag (not a subcommand keyword) routes to runGoal and not the
+// unknown-command handler.
+func TestRun_FlagFirstGoalRouting_DispatchesToRunGoal(t *testing.T) {
+	t.Chdir(t.TempDir()) // no .orca dir — openRuntime will fail fast
+	err := run([]string{"--goal-text", "do something"})
+	if err != nil && strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("run() with flag-first arg returned unknown-command error: %v", err)
+	}
+}
+
+// TestRun_CommandsSubcommand_DispatchesSuccessfully verifies that "commands"
+// is recognized and returns nil.
+func TestRun_CommandsSubcommand_DispatchesSuccessfully(t *testing.T) {
+	t.Parallel()
+	if err := run([]string{"commands"}); err != nil {
+		t.Fatalf("run('commands') = %v, want nil", err)
+	}
+}
+
+// TestRun_DoctorSubcommand_DispatchesToRunDoctor verifies that "doctor"
+// is dispatched to runDoctor and not the unknown-command handler.
+func TestRun_DoctorSubcommand_DispatchesToRunDoctor(t *testing.T) {
+	t.Chdir(t.TempDir())
+	err := run([]string{"doctor"})
+	if err != nil && strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("run('doctor') returned unknown-command error: %v", err)
+	}
+}
+
+// TestRun_ResumeSubcommand_DispatchesToRunResume verifies that "resume"
+// is dispatched to runResume (not the unknown-command handler).
+// With no initialized .orca dir it will fail, but the error must not be
+// "unknown command".
+func TestRun_ResumeSubcommand_DispatchesToRunResume(t *testing.T) {
+	t.Chdir(t.TempDir())
+	err := run([]string{"resume"})
+	if err == nil {
+		t.Fatal("run('resume') with no initialized orca dir: error = nil, want error")
+	}
+	if strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("run('resume') returned unknown-command error: %v", err)
+	}
+}
+
+// TestRun_UnknownCommand_ReturnsUnknownCommandError verifies that an
+// unrecognized top-level command returns a descriptive error that names the
+// bad command.
+func TestRun_UnknownCommand_ReturnsUnknownCommandError(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{"xyzzy", "foobar", "run", "execute"} {
+		t.Run(cmd, func(t *testing.T) {
+			t.Parallel()
+			err := run([]string{cmd})
+			if err == nil {
+				t.Fatalf("run(%q) = nil, want unknown-command error", cmd)
+			}
+			if !strings.Contains(err.Error(), "unknown command") {
+				t.Fatalf("run(%q) error = %q, want 'unknown command'", cmd, err.Error())
+			}
+			if !strings.Contains(err.Error(), cmd) {
+				t.Fatalf("run(%q) error = %q, want it to name the unrecognized command", cmd, err.Error())
+			}
+		})
+	}
+}
+
+// ── runUI child-process contract tests ───────────────────────────────────────
+
+// TestRunUI_ChildNonZeroExitCode_SurfacedAsError verifies that runUI surfaces
+// a non-zero exit code from orca-desktop as an *exec.ExitError with the
+// correct code, not as a silent nil.
+func TestRunUI_ChildNonZeroExitCode_SurfacedAsError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	helperDir := t.TempDir()
+
+	helperCode := `package main
+import "os"
+func main() { os.Exit(2) }
+`
+	helperSrc := filepath.Join(helperDir, "main.go")
+	if err := os.WriteFile(helperSrc, []byte(helperCode), 0o644); err != nil {
+		t.Fatalf("write helper source: %v", err)
+	}
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		name = "orca-desktop.exe"
+	}
+	helperBin := filepath.Join(helperDir, name)
+	build := exec.Command("go", "build", "-o", helperBin, helperSrc)
+	build.Env = os.Environ()
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build helper binary: %v", err)
+	}
+
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+	t.Setenv("PATH", helperDir)
+
+	err := runUI([]string{})
+	if err == nil {
+		t.Fatal("runUI: expected non-nil error for child exit code 2, got nil")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("runUI: expected *exec.ExitError, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Fatalf("runUI: exit code = %d, want 2", exitErr.ExitCode())
+	}
+}
+
+// ── findDesktopBinary precedence test ────────────────────────────────────────
+
+// TestFindDesktopBinary_WellKnownCandidatePrecedesPath verifies that a binary
+// at a well-known installation location wins over a binary found on PATH.
+func TestFindDesktopBinary_WellKnownCandidatePrecedesPath(t *testing.T) {
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		name = "orca-desktop.exe"
+	}
+
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+
+	var wantCandidate string
+	if goos.GOOS == "windows" {
+		wantCandidate = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "orca", name)
+	} else {
+		wantCandidate = filepath.Join(os.Getenv("HOME"), ".orca", "bin", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(wantCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir candidate dir: %v", err)
+	}
+	if err := os.WriteFile(wantCandidate, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write well-known candidate: %v", err)
+	}
+
+	// Also put a binary on PATH — it must not beat the well-known candidate.
+	pathDir := t.TempDir()
+	pathBinary := filepath.Join(pathDir, name)
+	if err := os.WriteFile(pathBinary, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("write PATH binary: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	got, err := findDesktopBinary()
+	if err != nil {
+		t.Fatalf("findDesktopBinary: %v", err)
+	}
+	if got != wantCandidate {
+		t.Fatalf("findDesktopBinary = %q, want well-known candidate %q", got, wantCandidate)
 	}
 }
