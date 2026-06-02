@@ -116,6 +116,68 @@ func TestPlan_setsDeterministicWorktreePathAndEmitsSingleCapsuleEvent(t *testing
 	}
 }
 
+func TestPlan_setsDefaultPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(root, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	goalID := "G-plan-permission"
+	conditionID := "GC-plan-permission"
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "permission mode",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   conditionID,
+			Description:          "permission mode",
+			EffectiveDescription: "permission mode",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-plan-permission",
+		GoalConditionID:  conditionID,
+		Description:      "prove permission mode",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	result, err := New(st, Config{
+		OrcaDir:               filepath.Join(root, ".orca"),
+		DefaultMaxTokens:      32000,
+		DefaultMaxWallTime:    300,
+		DefaultMaxRetries:     3,
+		DefaultPermissionMode: schema.PermissionWorkspaceWrite,
+	}, nil).Plan(ctx, goalID)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	capsule, err := st.LoadCapsule(ctx, result.CapsuleIDs[0])
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	if capsule.PermissionMode != schema.PermissionWorkspaceWrite {
+		t.Fatalf("PermissionMode = %q, want %q", capsule.PermissionMode, schema.PermissionWorkspaceWrite)
+	}
+}
+
 func TestTopologyClassifier_rules(t *testing.T) {
 	t.Parallel()
 

@@ -349,6 +349,33 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		}
 		return s.updatePatchStatusNoLock(p.PatchID, schema.PatchRejected)
 
+	case schema.EventCapsuleRuntimeStatus:
+		var v schema.CapsuleRuntimeEvent
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal CapsuleRuntimeEvent: %w", err)
+		}
+		if v.CapsuleID == "" {
+			return fmt.Errorf("invalid capsule_runtime_status payload: capsule_id is required")
+		}
+		if err := validateArtifactID("capsule runtime", v.CapsuleID); err != nil {
+			return err
+		}
+		v.Seq = e.SequenceNum
+		return s.writeFile(s.artifactPath(dirCapsuleRuntime, v.CapsuleID), &v)
+
+	case schema.EventStartupBundleCreated:
+		var v schema.StartupEvidenceBundle
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			return fmt.Errorf("unmarshal StartupEvidenceBundle: %w", err)
+		}
+		if v.CapsuleID == "" {
+			return fmt.Errorf("invalid startup_bundle_created payload: capsule_id is required")
+		}
+		if err := validateArtifactID("startup bundle", v.CapsuleID); err != nil {
+			return err
+		}
+		return s.writeFile(s.artifactPath(dirStartupBundles, v.CapsuleID), &v)
+
 	// ── events that require no artifact file change ──────────────────────────
 
 	case schema.EventTopologySelected,
@@ -468,6 +495,7 @@ func ReplayDir(root string) []string {
 		dirPatches, dirEvidence, dirClaims, dirBudgets,
 		dirFailures, dirDecisions, dirVerifierResults, dirTopologyOutcomes,
 		dirPRs, dirCIStatus, dirIntake,
+		dirCapsuleRuntime, dirStartupBundles,
 	}
 	out := make([]string, len(dirs))
 	for i, d := range dirs {

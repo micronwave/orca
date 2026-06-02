@@ -19,6 +19,7 @@ const (
 	relDecisions       = "artifacts/decisions"
 	relBudgets         = "artifacts/budgets"
 	relVerifierResults = "artifacts/verifier_results"
+	relCapsuleRuntime  = "state/capsule_runtime"
 )
 
 // readFile JSON-decodes the file at path into T.

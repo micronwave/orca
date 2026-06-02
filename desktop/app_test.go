@@ -576,6 +576,12 @@ func TestDesktopListsScopePrimaryDataToActiveGoal(t *testing.T) {
 	writeJSON(t, filepath.Join(orcaDir, "state", "capsules", "CAP-A.json"), capsuleDisk{
 		CapsuleID: "CAP-A", ObligationIDs: []string{"OB-A"},
 	})
+	if err := os.MkdirAll(filepath.Join(orcaDir, "state", "capsule_runtime"), 0o755); err != nil {
+		t.Fatalf("mkdir capsule_runtime: %v", err)
+	}
+	writeJSON(t, filepath.Join(orcaDir, "state", "capsule_runtime", "CAP-A.json"), capsuleRuntimeDisk{
+		CapsuleID: "CAP-A", Status: "agent_running", FailClass: "provider", Detail: "waiting",
+	})
 	writeJSON(t, filepath.Join(orcaDir, "state", "capsules", "CAP-OLD.json"), capsuleDisk{
 		CapsuleID: "CAP-OLD", ObligationIDs: []string{"OB-OLD"},
 	})
@@ -612,6 +618,9 @@ func TestDesktopListsScopePrimaryDataToActiveGoal(t *testing.T) {
 	}
 	if len(capsules) != 1 || capsules[0].CapsuleID != "CAP-A" {
 		t.Fatalf("ListCapsules = %+v, want only CAP-A", capsules)
+	}
+	if capsules[0].RuntimeStatus != "agent_running" || capsules[0].RuntimeFailure != "provider" || capsules[0].RuntimeDetail != "waiting" {
+		t.Fatalf("capsule runtime fields = %+v, want latest runtime status", capsules[0])
 	}
 	patches, err := app.ListPatches()
 	if err != nil {

@@ -20,16 +20,37 @@ const maxDurationSeconds = 365 * 24 * 3600 // 31_536_000
 
 // Config is the runtime configuration.
 type Config struct {
-	Verifier VerifierConfig
-	Gate     GateConfig
-	Budget   BudgetConfig
-	Adapters AdapterConfig
-	Advanced AdvancedConfig
-	MCP      MCPConfig
-	Intake   IntakeConfig
-	PR       PRConfig
-	CI       CIConfig
-	Remote   RemoteConfig
+	Verifier   VerifierConfig
+	Gate       GateConfig
+	Budget     BudgetConfig
+	Adapters   AdapterConfig
+	Advanced   AdvancedConfig
+	MCP        MCPConfig
+	Intake     IntakeConfig
+	PR         PRConfig
+	CI         CIConfig
+	Remote     RemoteConfig
+	Permission PermissionConfig
+}
+
+// PermissionConfig holds the default permission policy applied to capsules that
+// do not carry an explicit PermissionMode. orca.md Phase A §1.
+type PermissionConfig struct {
+	// DefaultMode is the default PermissionMode for new capsules.
+	// Valid values: "read_only", "workspace_write", "danger_full_access", "prompt".
+	// Empty means the runner defaults to "danger_full_access" for Phase 1 parity.
+	DefaultMode string
+	// Rules is an ordered list of allow/deny/ask overrides applied after the
+	// mode and tool checks. Deny wins when both a deny and allow rule match.
+	Rules []PermissionRule
+}
+
+// PermissionRule is a single allow/deny/ask override in the permission config.
+type PermissionRule struct {
+	Tool    string // exact tool name; empty means all tools
+	Pattern string // substring of InputSummary; empty means all inputs
+	Effect  string // "allow", "deny", or "ask"
+	Reason  string
 }
 
 // MCPConfig holds the optional MCP server settings. Zero value disables the feature.
@@ -174,6 +195,8 @@ func Load(path string) (*Config, error) {
 	var section string
 	var inVerifierGates bool
 	var currentGate *VerifierGate
+	var inPermissionRules bool
+	var currentRule *PermissionRule
 
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
@@ -190,6 +213,8 @@ func Load(path string) (*Config, error) {
 			section = strings.TrimSuffix(line, ":")
 			inVerifierGates = false
 			currentGate = nil
+			inPermissionRules = false
+			currentRule = nil
 			continue
 		}
 
@@ -450,6 +475,43 @@ func Load(path string) (*Config, error) {
 			default:
 				return nil, fmt.Errorf("config: unknown remote field %q on line %d", key, lineNum)
 			}
+		case "permission":
+			if line == "rules:" {
+				inPermissionRules = true
+				currentRule = nil
+				continue
+			}
+			if inPermissionRules && indent > 2 {
+				if strings.HasPrefix(line, "- ") {
+					cfg.Permission.Rules = append(cfg.Permission.Rules, PermissionRule{})
+					currentRule = &cfg.Permission.Rules[len(cfg.Permission.Rules)-1]
+					line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+					if line == "" {
+						continue
+					}
+				}
+				if currentRule == nil {
+					return nil, fmt.Errorf("config: permission rule field before list item on line %d", lineNum)
+				}
+				key, value, err := parseKeyValue(line, lineNum)
+				if err != nil {
+					return nil, err
+				}
+				if err := setPermissionRuleField(currentRule, key, value, lineNum); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			inPermissionRules = false
+			currentRule = nil
+			key, value, err := parseKeyValue(line, lineNum)
+			if err != nil {
+				return nil, err
+			}
+			if key != "default_mode" {
+				return nil, fmt.Errorf("config: unknown permission field %q on line %d", key, lineNum)
+			}
+			cfg.Permission.DefaultMode = value
 		default:
 			return nil, fmt.Errorf("config: unknown section %q on line %d", section, lineNum)
 		}
@@ -517,6 +579,27 @@ func parseScalar(value string) string {
 		}
 	}
 	return value
+}
+
+func setPermissionRuleField(rule *PermissionRule, key, value string, lineNum int) error {
+	switch key {
+	case "tool":
+		rule.Tool = value
+	case "pattern":
+		rule.Pattern = value
+	case "effect":
+		switch value {
+		case "allow", "deny", "ask":
+			rule.Effect = value
+		default:
+			return fmt.Errorf("config: invalid permission rule effect %q on line %d (want allow|deny|ask)", value, lineNum)
+		}
+	case "reason":
+		rule.Reason = value
+	default:
+		return fmt.Errorf("config: unknown permission rule field %q on line %d", key, lineNum)
+	}
+	return nil
 }
 
 func setVerifierGateField(gate *VerifierGate, key, value string, lineNum int) error {

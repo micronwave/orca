@@ -187,6 +187,41 @@ func TestExecute_UploadsBriefingAndCapsule(t *testing.T) {
 	}
 }
 
+func TestExecute_UsesCapsulePermissionModeInAgentCommand(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent schema.AgentType
+		mode  schema.PermissionMode
+		want  string
+	}{
+		{name: "codex workspace write", agent: schema.AgentCodex, mode: schema.PermissionWorkspaceWrite, want: "-s workspace-write"},
+		{name: "codex read only", agent: schema.AgentCodex, mode: schema.PermissionReadOnly, want: "-s read-only"},
+		{name: "claude workspace write", agent: schema.AgentClaude, mode: schema.PermissionWorkspaceWrite, want: "--permission-mode acceptEdits"},
+		{name: "claude read only", agent: schema.AgentClaude, mode: schema.PermissionReadOnly, want: "--permission-mode prompt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := newFakeSession()
+			remoteDir := "/remote/workspace/CAP-CAP-REMOTE-1"
+			sess.downloads[remoteDir+"/output.json"] = validSidecar()
+			capsule := testCapsule()
+			capsule.Agent = tt.agent
+			capsule.PermissionMode = tt.mode
+
+			a := remote.New(remoteConfig(), tt.agent, t.TempDir(), &fakeDialer{sess: sess})
+			if _, err := a.Execute(context.Background(), capsule, testProjection()); err != nil {
+				t.Fatalf("Execute = %v", err)
+			}
+			if len(sess.commands) != 1 {
+				t.Fatalf("commands len = %d, want 1", len(sess.commands))
+			}
+			if !strings.Contains(sess.commands[0], tt.want) {
+				t.Fatalf("command %q missing %q", sess.commands[0], tt.want)
+			}
+		})
+	}
+}
+
 // TestExecute_ParsesSidecarJSON returns sidecar output on success.
 func TestExecute_ParsesSidecarJSON(t *testing.T) {
 	sess := newFakeSession()

@@ -28,6 +28,7 @@ import (
 	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/intent"
 	"github.com/micronwave/orca/internal/mcp"
+	"github.com/micronwave/orca/internal/permission"
 	"github.com/micronwave/orca/internal/planner"
 	"github.com/micronwave/orca/internal/projector"
 	"github.com/micronwave/orca/internal/prwriter"
@@ -485,11 +486,11 @@ func newRuntime(cfg *config.Config, orcaDir string, noLearning bool, log *eventl
 
 		intentCompiler: newIntentCompiler(st),
 		verifierEngine: newVerifierEngine(st, verifierCfg, cfg.Advanced, noLearning),
-		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, orcaDir, noLearning),
+		planner:        newPlanner(st, cfg.Budget, cfg.Adapters, cfg.Advanced, cfg.Permission, orcaDir, noLearning),
 		projector:      newProjector(st, verifierCfg, cfg.Advanced),
 		gatekeeper:     newGatekeeper(st, cfg.Gate),
 		budget:         newBudgetController(log, cfg.Budget),
-		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, cfg.Remote, noLearning),
+		runner:         newCapsuleRunner(st, log, orcaDir, cfg.Adapters, cfg.Remote, cfg.Permission, noLearning),
 		reconciler:     newReconciler(st, log, noLearning),
 		intakeFetcher:  &intake.Fetcher{},
 	}, nil
@@ -1572,7 +1573,15 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Active capsules: %d\n", len(capsules))
 	for _, capsule := range capsules {
-		fmt.Fprintf(out, "- %s [%s] agent=%s\n", capsule.CapsuleID, capsule.State, capsule.Agent)
+		fmt.Fprintf(out, "- %s [%s] agent=%s", capsule.CapsuleID, capsule.State, capsule.Agent)
+		runtimeStatus, err := rt.store.LoadLatestRuntimeStatus(ctx, capsule.CapsuleID)
+		if err == nil && runtimeStatus != nil {
+			fmt.Fprintf(out, " runtime_status=%s", runtimeStatus.Status)
+			if runtimeStatus.FailClass != "" {
+				fmt.Fprintf(out, " failure_class=%s", runtimeStatus.FailClass)
+			}
+		}
+		fmt.Fprintln(out)
 	}
 	if latestVerifier == nil {
 		fmt.Fprintln(out, "Last verifier result: none")
@@ -2326,6 +2335,7 @@ func newPlanner(
 	cfg config.BudgetConfig,
 	adapters config.AdapterConfig,
 	adv config.AdvancedConfig,
+	permissionCfg config.PermissionConfig,
 	orcaDir string,
 	noLearning bool,
 ) *planner.Planner {
@@ -2343,6 +2353,7 @@ func newPlanner(
 		DefaultMaxTokens:         cfg.DefaultMaxTokens,
 		DefaultMaxWallTime:       cfg.DefaultMaxWallTimeSeconds,
 		DefaultMaxRetries:        cfg.DefaultMaxRetries,
+		DefaultPermissionMode:    schema.PermissionMode(permissionCfg.DefaultMode),
 		NoLearning:               noLearning,
 		ReviewerDiversityEnabled: adv.Enabled && adv.ReviewerDiversity,
 		PreferredReviewerAdapter: preferredReviewer,
@@ -2361,7 +2372,7 @@ func newBudgetController(log *eventlog.FileLog, _ config.BudgetConfig) *budget.C
 	return budget.New(log)
 }
 
-func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, remoteCfg config.RemoteConfig, noLearning bool) *runner.Runner {
+func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg config.AdapterConfig, remoteCfg config.RemoteConfig, permissionCfg config.PermissionConfig, noLearning bool) *runner.Runner {
 	adapters := []runner.Adapter{
 		codex.New(orcaDir, cfg.CodexPath),
 		claude.New(orcaDir, cfg.ClaudePath),
@@ -2378,9 +2389,25 @@ func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string
 		st,
 		log,
 		orcaDir,
-		runner.Config{NoLearning: noLearning},
+		runner.Config{
+			NoLearning:      noLearning,
+			PermissionRules: permissionRulesFromConfig(permissionCfg.Rules),
+		},
 		adapters...,
 	)
+}
+
+func permissionRulesFromConfig(rules []config.PermissionRule) []permission.Rule {
+	out := make([]permission.Rule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, permission.Rule{
+			Tool:    rule.Tool,
+			Pattern: rule.Pattern,
+			Effect:  permission.RuleEffect(rule.Effect),
+			Reason:  rule.Reason,
+		})
+	}
+	return out
 }
 
 func newReconciler(st *store.FileStore, log *eventlog.FileLog, noLearning bool) *reconciler.Reconciler {

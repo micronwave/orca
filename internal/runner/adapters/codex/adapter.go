@@ -103,13 +103,13 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	defer briefingFile.Close()
 
 	// codex exec reads the prompt from stdin when "-" is passed as the prompt argument.
-	// danger-full-access is appropriate here: the capsule runs in an isolated git worktree
-	// (.orca/capsules/<id>/worktree) that is separate from the main working tree.
+	// The sandbox level comes from the capsule's PermissionMode so the runner's
+	// policy decision is authoritative; the adapter just maps it to the CLI flag.
 	// --output-schema constrains the model's final response to match AgentSidecarOutput.
 	// -o writes that final response to absSidecarPath so we can read it back.
 	args := []string{
 		"exec",
-		"-s", "danger-full-access",
+		"-s", codexSandboxFlag(capsule.PermissionMode),
 		"--ephemeral",
 		"--output-schema", absSchemaPath,
 		"-o", absSidecarPath,
@@ -471,6 +471,23 @@ func uniqueStrings(values []string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+// codexSandboxFlag maps a schema.PermissionMode to the codex -s flag value.
+// Defaults to "danger-full-access" when mode is empty to preserve Phase 1 behaviour.
+func codexSandboxFlag(mode schema.PermissionMode) string {
+	switch mode {
+	case schema.PermissionReadOnly:
+		return "read-only"
+	case schema.PermissionWorkspaceWrite:
+		return "workspace-write"
+	case schema.PermissionDangerFullAccess, "":
+		return "danger-full-access"
+	default:
+		// Unknown modes fall back to full access; the runner's permission check
+		// is the authoritative gate — the adapter flag is a secondary safeguard.
+		return "danger-full-access"
+	}
 }
 
 var _ runner.Adapter = (*Adapter)(nil)

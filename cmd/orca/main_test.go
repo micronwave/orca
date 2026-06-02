@@ -621,6 +621,7 @@ func TestNewPlannerWiresReviewerDiversityPreferredAdapter(t *testing.T) {
 		config.BudgetConfig{DefaultMaxTokens: 32000, DefaultMaxWallTimeSeconds: 300, DefaultMaxRetries: 3},
 		config.AdapterConfig{CodexPath: "codex.exe", ClaudePath: "claude.exe"},
 		config.AdvancedConfig{Enabled: true, ReviewerDiversity: true},
+		config.PermissionConfig{},
 		orcaDir,
 		false,
 	)
@@ -644,6 +645,67 @@ func TestNewPlannerWiresReviewerDiversityPreferredAdapter(t *testing.T) {
 	}
 	if reviewer.Agent != schema.AgentClaude {
 		t.Fatalf("reviewer agent = %s, want configured preferred %s", reviewer.Agent, schema.AgentClaude)
+	}
+}
+
+func TestNewPlannerAppliesPermissionDefaultMode(t *testing.T) {
+	ctx := context.Background()
+	orcaDir := t.TempDir()
+	log, err := eventlog.Open(filepath.Join(orcaDir, "events.log"))
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(orcaDir, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         "G-permission-default",
+		OriginalIntent: "permission default",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   "GC-permission-default",
+			Description:          "permission default",
+			EffectiveDescription: "permission default",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-permission-default",
+		GoalConditionID:  "GC-permission-default",
+		Description:      "prove permission default",
+		EvidenceRequired: []string{"test_result"},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+
+	plannerSvc := newPlanner(
+		st,
+		config.BudgetConfig{DefaultMaxTokens: 32000, DefaultMaxWallTimeSeconds: 300, DefaultMaxRetries: 3},
+		config.AdapterConfig{},
+		config.AdvancedConfig{},
+		config.PermissionConfig{DefaultMode: string(schema.PermissionPrompt)},
+		orcaDir,
+		false,
+	)
+	result, err := plannerSvc.Plan(ctx, "G-permission-default")
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	capsule, err := st.LoadCapsule(ctx, result.CapsuleIDs[0])
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	if capsule.PermissionMode != schema.PermissionPrompt {
+		t.Fatalf("PermissionMode = %q, want %q", capsule.PermissionMode, schema.PermissionPrompt)
 	}
 }
 

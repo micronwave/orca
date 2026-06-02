@@ -135,7 +135,11 @@ func (a *App) ListCapsules() ([]CapsuleView, error) {
 	})
 	out := make([]CapsuleView, 0, len(caps))
 	for _, c := range caps {
-		out = append(out, toCapsuleView(c))
+		runtimeStatus, err := readFile[capsuleRuntimeDisk](filepath.Join(orcaPath(dir, relCapsuleRuntime), c.CapsuleID+".json"))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, toCapsuleView(c, runtimeStatus))
 	}
 	return out, nil
 }

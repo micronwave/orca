@@ -19,6 +19,7 @@ type Config struct {
 	DefaultMaxTokens         int
 	DefaultMaxWallTime       int
 	DefaultMaxRetries        int
+	DefaultPermissionMode    schema.PermissionMode
 	NoLearning               bool
 	ReviewerDiversityEnabled bool
 	PreferredReviewerAdapter string
@@ -218,6 +219,7 @@ func (s *Planner) newCapsule(
 		AllowedPaths:       append([]string(nil), scope.AllowedFiles...),
 		ForbiddenPaths:     append([]string(nil), scope.ForbiddenFiles...),
 		ForbiddenActions:   append([]string(nil), scope.ForbiddenActions...),
+		PermissionMode:     s.config.DefaultPermissionMode,
 		Budget:             s.defaultCapsuleBudget(),
 		Sandbox:            s.defaultSandbox(capsuleID),
 		State:              schema.CapsuleStatePending,

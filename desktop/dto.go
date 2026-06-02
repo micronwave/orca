@@ -55,6 +55,17 @@ type capsuleDisk struct {
 	TopologyDecisionID  string             `json:"topology_decision_id"`
 }
 
+type capsuleRuntimeDisk struct {
+	Seq        int64     `json:"seq"`
+	CapsuleID  string    `json:"capsule_id"`
+	GoalID     string    `json:"goal_id"`
+	Source     string    `json:"source"`
+	Status     string    `json:"status"`
+	FailClass  string    `json:"failure_class,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
 type patchDisk struct {
 	PatchID              string   `json:"patch_id"`
 	CapsuleID            string   `json:"capsule_id"`
@@ -179,6 +190,9 @@ type CapsuleView struct {
 	Agent              string `json:"agent"`
 	Role               string `json:"role"`
 	State              string `json:"state"`
+	RuntimeStatus      string `json:"runtime_status"`
+	RuntimeFailure     string `json:"runtime_failure_class"`
+	RuntimeDetail      string `json:"runtime_detail"`
 	WorktreePath       string `json:"worktree_path"`
 	MaxTokens          int    `json:"max_tokens"`
 	MaxWallTimeSec     int    `json:"max_wall_time_seconds"`
@@ -325,12 +339,21 @@ func toObligationView(o obligationDisk) ObligationView {
 	}
 }
 
-func toCapsuleView(c capsuleDisk) CapsuleView {
+func toCapsuleView(c capsuleDisk, runtime *capsuleRuntimeDisk) CapsuleView {
+	var runtimeStatus, runtimeFailure, runtimeDetail string
+	if runtime != nil {
+		runtimeStatus = runtime.Status
+		runtimeFailure = runtime.FailClass
+		runtimeDetail = runtime.Detail
+	}
 	return CapsuleView{
 		CapsuleID:          c.CapsuleID,
 		Agent:              c.Agent,
 		Role:               c.Role,
 		State:              c.State,
+		RuntimeStatus:      runtimeStatus,
+		RuntimeFailure:     runtimeFailure,
+		RuntimeDetail:      runtimeDetail,
 		WorktreePath:       c.Sandbox.WorktreePath,
 		MaxTokens:          c.Budget.MaxTokens,
 		MaxWallTimeSec:     c.Budget.MaxWallTimeSeconds,

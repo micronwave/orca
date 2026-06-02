@@ -50,6 +50,13 @@ const (
 	// EventClaimSuperseded is emitted by the reconciler when a claim's SupersededBy
 	// field is set, indicating it has been replaced by a newer artifact.
 	EventClaimSuperseded EventType = "claim_superseded"
+	// EventCapsuleRuntimeStatus is emitted by the runner whenever the capsule
+	// runtime diagnostic status changes. Payload is CapsuleRuntimeEvent. The
+	// store materialises the latest status per capsule for deterministic replay.
+	EventCapsuleRuntimeStatus EventType = "capsule_runtime_status"
+	// EventStartupBundleCreated is emitted by the runner when a startup timeout
+	// produces a StartupEvidenceBundle. Payload is the StartupEvidenceBundle.
+	EventStartupBundleCreated EventType = "startup_bundle_created"
 )
 
 // Event is one entry in the append-only event log.

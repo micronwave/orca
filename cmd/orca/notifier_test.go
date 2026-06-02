@@ -255,6 +255,15 @@ func TestRunStatus_Raw_ShowsDetailedDump(t *testing.T) {
 	}
 	defer closeFn()
 
+	if err := rt.store.AppendRuntimeEvent(context.Background(), &schema.CapsuleRuntimeEvent{
+		CapsuleID: "CAP-1",
+		GoalID:    "G-1",
+		Source:    "runner",
+		Status:    schema.RuntimeStatusAgentRunning,
+	}); err != nil {
+		t.Fatalf("AppendRuntimeEvent: %v", err)
+	}
+
 	var out bytes.Buffer
 	if err := rt.printStatus(context.Background(), &out); err != nil {
 		t.Fatalf("printStatus: %v", err)
@@ -265,6 +274,7 @@ func TestRunStatus_Raw_ShowsDetailedDump(t *testing.T) {
 		"Active goal: G-1",
 		"Open obligations: 1",
 		"Active capsules: 1",
+		"runtime_status=agent_running",
 		"Budget totals:",
 		"MCP server:",
 		"Remote execution:",

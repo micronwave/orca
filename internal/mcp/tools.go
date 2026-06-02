@@ -193,7 +193,11 @@ func (s *Server) toolListCapsules(ctx context.Context, args json.RawMessage) (st
 		return "", fmt.Errorf("goal_id is required")
 	}
 	seen := make(map[string]bool)
-	var capsules []*schema.ExecutionCapsule
+	type capsuleWithRuntime struct {
+		*schema.ExecutionCapsule
+		RuntimeStatus *schema.CapsuleRuntimeEvent `json:"runtime_status,omitempty"`
+	}
+	var capsules []capsuleWithRuntime
 	var afterSeq int64
 	for {
 		events, err := s.log.ReadForGoal(ctx, params.GoalID, afterSeq, 200)
@@ -210,13 +214,20 @@ func (s *Server) toolListCapsules(ctx context.Context, args json.RawMessage) (st
 				if err != nil {
 					return "", fmt.Errorf("load capsule %s: %w", ev.ArtifactID, err)
 				}
-				capsules = append(capsules, capsule)
+				latest, err := s.store.LoadLatestRuntimeStatus(ctx, ev.ArtifactID)
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					return "", fmt.Errorf("load capsule runtime status %s: %w", ev.ArtifactID, err)
+				}
+				capsules = append(capsules, capsuleWithRuntime{
+					ExecutionCapsule: capsule,
+					RuntimeStatus:    latest,
+				})
 			}
 		}
 		afterSeq = events[len(events)-1].SequenceNum
 	}
 	if capsules == nil {
-		capsules = []*schema.ExecutionCapsule{}
+		capsules = []capsuleWithRuntime{}
 	}
 	return marshalResult(capsules)
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,12 +142,12 @@ func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
 	r := New(env.st, env.log, env.orcaDir, adapter)
 	fakeStart := time.Unix(1000, 0)
 	calls := 0
+	// Advance by 50ms on every call so consecutive calls always produce
+	// a positive duration regardless of how many emitRuntime calls precede
+	// the start/elapsed measurements inside runAdapter.
 	r.nowFn = func() time.Time {
 		calls++
-		if calls == 1 {
-			return fakeStart
-		}
-		return fakeStart.Add(50 * time.Millisecond)
+		return fakeStart.Add(time.Duration(calls-1) * 50 * time.Millisecond)
 	}
 	result, err := r.Run(env.ctx, capsuleID)
 	if err != nil {
@@ -516,14 +517,18 @@ func saveRunnerScenario(t *testing.T, env *runnerEnv) string {
 }
 
 type fakeAdapter struct {
-	agent     schema.AgentType
-	executeFn func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error)
-	extractFn func(ctx context.Context, capsule *schema.ExecutionCapsule, transcriptPath string) (*schema.AgentSidecarOutput, error)
+	agent       schema.AgentType
+	preflightFn func(ctx context.Context, capsule *schema.ExecutionCapsule) error
+	executeFn   func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error)
+	extractFn   func(ctx context.Context, capsule *schema.ExecutionCapsule, transcriptPath string) (*schema.AgentSidecarOutput, error)
 }
 
 func (f *fakeAdapter) AgentType() schema.AgentType { return f.agent }
 
 func (f *fakeAdapter) Preflight(ctx context.Context, capsule *schema.ExecutionCapsule) error {
+	if f.preflightFn != nil {
+		return f.preflightFn(ctx, capsule)
+	}
 	return nil
 }
 
@@ -577,6 +582,417 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	return data
+}
+
+// ── Phase A: Permission Enforcement ──────────────────────────────────────────
+
+func TestRunReadOnlyCapsuleDeniesExecution(t *testing.T) {
+	env := newRunnerEnv(t)
+	// Build a capsule with read_only mode.
+	capsuleID := saveRunnerScenarioWithPermission(t, env, schema.PermissionReadOnly)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			t.Fatal("adapter.Execute must not be called on a read-only capsule")
+			return nil, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run must return an error for a read-only capsule requiring workspace_write")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error should mention permission denied, got: %v", err)
+	}
+}
+
+func TestRunWorkspaceWriteCapsuleAllowsExecution(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenarioWithPermission(t, env, schema.PermissionWorkspaceWrite)
+	executed := false
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			executed = true
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "ws_write.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "ws_write.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"ws_write.txt"},
+				CommandsRun:          []string{"echo"},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "workspace write test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	result, err := r.Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !executed {
+		t.Fatal("adapter.Execute was not called")
+	}
+	_ = result
+}
+
+func TestRunPromptModeCapsuleBlocksNonInteractiveRun(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenarioWithPermission(t, env, schema.PermissionPrompt)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			t.Fatal("adapter.Execute must not be called for prompt-mode capsule")
+			return nil, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run must return an error for a prompt-mode capsule (requires human approval)")
+	}
+	if !strings.Contains(err.Error(), "human approval") {
+		t.Fatalf("error should mention human approval, got: %v", err)
+	}
+}
+
+func TestRunForbiddenToolDeniesExecution(t *testing.T) {
+	env := newRunnerEnv(t)
+	// capsule.ForbiddenActions contains the agent's own name
+	capsuleID := saveRunnerScenarioWithForbiddenAgent(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			t.Fatal("adapter.Execute must not be called for a capsule with forbidden agent")
+			return nil, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run must return an error when the agent is in ForbiddenActions")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error should mention permission denied, got: %v", err)
+	}
+}
+
+// ── Phase A: Capsule Lifecycle Observability ──────────────────────────────────
+
+func TestRunEmitsOrderedRuntimeEventsForSuccessfulCapsule(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "runtime_ev.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "runtime_ev.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"runtime_ev.txt"},
+				CommandsRun:          []string{"go test"},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "runtime events test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Verify latest runtime status is "output_collecting" (last pre-terminal status).
+	latest, err := env.st.LoadLatestRuntimeStatus(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadLatestRuntimeStatus: %v", err)
+	}
+	if latest.Status != schema.RuntimeStatusOutputCollecting {
+		t.Fatalf("latest runtime status = %s, want %s", latest.Status, schema.RuntimeStatusOutputCollecting)
+	}
+}
+
+func TestRunPreflightFailureRecordsWorktreeStateEvent(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		preflightFn: func(ctx context.Context, capsule *schema.ExecutionCapsule) error {
+			return errors.New("clean worktree check failed: uncommitted changes in worktree")
+		},
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			t.Fatal("Execute should not be called after preflight failure")
+			return nil, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run should fail when preflight fails")
+	}
+
+	latest, err := env.st.LoadLatestRuntimeStatus(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadLatestRuntimeStatus: %v", err)
+	}
+	// Preflight warning should be the last status; fail class should be worktree_state.
+	if latest.Status != schema.RuntimeStatusPreflightWarning {
+		t.Fatalf("last status = %s, want preflight_warning", latest.Status)
+	}
+	if latest.FailClass != schema.RuntimeFailureWorktreeState {
+		t.Fatalf("fail class = %s, want worktree_state", latest.FailClass)
+	}
+}
+
+func TestRunSidecarParseFailureRecordsAdapterProtocolEvent(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			// Simulate sidecar parse failure followed by transcript extraction.
+			path := orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)
+			_ = os.MkdirAll(filepath.Dir(path), 0o755)
+			_ = os.WriteFile(path, []byte("some transcript"), 0o644)
+			return nil, ErrInvalidSidecar
+		},
+		extractFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, transcriptPath string) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "protocol_ev.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "protocol_ev.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"protocol_ev.txt"},
+				CommandsRun:          []string{"extract"},
+				EvidencePaths:        []string{transcriptPath},
+				Summary:              "fallback after sidecar parse failure",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	result, err := r.Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.SidecarUsed {
+		t.Fatal("SidecarUsed should be false (fell back to transcript)")
+	}
+
+	// The adapter_protocol event should have been emitted (as an intermediate
+	// status before the run succeeded via transcript extraction).
+	// The final status should be output_collecting.
+	latest, err := env.st.LoadLatestRuntimeStatus(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadLatestRuntimeStatus: %v", err)
+	}
+	if latest.Status != schema.RuntimeStatusOutputCollecting {
+		t.Fatalf("final status = %s, want output_collecting", latest.Status)
+	}
+}
+
+func TestRunStartupTimeoutCreatesStartupBundle(t *testing.T) {
+	env := newRunnerEnv(t)
+	// Create a capsule with a very short timeout.
+	capsuleID := saveRunnerScenarioWithTimeout(t, env, 1) // 1-second wall time
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			// Simulate deadline exceeded.
+			return nil, context.DeadlineExceeded
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run should fail on timeout")
+	}
+
+	bundle, err := env.st.LoadStartupBundle(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadStartupBundle: %v — startup timeout should create a bundle", err)
+	}
+	if bundle.FailureClass != schema.RuntimeFailureStartupNoEvidence {
+		t.Fatalf("bundle.FailureClass = %s, want startup_no_evidence", bundle.FailureClass)
+	}
+	if bundle.CapsuleID != capsuleID {
+		t.Fatalf("bundle.CapsuleID = %s, want %s", bundle.CapsuleID, capsuleID)
+	}
+}
+
+func TestRunRuntimeEventsReconstructedByReplay(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "replay_test.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "replay_test.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"replay_test.txt"},
+				CommandsRun:          []string{"go test"},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "replay test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	_, err := r.Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Record expected status before wiping artifact files.
+	before, err := env.st.LoadLatestRuntimeStatus(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadLatestRuntimeStatus before replay: %v", err)
+	}
+
+	// Wipe and replay to verify deterministic reconstruction.
+	for _, dir := range store.ReplayDir(env.orcaDir) {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) == ".json" {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+
+	if err := store.Replay(env.ctx, env.log, env.st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	after, err := env.st.LoadLatestRuntimeStatus(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadLatestRuntimeStatus after replay: %v", err)
+	}
+	if before.Status != after.Status {
+		t.Fatalf("replay changed runtime status: %s → %s", before.Status, after.Status)
+	}
+	if before.Seq != after.Seq {
+		t.Fatalf("replay changed runtime event seq: %d → %d", before.Seq, after.Seq)
+	}
+}
+
+// ── helpers for Phase A tests ─────────────────────────────────────────────────
+
+func saveRunnerScenarioWithPermission(t *testing.T, env *runnerEnv, mode schema.PermissionMode) string {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         "GOAL-1",
+		OriginalIntent: "permission test",
+		GoalConditions: []schema.GoalCondition{{
+			ID: "GC-1", Description: "condition",
+			EffectiveDescription: "condition", Status: schema.GoalConditionUnmet,
+		}},
+		ScopeConstraints: schema.ScopeConstraints{AllowedFiles: []string{"."}},
+		RiskLevel:        schema.RiskLow,
+		CreatedAt:        now,
+		Status:           schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID: "OB-1", GoalConditionID: "GC-1",
+		Description:      "prove output",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true, RiskLevel: schema.RiskLow, Status: schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveProjection(env.ctx, &schema.ContextProjection{
+		ContextProjectionID: "CTX-1", Role: schema.ProjectionRoleExecutor,
+		SourceArtifactIDs: []string{"OB-1"}, TokenBudget: 1200, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveProjection: %v", err)
+	}
+	capsuleID := "CAP-perm"
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           capsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-1",
+		AllowedPaths:        []string{"."},
+		PermissionMode:      mode,
+		Budget: schema.CapsuleBudget{
+			MaxTokens: 4096, MaxWallTimeSeconds: 60, MaxRetries: 1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree, Network: schema.NetworkDeny, WriteScope: "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule with permission mode: %v", err)
+	}
+	return capsuleID
+}
+
+func saveRunnerScenarioWithForbiddenAgent(t *testing.T, env *runnerEnv) string {
+	t.Helper()
+	// saveRunnerScenario creates CAP-1; we need a new capsule with ForbiddenActions containing "codex".
+	saveRunnerScenario(t, env)
+	capsuleID := "CAP-forbidden"
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           capsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-1",
+		AllowedPaths:        []string{"."},
+		ForbiddenActions:    []string{"codex"}, // deny the codex agent
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: 60,
+			MaxRetries:         1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule forbidden: %v", err)
+	}
+	return capsuleID
+}
+
+func saveRunnerScenarioWithTimeout(t *testing.T, env *runnerEnv, wallTimeSeconds int) string {
+	t.Helper()
+	saveRunnerScenario(t, env)
+	capsuleID := "CAP-timeout"
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           capsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-1",
+		AllowedPaths:        []string{"."},
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: wallTimeSeconds,
+			MaxRetries:         1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule timeout: %v", err)
+	}
+	return capsuleID
 }
 
 func TestFindScopeViolations(t *testing.T) {

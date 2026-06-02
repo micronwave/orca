@@ -370,16 +370,30 @@ func TestMCP_ListCapsules(t *testing.T) {
 	obl2 := seedObligation(t, e.st, e.ctx, "OB-400-2", g.GoalConditions[0].ID)
 	seedCapsule(t, e.st, e.ctx, "CAP-1", obl1.ObligationID)
 	seedCapsule(t, e.st, e.ctx, "CAP-2", obl2.ObligationID)
+	if err := e.st.AppendRuntimeEvent(e.ctx, &schema.CapsuleRuntimeEvent{
+		CapsuleID: "CAP-1",
+		GoalID:    g.GoalID,
+		Source:    "runner",
+		Status:    schema.RuntimeStatusOutputCollecting,
+	}); err != nil {
+		t.Fatalf("AppendRuntimeEvent: %v", err)
+	}
 
 	resp := e.toolCall(t, "orca_list_capsules", map[string]any{"goal_id": g.GoalID})
 	text := toolText(t, resp)
 
-	var capsules []*schema.ExecutionCapsule
+	var capsules []struct {
+		CapsuleID     string                      `json:"capsule_id"`
+		RuntimeStatus *schema.CapsuleRuntimeEvent `json:"runtime_status,omitempty"`
+	}
 	if err := json.Unmarshal([]byte(text), &capsules); err != nil {
 		t.Fatalf("unmarshal capsules: %v", err)
 	}
 	if len(capsules) != 2 {
 		t.Errorf("capsule count = %d, want 2", len(capsules))
+	}
+	if capsules[0].CapsuleID != "CAP-1" || capsules[0].RuntimeStatus == nil || capsules[0].RuntimeStatus.Status != schema.RuntimeStatusOutputCollecting {
+		t.Fatalf("first capsule runtime status = %+v", capsules[0])
 	}
 }
 

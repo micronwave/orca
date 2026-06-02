@@ -23,6 +23,7 @@ type StoreReader interface {
 	LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR, error)
 	LoadOpenObligations(ctx context.Context, goalID string) ([]*schema.Obligation, error)
 	LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error)
+	LoadLatestRuntimeStatus(ctx context.Context, capsuleID string) (*schema.CapsuleRuntimeEvent, error)
 	LoadPatch(ctx context.Context, patchID string) (*schema.PatchArtifact, error)
 	LoadEvidenceForObligation(ctx context.Context, obligationID string) ([]*schema.EvidenceArtifact, error)
 	LoadVerifierResultForPatch(ctx context.Context, patchID string) (*schema.VerifierResult, error)

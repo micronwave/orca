@@ -17,6 +17,7 @@ import (
 	"github.com/micronwave/orca/internal/failurehistory"
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/orcapath"
+	"github.com/micronwave/orca/internal/permission"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -26,17 +27,19 @@ import (
 // sidecar or transcript extraction, normalizes output into schema artifacts,
 // persists them, and returns the IDs of all produced artifacts.
 type Runner struct {
-	store      *store.FileStore
-	log        *eventlog.FileLog
-	orcaDir    string
-	noLearning bool
-	adapters   map[schema.AgentType]Adapter
-	nowFn      func() time.Time
+	store           *store.FileStore
+	log             *eventlog.FileLog
+	orcaDir         string
+	noLearning      bool
+	permissionRules []permission.Rule
+	adapters        map[schema.AgentType]Adapter
+	nowFn           func() time.Time
 }
 
 // Config holds runner-local options not part of the repo config file contract.
 type Config struct {
-	NoLearning bool
+	NoLearning      bool
+	PermissionRules []permission.Rule // global config rules applied after capsule-level checks
 }
 
 // New returns a Runner.
@@ -57,12 +60,13 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 		registry[adapter.AgentType()] = adapter
 	}
 	return &Runner{
-		store:      st,
-		log:        log,
-		orcaDir:    strings.TrimSpace(orcaDir),
-		noLearning: cfg.NoLearning,
-		adapters:   registry,
-		nowFn:      time.Now,
+		store:           st,
+		log:             log,
+		orcaDir:         strings.TrimSpace(orcaDir),
+		noLearning:      cfg.NoLearning,
+		permissionRules: append([]permission.Rule(nil), cfg.PermissionRules...),
+		adapters:        registry,
+		nowFn:           time.Now,
 	}
 }
 
@@ -100,19 +104,39 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 		return RunResult{}, err
 	}
 
+	// Track the last emitted runtime status for failure classification.
+	var lastRuntimeStatus schema.CapsuleRuntimeStatus
+
+	emitRuntime := func(status schema.CapsuleRuntimeStatus, failClass schema.CapsuleRuntimeFailureClass, detail string) {
+		lastRuntimeStatus = status
+		ev := &schema.CapsuleRuntimeEvent{
+			CapsuleID:  capsule.CapsuleID,
+			GoalID:     goalID,
+			Source:     "runner",
+			Status:     status,
+			FailClass:  failClass,
+			Detail:     detail,
+			OccurredAt: s.nowFn(),
+		}
+		// Errors emitting runtime events are non-fatal; they are diagnostic only.
+		_ = s.store.AppendRuntimeEvent(ctx, ev)
+	}
+
 	result = RunResult{CapsuleID: capsule.CapsuleID}
 	transitioned := false
 	defer func() {
 		if err == nil || !transitioned {
 			return
 		}
-		failureID, failErr := s.failCapsule(ctx, goalID, capsule, err)
+		failureID, failErr := s.failCapsule(ctx, goalID, capsule, err, lastRuntimeStatus)
 		if failErr != nil {
 			err = errors.Join(err, failErr)
 			return
 		}
 		result.FailureIDs = append(result.FailureIDs, failureID)
 	}()
+
+	emitRuntime(schema.RuntimeStatusSpawning, "", "")
 
 	startEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStarted, schema.CapsuleStateWorktreeCreated)
 	if err != nil {
@@ -152,7 +176,39 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	runCtx, cancel = context.WithTimeout(ctx, time.Duration(capsule.Budget.MaxWallTimeSeconds)*time.Second)
 	defer cancel()
 
+	// Permission check: enforce the capsule's policy before calling the adapter.
+	enforcer := permission.NewEnforcer(
+		permission.Mode(capsule.PermissionMode),
+		capsule.AllowedTools,
+		capsule.ForbiddenActions,
+		capsule.AllowedPaths,
+		capsule.ForbiddenPaths,
+		capsule.Sandbox.WorktreePath,
+		s.permissionRules,
+	)
+	permReq := permission.Request{
+		CapsuleID:    capsule.CapsuleID,
+		ToolName:     string(capsule.Agent),
+		RequiredMode: permission.ModeWorkspaceWrite,
+		ActiveMode:   permission.Mode(capsule.PermissionMode),
+		PathScope:    capsule.Sandbox.WorktreePath,
+		Reason:       "execute capsule agent",
+	}
+	decision := enforcer.Check(permReq)
+	if decision.Effect == permission.EffectDeny {
+		emitRuntime(schema.RuntimeStatusPermissionRequired, schema.RuntimeFailurePermissionGate, decision.Reason)
+		return result, fmt.Errorf("runner: permission denied for capsule %s: %s", capsule.CapsuleID, decision.Reason)
+	}
+	if decision.Effect == permission.EffectAsk {
+		emitRuntime(schema.RuntimeStatusPermissionRequired, schema.RuntimeFailurePermissionGate, decision.AskPrompt)
+		return result, fmt.Errorf("runner: capsule %s requires human approval (prompt mode) before execution: %s", capsule.CapsuleID, decision.AskPrompt)
+	}
+
+	emitRuntime(schema.RuntimeStatusReadyForPrompt, "", "")
+
 	if err = adapter.Preflight(runCtx, capsule); err != nil {
+		failClass := classifyPreflightError(err)
+		emitRuntime(schema.RuntimeStatusPreflightWarning, failClass, err.Error())
 		return result, fmt.Errorf("runner: adapter preflight for capsule %s: %w", capsule.CapsuleID, err)
 	}
 
@@ -163,11 +219,13 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateAgentRunning); err != nil {
 		return result, &store.MaterializationError{Event: agentEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateAgentRunning, err)}
 	}
+	emitRuntime(schema.RuntimeStatusAgentRunning, "", "")
 
-	output, sidecarUsed, err := s.runAdapter(runCtx, adapter, capsule, projection)
+	output, sidecarUsed, err := s.runAdapter(runCtx, adapter, capsule, projection, emitRuntime)
 	if err != nil {
 		return result, err
 	}
+	emitRuntime(schema.RuntimeStatusOutputCollecting, "", "")
 	result.SidecarUsed = sidecarUsed
 	result.TokensUsed = output.TokensUsed
 	result.WallTimeSeconds = output.WallTimeSeconds
@@ -243,6 +301,7 @@ func (s *Runner) runAdapter(
 	adapter Adapter,
 	capsule *schema.ExecutionCapsule,
 	projection *schema.ContextProjection,
+	emitRuntime func(schema.CapsuleRuntimeStatus, schema.CapsuleRuntimeFailureClass, string),
 ) (*schema.AgentSidecarOutput, bool, error) {
 	start := s.nowFn()
 	output, err := adapter.Execute(ctx, capsule, projection)
@@ -257,6 +316,11 @@ func (s *Runner) runAdapter(
 	}
 	if !errors.Is(err, ErrNoSidecar) && !errors.Is(err, ErrInvalidSidecar) {
 		return nil, false, fmt.Errorf("runner: execute capsule %s: %w", capsule.CapsuleID, err)
+	}
+	// Sidecar parse/missing failure: emit adapter_protocol before falling back.
+	if errors.Is(err, ErrInvalidSidecar) {
+		emitRuntime(schema.RuntimeStatusAgentRunning, schema.RuntimeFailureAdapterProtocol,
+			"sidecar output failed schema validation; falling back to transcript extraction")
 	}
 	transcriptPath := orcapath.TranscriptPath(s.orcaDir, capsule.CapsuleID)
 	output, extractErr := adapter.ExtractFromTranscript(ctx, capsule, transcriptPath)
@@ -314,7 +378,23 @@ func (s *Runner) failCapsule(
 	goalID string,
 	capsule *schema.ExecutionCapsule,
 	runErr error,
+	lastStatus schema.CapsuleRuntimeStatus,
 ) (string, error) {
+	// On startup timeout, persist a StartupEvidenceBundle before the generic
+	// failure fingerprint so diagnosis can answer what was actually observed.
+	if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled) {
+		bundle := &schema.StartupEvidenceBundle{
+			CapsuleID:      capsule.CapsuleID,
+			LastStatus:     lastStatus,
+			FailureClass:   schema.RuntimeFailureStartupNoEvidence,
+			ProcessCommand: string(capsule.Agent),
+			HealthChecks:   []string{},
+			CreatedAt:      s.nowFn().UTC(),
+		}
+		// Save on best-effort; don't let bundle save failure mask the primary error.
+		_ = s.store.SaveStartupBundle(ctx, bundle)
+	}
+
 	failure := &schema.FailureFingerprint{
 		FailureID:       idgen.New("FAIL"),
 		SourceCapsuleID: capsule.CapsuleID,
@@ -578,5 +658,28 @@ func errorSignature(err error) string {
 		return "sidecar"
 	default:
 		return "infra"
+	}
+}
+
+// classifyPreflightError maps a preflight error to a CapsuleRuntimeFailureClass.
+// Worktree errors (git status, clean check) map to worktree_state.
+// Permission-related errors map to permission_gate. Others map to tool_runtime.
+func classifyPreflightError(err error) schema.CapsuleRuntimeFailureClass {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "worktree") ||
+		strings.Contains(msg, "git status") ||
+		strings.Contains(msg, "uncommitted") ||
+		strings.Contains(msg, "clean worktree"):
+		return schema.RuntimeFailureWorktreeState
+	case strings.Contains(msg, "permission") ||
+		strings.Contains(msg, "denied") ||
+		strings.Contains(msg, "not allowed"):
+		return schema.RuntimeFailurePermissionGate
+	default:
+		return schema.RuntimeFailureToolRuntime
 	}
 }

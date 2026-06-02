@@ -569,6 +569,9 @@ func TestDefaultConfigYAML_GoLoadsAndHasGates(t *testing.T) {
 	if len(cfg.Verifier.Gates) != 3 {
 		t.Fatalf("gates count = %d, want 3", len(cfg.Verifier.Gates))
 	}
+	if cfg.Permission.DefaultMode != "workspace_write" {
+		t.Fatalf("permission.default_mode = %q, want workspace_write", cfg.Permission.DefaultMode)
+	}
 	names := map[string]bool{}
 	for _, g := range cfg.Verifier.Gates {
 		names[g.Name] = true
@@ -646,7 +649,7 @@ func TestDetectProjectType_CurrentDirReturnsGo(t *testing.T) {
 func TestDefaultConfigYAML_IncludesAllRequiredSections(t *testing.T) {
 	for _, pt := range []string{"go", "node", "maven"} {
 		yaml := DefaultConfigYAML(pt)
-		for _, section := range []string{"verifier:", "gate:", "budget:", "adapters:", "advanced:", "mcp:", "intake:", "pr:", "ci:", "remote:"} {
+		for _, section := range []string{"verifier:", "gate:", "budget:", "adapters:", "advanced:", "permission:", "mcp:", "intake:", "pr:", "ci:", "remote:"} {
 			if !strings.Contains(yaml, section) {
 				t.Errorf("DefaultConfigYAML(%q) missing section %q", pt, section)
 			}

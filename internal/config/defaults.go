@@ -105,6 +105,10 @@ advanced:
   adversarial_blocking: false
   reviewer_diversity: false
 
+permission:
+  default_mode: "workspace_write"
+  rules:
+
 mcp:
   enabled: false
   listen: "127.0.0.1:7070"

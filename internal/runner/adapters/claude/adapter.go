@@ -100,13 +100,14 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	// --output-format json wraps the response in a JSON envelope.
 	// --json-schema constrains the model's response to match AgentSidecarOutput.
 	// --no-session-persistence avoids writing session history to disk.
-	// --permission-mode bypassPermissions avoids interactive approval prompts.
+	// --permission-mode is derived from the capsule's PermissionMode so the
+	// runner's policy decision is authoritative; the adapter just maps it.
 	args := []string{
 		"-p",
 		"--output-format", "json",
 		"--json-schema", sidecarJSONSchemaInline(),
 		"--no-session-persistence",
-		"--permission-mode", "bypassPermissions",
+		"--permission-mode", claudePermissionMode(capsule.PermissionMode),
 	}
 	stdout, stderr, duration, runErr := runCommandWithTranscript(ctx, commandSpec{
 		executable: cmdPath,
@@ -424,6 +425,21 @@ func uniqueStrings(values []string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+// claudePermissionMode maps a schema.PermissionMode to the claude --permission-mode value.
+// Defaults to "bypassPermissions" when mode is empty to preserve Phase 1 behaviour.
+func claudePermissionMode(mode schema.PermissionMode) string {
+	switch mode {
+	case schema.PermissionReadOnly:
+		return "prompt"
+	case schema.PermissionWorkspaceWrite:
+		return "acceptEdits"
+	case schema.PermissionDangerFullAccess, "":
+		return "bypassPermissions"
+	default:
+		return "bypassPermissions"
+	}
 }
 
 var _ runner.Adapter = (*Adapter)(nil)

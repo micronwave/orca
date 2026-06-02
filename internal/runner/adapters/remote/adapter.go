@@ -125,7 +125,7 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 	}
 
 	start := time.Now()
-	cmd := buildAgentCommand(a.agent, remoteDir, briefingPath)
+	cmd := buildAgentCommand(a.agent, remoteDir, briefingPath, capsule.PermissionMode)
 	_, runErr := sess.RunCommand(ctx, cmd)
 
 	// Always try to download transcript for the ExtractFromTranscript fallback.
@@ -171,22 +171,48 @@ func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.Exe
 
 // buildAgentCommand returns a shell command that runs the agent on the remote
 // host, writes output to output.json and stderr to transcript.log.
-func buildAgentCommand(agent schema.AgentType, remoteDir, briefingPath string) string {
+func buildAgentCommand(agent schema.AgentType, remoteDir, briefingPath string, mode schema.PermissionMode) string {
 	switch agent {
 	case schema.AgentCodex:
 		// Codex writes sidecar JSON to -o; we redirect stdout+stderr to transcript.
 		return fmt.Sprintf(
-			"codex exec -s danger-full-access --ephemeral -o %s/output.json - < %s > %s/transcript.log 2>&1",
-			remoteDir, briefingPath, remoteDir,
+			"codex exec -s %s --ephemeral -o %s/output.json - < %s > %s/transcript.log 2>&1",
+			remoteCodexSandboxFlag(mode), remoteDir, briefingPath, remoteDir,
 		)
 	case schema.AgentClaude:
 		// Claude writes JSON envelope to stdout; stderr goes to transcript.
 		return fmt.Sprintf(
-			"claude -p --output-format json --no-session-persistence --permission-mode bypassPermissions < %s > %s/output.json 2>%s/transcript.log",
-			briefingPath, remoteDir, remoteDir,
+			"claude -p --output-format json --no-session-persistence --permission-mode %s < %s > %s/output.json 2>%s/transcript.log",
+			remoteClaudePermissionMode(mode), briefingPath, remoteDir, remoteDir,
 		)
 	default:
 		return fmt.Sprintf("%s < %s > %s/output.json 2>%s/transcript.log", string(agent), briefingPath, remoteDir, remoteDir)
+	}
+}
+
+func remoteCodexSandboxFlag(mode schema.PermissionMode) string {
+	switch mode {
+	case schema.PermissionReadOnly:
+		return "read-only"
+	case schema.PermissionWorkspaceWrite:
+		return "workspace-write"
+	case schema.PermissionDangerFullAccess, "":
+		return "danger-full-access"
+	default:
+		return "danger-full-access"
+	}
+}
+
+func remoteClaudePermissionMode(mode schema.PermissionMode) string {
+	switch mode {
+	case schema.PermissionReadOnly:
+		return "prompt"
+	case schema.PermissionWorkspaceWrite:
+		return "acceptEdits"
+	case schema.PermissionDangerFullAccess, "":
+		return "bypassPermissions"
+	default:
+		return "bypassPermissions"
 	}
 }
 

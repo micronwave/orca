@@ -62,6 +62,18 @@ type CapsuleSandbox struct {
 	WriteScope string `json:"write_scope"`
 }
 
+// PermissionMode is the effective permission level granted to a capsule's agent.
+// It controls which operations the agent may perform and maps to adapter-specific
+// sandbox or permission flags. orca.md Phase A §1.
+type PermissionMode string
+
+const (
+	PermissionReadOnly         PermissionMode = "read_only"
+	PermissionWorkspaceWrite   PermissionMode = "workspace_write"
+	PermissionDangerFullAccess PermissionMode = "danger_full_access"
+	PermissionPrompt           PermissionMode = "prompt"
+)
+
 // ExecutionCapsule is the contract for one agent or tool run.
 // It is the most important primitive in Orca. orca.md §5.3.
 type ExecutionCapsule struct {
@@ -79,6 +91,10 @@ type ExecutionCapsule struct {
 	Budget              CapsuleBudget  `json:"budget"`
 	Sandbox             CapsuleSandbox `json:"sandbox"`
 	State               CapsuleState   `json:"state"`
+	// PermissionMode is the effective permission level for the agent. Defaults to
+	// danger_full_access when empty (preserving Phase 1 behaviour). Set by the
+	// ObligationPlanner from config. Enforced by the runner before adapter.Execute.
+	PermissionMode PermissionMode `json:"permission_mode,omitempty"`
 	// TopologyDecisionID is the ID of the DecisionRecord that captures the topology
 	// classifier's selection and rationale for this capsule's plan cycle. Set by the
 	// ObligationPlanner when it creates the capsule. The ContextCompiler loads this
