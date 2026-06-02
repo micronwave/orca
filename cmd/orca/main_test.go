@@ -1779,6 +1779,7 @@ func TestAutoInitWrittenConfigLoads(t *testing.T) {
 }
 
 func TestRunUI_DesktopNotFound_ReturnsInstallInstructions(t *testing.T) {
+	t.Chdir(t.TempDir())
 	// Isolate the home/LOCALAPPDATA location so the pre-seeded orca-desktop
 	// candidates (if any) are not reachable, and clear PATH so exec.LookPath
 	// also fails.
@@ -1792,7 +1793,7 @@ func TestRunUI_DesktopNotFound_ReturnsInstallInstructions(t *testing.T) {
 	if err == nil {
 		t.Fatal("runUI: expected error when orca-desktop not found, got nil")
 	}
-	for _, want := range []string{"orca-desktop not found", "Install it with:", "go install"} {
+	for _, want := range []string{"orca-desktop not found", "Install it with:", "wails build"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("runUI error missing %q:\n%s", want, err.Error())
 		}
@@ -1800,6 +1801,7 @@ func TestRunUI_DesktopNotFound_ReturnsInstallInstructions(t *testing.T) {
 }
 
 func TestFindDesktopBinary_FindsOnPATH(t *testing.T) {
+	t.Chdir(t.TempDir())
 	dir := t.TempDir()
 	name := "orca-desktop"
 	if goos.GOOS == "windows" {
@@ -1862,6 +1864,7 @@ func TestFindDesktopBinary_SkipsNonExecutableCandidate(t *testing.T) {
 	if goos.GOOS == "windows" {
 		t.Skip("windows does not use unix executable mode bits")
 	}
+	t.Chdir(t.TempDir())
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1890,6 +1893,7 @@ func TestFindDesktopBinary_SkipsNonExecutableCandidate(t *testing.T) {
 }
 
 func TestRunUI_PassesResolvedAbsOrcaDir(t *testing.T) {
+	t.Chdir(t.TempDir())
 	helperDir := t.TempDir()
 	helperSrc := filepath.Join(helperDir, "main.go")
 	helperOut := filepath.Join(helperDir, "args.txt")
@@ -1954,6 +1958,17 @@ func TestDesktopBinaryCandidates_ReturnsNonEmpty(t *testing.T) {
 	}
 	if len(desktopBinaryCandidates()) == 0 {
 		t.Fatal("desktopBinaryCandidates returned empty slice")
+	}
+}
+
+func TestDesktopBinaryCandidates_IncludesProjectBuildOutput(t *testing.T) {
+	name := "orca-desktop"
+	if goos.GOOS == "windows" {
+		name = "orca-desktop.exe"
+	}
+	want := filepath.Join(findProjectRoot("."), "desktop", "build", "bin", name)
+	if !slices.Contains(desktopBinaryCandidates(), want) {
+		t.Fatalf("desktopBinaryCandidates missing project build output %q", want)
 	}
 }
 
@@ -2023,10 +2038,10 @@ func TestFindProjectRoot(t *testing.T) {
 
 func TestAutoInitWithConfirmation(t *testing.T) {
 	tests := []struct {
-		name           string
-		interactive    bool
-		setup          func(t *testing.T, orcaDir string)
-		input          string
+		name        string
+		interactive bool
+		setup       func(t *testing.T, orcaDir string)
+		input       string
 		// unknownProject uses a bare temp dir (no go.mod/package.json/pom.xml)
 		// as the projectRoot so that project type detection returns "".
 		// Recognised projects (go.mod found via ".") are the default.

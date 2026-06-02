@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goos "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -213,6 +214,41 @@ func TestSupervisor_DoctorCommandDoesNotStartGoal(t *testing.T) {
 func TestSupervisor_DoctorCommandRemainsActiveDuringGate(t *testing.T) {
 	if !isSupervisorCommand("orca doctor") {
 		t.Fatal("orca doctor must remain a supervisor command while a gate is waiting")
+	}
+}
+
+func TestSupervisor_UICommandDoesNotStartGoal(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", "")
+	if goos.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", t.TempDir())
+	} else {
+		t.Setenv("HOME", t.TempDir())
+	}
+
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	sup, cleanup := newTestSupervisor(t, orcaDir, strings.NewReader(""))
+	defer cleanup()
+
+	var errBuf bytes.Buffer
+	sup.errout = &errBuf
+
+	err := sup.handleLine(context.Background(), "orca ui")
+	if err == nil || !strings.Contains(err.Error(), "orca-desktop not found") {
+		t.Fatalf("handleLine(orca ui) error = %v, want desktop lookup error", err)
+	}
+	if sup.goalActive.Load() {
+		t.Fatal("orca ui started a goal")
+	}
+	if strings.Contains(errBuf.String(), "[orca] starting: orca ui") {
+		t.Fatalf("ui command was treated as a goal:\n%s", errBuf.String())
+	}
+}
+
+func TestSupervisor_UICommandRemainsActiveDuringGate(t *testing.T) {
+	if !isSupervisorCommand("orca ui") {
+		t.Fatal("orca ui must remain a supervisor command while a gate is waiting")
 	}
 }
 

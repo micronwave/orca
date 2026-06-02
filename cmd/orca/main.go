@@ -1443,7 +1443,9 @@ func findDesktopBinary() (string, error) {
 	return "", fmt.Errorf(
 		"orca ui: orca-desktop not found.\n" +
 			"Install it with:\n" +
-			"  go install github.com/micronwave/orca/desktop/cmd/orca-desktop@latest\n" +
+			"  cd desktop\n" +
+			"  wails build\n" +
+			"Then add desktop/build/bin to PATH or copy orca-desktop into the Orca install directory.\n" +
 			"Or download from: https://github.com/micronwave/orca/releases",
 	)
 }
@@ -1483,6 +1485,15 @@ func desktopBinaryCandidates() []string {
 			candidates = append(candidates, filepath.Join(dir, "desktop", "build", "bin", "orca-desktop.exe"))
 		} else {
 			candidates = append(candidates, filepath.Join(dir, "orca-desktop"))
+		}
+	}
+
+	projectRoot := findProjectRoot(".")
+	if projectRoot != "" {
+		if goos.GOOS == "windows" {
+			candidates = append(candidates, filepath.Join(projectRoot, "desktop", "build", "bin", "orca-desktop.exe"))
+		} else {
+			candidates = append(candidates, filepath.Join(projectRoot, "desktop", "build", "bin", "orca-desktop"))
 		}
 	}
 

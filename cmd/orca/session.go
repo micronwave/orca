@@ -175,10 +175,10 @@ func (s *Supervisor) readLines(lineCh chan<- string) {
 func isSupervisorCommand(line string) bool {
 	line = strings.TrimSpace(line)
 	switch line {
-	case "exit", "quit", "status", "cancel", "help", "doctor":
+	case "exit", "quit", "status", "cancel", "help", "doctor", "ui":
 		return true
 	}
-	return strings.HasPrefix(line, "/") || line == "orca doctor"
+	return strings.HasPrefix(line, "/") || line == "orca doctor" || line == "orca ui"
 }
 
 // handleLine dispatches a single trimmed input line to the appropriate handler.
@@ -198,6 +198,8 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 		return s.rt.printStatusConcise(ctx, s.out)
 	case line == "/doctor" || line == "doctor" || line == "orca doctor":
 		return runDoctorWithOutput([]string{"--orca-dir", s.orcaDir}, s.out)
+	case line == "/ui" || line == "ui" || line == "orca ui":
+		return runUI([]string{"--orca-dir", s.orcaDir})
 	case line == "/details":
 		return s.rt.printStatus(ctx, s.out)
 	case line == "/logs":
