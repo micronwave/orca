@@ -87,6 +87,8 @@ func run(args []string) error {
 		return runCI(args[1:])
 	case "ui":
 		return runUI(args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
 	case "commands":

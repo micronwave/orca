@@ -77,6 +77,11 @@ var cliCommands = []CommandSpec{
 		NeedsInit: true,
 	},
 	{
+		Name:    "update",
+		Kind:    "cli",
+		Summary: "rebuild and replace the current orca binary from local source",
+	},
+	{
 		Name:    "doctor",
 		Kind:    "cli",
 		Summary: "run environment diagnostics",
