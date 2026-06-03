@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -933,6 +934,62 @@ func TestGetSetupHealth_eventLogDetected(t *testing.T) {
 	}
 	if !h.EventLogExists {
 		t.Error("event_log_exists should be true when events.log is present")
+	}
+}
+
+func TestTailEventLog_exitsOnContextCancel(t *testing.T) {
+	app := NewApp(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		app.tailEventLog(ctx)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("tailEventLog did not exit after context cancellation")
+	}
+}
+
+func TestStartup_replacesPreviousTailCancel(t *testing.T) {
+	app := NewApp(t.TempDir())
+	called := 0
+	app.cancelTail = func() { called++ }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // ensure spawned tailer exits immediately
+	app.startup(ctx)
+
+	if called != 1 {
+		t.Fatalf("previous cancelTail called %d times, want 1", called)
+	}
+	if app.cancelTail == nil {
+		t.Fatal("expected startup to install cancelTail")
+	}
+}
+
+func TestShutdown_cancelsAndClearsTailCancel(t *testing.T) {
+	app := NewApp(t.TempDir())
+	called := 0
+	app.cancelTail = func() { called++ }
+
+	app.shutdown(context.Background())
+	if called != 1 {
+		t.Fatalf("cancelTail called %d times, want 1", called)
+	}
+	if app.cancelTail != nil {
+		t.Fatal("expected shutdown to clear cancelTail")
+	}
+
+	// Idempotent shutdown should not call cancel again.
+	app.shutdown(context.Background())
+	if called != 1 {
+		t.Fatalf("cancelTail called %d times after second shutdown, want 1", called)
 	}
 }
 
