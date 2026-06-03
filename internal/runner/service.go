@@ -169,7 +169,13 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 		return result, &store.MaterializationError{Event: startEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateWorktreeCreated, err)}
 	}
 
-	if err = ensureWorktree(ctx, capsule.Sandbox.WorktreePath); err != nil {
+	if capsule.Budget.MaxWallTimeSeconds <= 0 {
+		return result, fmt.Errorf("runner: capsule %s has invalid max_wall_time_seconds=%d", capsule.CapsuleID, capsule.Budget.MaxWallTimeSeconds)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(capsule.Budget.MaxWallTimeSeconds)*time.Second)
+	defer cancel()
+
+	if err = ensureWorktree(runCtx, capsule.Sandbox.WorktreePath); err != nil {
 		return result, fmt.Errorf("runner: ensure worktree for capsule %s: %w", capsule.CapsuleID, err)
 	}
 	wsEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStateUpdated, schema.CapsuleStateWorkspaceAttached)
@@ -186,14 +192,6 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 	if err = s.store.UpdateCapsuleState(ctx, capsule.CapsuleID, schema.CapsuleStateSetupRun); err != nil {
 		return result, &store.MaterializationError{Event: setupEv, Err: fmt.Errorf("runner: set capsule %s state %s: %w", capsule.CapsuleID, schema.CapsuleStateSetupRun, err)}
 	}
-
-	runCtx := ctx
-	cancel := func() {}
-	if capsule.Budget.MaxWallTimeSeconds <= 0 {
-		return result, fmt.Errorf("runner: capsule %s has invalid max_wall_time_seconds=%d", capsule.CapsuleID, capsule.Budget.MaxWallTimeSeconds)
-	}
-	runCtx, cancel = context.WithTimeout(ctx, time.Duration(capsule.Budget.MaxWallTimeSeconds)*time.Second)
-	defer cancel()
 
 	// Permission check: enforce the capsule's policy before calling the adapter.
 	enforcer := permission.NewEnforcer(
@@ -232,7 +230,7 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 			ObligationIDs: append([]string(nil), capsule.ObligationIDs...),
 			WorktreePath:  capsule.Sandbox.WorktreePath,
 		}
-		hookRes, hookErr := s.hookRunner.Run(ctx, *s.preCapsuleHook, hookInput)
+		hookRes, hookErr := s.hookRunner.Run(runCtx, *s.preCapsuleHook, hookInput)
 		if hookErr != nil {
 			emitRuntime(schema.RuntimeStatusPreflightWarning, schema.RuntimeFailureToolRuntime,
 				"pre_capsule hook error: "+hookErr.Error())

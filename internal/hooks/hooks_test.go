@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -147,6 +150,19 @@ func TestRunner_TimeoutReturnsError(t *testing.T) {
 	}
 }
 
+func TestRunner_RealSubprocessTimeoutKillsProcessTree(t *testing.T) {
+	command := writeSleepingHookCommand(t)
+	start := time.Now()
+	_, err := New().Run(context.Background(), Config{Command: command, TimeoutSeconds: 1}, Input{HookPoint: PointPreCapsule})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Run should return error on real subprocess timeout")
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("Run took too long: %s (timeout should have terminated the subprocess tree promptly)", elapsed)
+	}
+}
+
 func TestRunner_InputIsPassedToExec(t *testing.T) {
 	var capturedInput Input
 	r := New().withExec(func(ctx context.Context, _ string, inputJSON []byte) ([]byte, error) {
@@ -173,4 +189,23 @@ func TestRunner_InputIsPassedToExec(t *testing.T) {
 	if len(capturedInput.ObligationIDs) != 2 {
 		t.Errorf("input.ObligationIDs = %v, want 2 elements", capturedInput.ObligationIDs)
 	}
+}
+
+func writeSleepingHookCommand(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		scriptPath := filepath.Join(dir, "sleep-hook.ps1")
+		script := "Start-Sleep -Seconds 5\nWrite-Output '{\"kind\":\"allow\"}'\n"
+		if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+			t.Fatalf("write hook script: %v", err)
+		}
+		return "powershell -NoProfile -File " + scriptPath
+	}
+	scriptPath := filepath.Join(dir, "sleep-hook.sh")
+	script := "#!/bin/sh\nsleep 5\nprintf '{\"kind\":\"allow\"}\\n'\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write hook script: %v", err)
+	}
+	return scriptPath
 }

@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/micronwave/orca/internal/eventlog"
+	"github.com/micronwave/orca/internal/hooks"
 	"github.com/micronwave/orca/internal/orcapath"
 	"github.com/micronwave/orca/internal/runner/adapters/stub"
 	"github.com/micronwave/orca/internal/schema"
@@ -793,6 +795,49 @@ func TestRunPreflightFailureRecordsWorktreeStateEvent(t *testing.T) {
 	}
 }
 
+func TestRunPreCapsuleHookUsesCapsuleTimeout(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenarioWithTimeout(t, env, 1)
+	hookCommand := writeSleepingHookCommand(t)
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		preflightFn: func(context.Context, *schema.ExecutionCapsule) error {
+			t.Fatal("Preflight should not run after hook timeout")
+			return nil
+		},
+		executeFn: func(context.Context, *schema.ExecutionCapsule, *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			t.Fatal("Execute should not run after hook timeout")
+			return nil, nil
+		},
+	}
+	r := NewWithConfig(env.st, env.log, env.orcaDir, Config{
+		PreCapsuleHook: &hooks.Config{
+			Command:        hookCommand,
+			TimeoutSeconds: 10,
+		},
+	}, adapter)
+
+	start := time.Now()
+	result, err := r.Run(env.ctx, capsuleID)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Run should fail when the pre_capsule hook outlives the capsule timeout")
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("Run took %s, want capsule timeout to stop the hook well before its own 10s timeout", elapsed)
+	}
+	if len(result.FailureIDs) != 1 {
+		t.Fatalf("FailureIDs = %v, want one persisted failure", result.FailureIDs)
+	}
+	capsule, loadErr := env.st.LoadCapsule(env.ctx, capsuleID)
+	if loadErr != nil {
+		t.Fatalf("LoadCapsule: %v", loadErr)
+	}
+	if capsule.State != schema.CapsuleStateFailed {
+		t.Fatalf("capsule state = %s, want failed", capsule.State)
+	}
+}
+
 func TestRunSidecarParseFailureRecordsAdapterProtocolEvent(t *testing.T) {
 	env := newRunnerEnv(t)
 	capsuleID := saveRunnerScenario(t, env)
@@ -1066,6 +1111,35 @@ func TestWorktreeExists(t *testing.T) {
 			t.Error("expected false for empty path")
 		}
 	})
+}
+
+func TestEnsureWorktreeHonoursCancelledContext(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new-worktree")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := ensureWorktree(ctx, dir)
+	if err == nil {
+		t.Fatal("expected error for cancelled context; ensureWorktree must forward context to subprocess")
+	}
+}
+
+func writeSleepingHookCommand(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		scriptPath := filepath.Join(dir, "sleep-hook.ps1")
+		script := "Start-Sleep -Seconds 5\nWrite-Output '{\"kind\":\"allow\"}'\n"
+		if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+			t.Fatalf("write hook script: %v", err)
+		}
+		return "powershell -NoProfile -File " + scriptPath
+	}
+	scriptPath := filepath.Join(dir, "sleep-hook.sh")
+	script := "#!/bin/sh\nsleep 5\nprintf '{\"kind\":\"allow\"}\\n'\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write hook script: %v", err)
+	}
+	return scriptPath
 }
 
 func TestWorktreeIsClean(t *testing.T) {
