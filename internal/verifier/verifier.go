@@ -52,6 +52,7 @@ import (
 	"github.com/micronwave/orca/internal/failurehistory"
 	"github.com/micronwave/orca/internal/hooks"
 	"github.com/micronwave/orca/internal/idgen"
+	"github.com/micronwave/orca/internal/reusekey"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -342,7 +343,10 @@ func (s *Engine) Verify(ctx context.Context, patchID string, in VerifyInput) (*s
 		if i == testGateIndex {
 			continue
 		}
-		evidenceType := staticEvidenceType(gate)
+		evidenceType, err := staticEvidenceType(gate)
+		if err != nil {
+			return nil, err
+		}
 		evidence, exitCode, err := s.runOrReuseGate(ctx, goalID, latestSnapshotID, gate, evidenceType, workingDir, obligationRefs)
 		if err != nil {
 			return nil, fmt.Errorf("verifier: patch %s capsule %s: %w", patchID, capsule.CapsuleID, err)
@@ -711,12 +715,28 @@ func isTestGate(gate config.VerifierGate) bool {
 	return strings.Contains(lower, "test")
 }
 
-func staticEvidenceType(gate config.VerifierGate) schema.EvidenceType {
+func staticEvidenceType(gate config.VerifierGate) (schema.EvidenceType, error) {
+	if gate.EvidenceType != "" {
+		evidenceType := schema.EvidenceType(strings.TrimSpace(gate.EvidenceType))
+		switch evidenceType {
+		case schema.EvidenceTestResult,
+			schema.EvidenceLintResult,
+			schema.EvidenceTypecheckResult,
+			schema.EvidenceDiffRiskReport,
+			schema.EvidenceAgentOutput,
+			schema.EvidenceStaticAnalysis,
+			schema.EvidenceMutationResult,
+			schema.EvidenceAgentReview:
+			return evidenceType, nil
+		default:
+			return "", fmt.Errorf("verifier: gate %q has invalid evidence_type %q", gate.Name, gate.EvidenceType)
+		}
+	}
 	lower := strings.ToLower(gate.Name + " " + gate.Command)
 	if strings.Contains(lower, "typecheck") || strings.Contains(lower, "go build") {
-		return schema.EvidenceTypecheckResult
+		return schema.EvidenceTypecheckResult, nil
 	}
-	return schema.EvidenceLintResult
+	return schema.EvidenceLintResult, nil
 }
 
 func summarizeOutput(output string) string {
@@ -1001,36 +1021,11 @@ func (s *Engine) latestSnapshotID(ctx context.Context, goalID string) (string, e
 }
 
 func verifierReuseKey(evidenceType schema.EvidenceType, command, workingDir string, obligationRefs []string, snapshotID string) string {
-	normalizedObligations := append([]string(nil), obligationRefs...)
-	sort.Strings(normalizedObligations)
-	parts := []string{
-		"type=" + string(evidenceType),
-		"command=" + commandIdentity(command),
-		"scope=" + normalizedWorkingDir(workingDir),
-		"obligations=" + strings.Join(normalizedObligations, ","),
-		"snapshot=" + strings.TrimSpace(snapshotID),
-	}
-	return strings.Join(parts, "|")
+	return reusekey.ForVerifierGate(string(evidenceType), command, workingDir, obligationRefs, snapshotID)
 }
 
 func commandIdentity(command string) string {
 	return strings.Join(strings.Fields(command), " ")
-}
-
-func normalizedWorkingDir(workingDir string) string {
-	workingDir = strings.TrimSpace(workingDir)
-	if workingDir == "" {
-		workingDir = "."
-	}
-	if abs, err := filepath.Abs(workingDir); err == nil {
-		workingDir = abs
-	}
-	workingDir = filepath.Clean(workingDir)
-	workingDir = strings.ReplaceAll(workingDir, "\\", "/")
-	if len(workingDir) >= 2 && workingDir[1] == ':' {
-		workingDir = strings.ToLower(workingDir[:1]) + workingDir[1:]
-	}
-	return workingDir
 }
 
 func evidenceContentHash(
@@ -1049,7 +1044,7 @@ func evidenceContentHash(
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		string(evidenceType),
 		commandIdentity(command),
-		normalizedWorkingDir(workingDir),
+		reusekey.NormalizeWorkingDir(workingDir),
 		fmt.Sprintf("exit=%d", exitCode),
 		normalizedOutput,
 		strings.Join(obligations, ","),

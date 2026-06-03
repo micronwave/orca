@@ -307,6 +307,50 @@ func TestExtractTargetFileFromIntent_skipsNonMarkdownQuotedText(t *testing.T) {
 	}
 }
 
+func TestStaticEvidenceType_prefersConfiguredEvidenceType(t *testing.T) {
+	t.Parallel()
+
+	got, err := staticEvidenceType(config.VerifierGate{
+		Name:         "static_check",
+		Command:      "custom-check ./...",
+		EvidenceType: string(schema.EvidenceTypecheckResult),
+	})
+	if err != nil {
+		t.Fatalf("staticEvidenceType: %v", err)
+	}
+	if got != schema.EvidenceTypecheckResult {
+		t.Fatalf("staticEvidenceType = %q, want %q", got, schema.EvidenceTypecheckResult)
+	}
+}
+
+func TestStaticEvidenceType_rejectsInvalidConfiguredEvidenceType(t *testing.T) {
+	t.Parallel()
+
+	_, err := staticEvidenceType(config.VerifierGate{
+		Name:         "go_vet",
+		Command:      "go vet ./...",
+		EvidenceType: "lint-result",
+	})
+	if err == nil {
+		t.Fatal("staticEvidenceType succeeded with invalid configured evidence_type")
+	}
+}
+
+func TestStaticEvidenceType_usesHeuristicWhenUnspecified(t *testing.T) {
+	t.Parallel()
+
+	got, err := staticEvidenceType(config.VerifierGate{
+		Name:    "go_build",
+		Command: "go build ./...",
+	})
+	if err != nil {
+		t.Fatalf("staticEvidenceType: %v", err)
+	}
+	if got != schema.EvidenceTypecheckResult {
+		t.Fatalf("staticEvidenceType = %q, want %q", got, schema.EvidenceTypecheckResult)
+	}
+}
+
 func TestVerify_savesEvidenceAndResult(t *testing.T) {
 	t.Parallel()
 
@@ -653,7 +697,6 @@ func TestVerify_ChangedSnapshotOrNoLearningForcesFreshGateRun(t *testing.T) {
 		})
 	}
 }
-
 
 func TestVerify_UsesSupplementalEvidence(t *testing.T) {
 	t.Parallel()

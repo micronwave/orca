@@ -101,6 +101,64 @@ func TestValidateGates_acceptsValidGate(t *testing.T) {
 	}
 }
 
+func TestValidateGates_rejectsInvalidEvidenceType(t *testing.T) {
+	cfg := VerifierConfig{
+		Gates: []VerifierGate{{
+			Name:         "go_vet",
+			Command:      "go vet ./...",
+			EvidenceType: "lint-result",
+		}},
+	}
+	if err := cfg.ValidateGates(); err == nil {
+		t.Fatal("ValidateGates succeeded with invalid gate evidence_type")
+	}
+}
+
+func TestLoadParsesVerifierGateEvidenceType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_vet"
+      command: "go vet ./..."
+      evidence_type: "lint_result"
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Verifier.Gates[0].EvidenceType; got != "lint_result" {
+		t.Fatalf("Verifier.Gates[0].EvidenceType = %q, want lint_result", got)
+	}
+}
+
+func TestLoadRejectsInvalidVerifierGateEvidenceType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+verifier:
+  gates:
+    - name: "go_vet"
+      command: "go vet ./..."
+      evidence_type: "lint-result"
+
+budget:
+  default_max_tokens: 32000
+  default_max_wall_time_seconds: 300
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded with invalid verifier gate evidence_type")
+	}
+}
+
 func TestLoadSucceedsWithoutVerifierGates(t *testing.T) {
 	// Load no longer validates gates — that is deferred to ValidateGates,
 	// which is called only on execution paths that need the verifier.

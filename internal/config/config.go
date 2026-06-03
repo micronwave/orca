@@ -144,6 +144,13 @@ func (c VerifierConfig) ValidateGates() error {
 		if gate.Command == "" {
 			return fmt.Errorf("config: verifier.gates[%d].command is required", i)
 		}
+		if gate.EvidenceType != "" && !isVerifierEvidenceType(gate.EvidenceType) {
+			return fmt.Errorf(
+				"config: verifier.gates[%d].evidence_type %q is invalid (want test_result|lint_result|typecheck_result|diff_risk_report|agent_output|static_analysis_result|mutation_survivor|agent_review)",
+				i,
+				gate.EvidenceType,
+			)
+		}
 	}
 	return nil
 }
@@ -163,6 +170,9 @@ type VerifierGate struct {
 	// Tier annotates this gate with a verification level for green-contract classification.
 	// Valid values: "targeted_tests", "package", "workspace". Empty means no tier.
 	Tier string
+	// EvidenceType overrides the heuristic evidence type inference when non-empty.
+	// Valid values are EvidenceType constants from internal/schema/evidence.go.
+	EvidenceType string
 }
 
 type GateConfig struct {
@@ -701,10 +711,35 @@ func setVerifierGateField(gate *VerifierGate, key, value string, lineNum int) er
 		default:
 			return fmt.Errorf("config: invalid tier %q on line %d (want targeted_tests|package|workspace)", value, lineNum)
 		}
+	case "evidence_type":
+		if value != "" && !isVerifierEvidenceType(value) {
+			return fmt.Errorf(
+				"config: invalid evidence_type %q on line %d (want test_result|lint_result|typecheck_result|diff_risk_report|agent_output|static_analysis_result|mutation_survivor|agent_review)",
+				value,
+				lineNum,
+			)
+		}
+		gate.EvidenceType = value
 	default:
 		return fmt.Errorf("config: unknown verifier gate field %q on line %d", key, lineNum)
 	}
 	return nil
+}
+
+func isVerifierEvidenceType(value string) bool {
+	switch value {
+	case "test_result",
+		"lint_result",
+		"typecheck_result",
+		"diff_risk_report",
+		"agent_output",
+		"static_analysis_result",
+		"mutation_survivor",
+		"agent_review":
+		return true
+	default:
+		return false
+	}
 }
 
 func setHookConfigField(hook *HookConfig, key, value string, lineNum int) error {
