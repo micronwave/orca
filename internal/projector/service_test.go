@@ -2,6 +2,7 @@ package projector
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -464,10 +465,15 @@ func TestCompileReviewerAndTesterUseRoleSpecificBriefings(t *testing.T) {
 			t.Fatalf("SaveCapsule %s: %v", capsule.CapsuleID, err)
 		}
 	}
+	diffContent := "--- a/internal/projector/service.go\n+++ b/internal/projector/service.go\n@@ -1 +1,2 @@\n+// reviewer diff visibility test\n"
+	diffFile := filepath.Join(t.TempDir(), "patch.diff")
+	if err := os.WriteFile(diffFile, []byte(diffContent), 0o600); err != nil {
+		t.Fatalf("WriteFile diff: %v", err)
+	}
 	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
 		PatchID:              "PATCH-proj-impl",
 		CapsuleID:            implID,
-		DiffPath:             `E:\orca\.orca\capsules\CAP-proj-impl\patch.diff`,
+		DiffPath:             diffFile,
 		Summary:              "implementer patch under review",
 		ObligationIDsClaimed: []string{obligation},
 		Status:               schema.PatchCandidate,
@@ -489,6 +495,20 @@ func TestCompileReviewerAndTesterUseRoleSpecificBriefings(t *testing.T) {
 	if !projectionIncludes(reviewer, "PATCH-proj-impl") {
 		t.Fatalf("reviewer projection missing candidate patch: %+v", reviewer.IncludedSections)
 	}
+	// Diff body text must appear in the reviewer projection (Fix 1).
+	if !projectionIncludes(reviewer, "--- a/internal/projector/service.go") {
+		t.Fatalf("reviewer projection missing diff body text: %+v", reviewer.IncludedSections)
+	}
+	if !projectionIncludes(reviewer, "reviewer diff visibility test") {
+		t.Fatalf("reviewer projection missing diff body content: %+v", reviewer.IncludedSections)
+	}
+	// New role-contract phrases must be present (Fix 2).
+	if !projectionIncludes(reviewer, "adjacent-code convention consistency") {
+		t.Fatalf("reviewer projection missing convention-check phrase: %+v", reviewer.IncludedSections)
+	}
+	if !projectionIncludes(reviewer, "test-independence") {
+		t.Fatalf("reviewer projection missing test-independence phrase: %+v", reviewer.IncludedSections)
+	}
 
 	tester, err := compiler.CompileTester(env.ctx, testerID)
 	if err != nil {
@@ -499,6 +519,15 @@ func TestCompileReviewerAndTesterUseRoleSpecificBriefings(t *testing.T) {
 	}
 	if !projectionIncludes(tester, "test or challenge the patch") {
 		t.Fatalf("tester projection missing role contract: %+v", tester.IncludedSections)
+	}
+	if !projectionIncludes(tester, "test-independence") {
+		t.Fatalf("tester projection missing test-independence phrase: %+v", tester.IncludedSections)
+	}
+	if !projectionIncludes(tester, "--- a/internal/projector/service.go") {
+		t.Fatalf("tester projection missing diff body text: %+v", tester.IncludedSections)
+	}
+	if !projectionIncludes(tester, "reviewer diff visibility test") {
+		t.Fatalf("tester projection missing diff body content: %+v", tester.IncludedSections)
 	}
 }
 
@@ -1247,6 +1276,248 @@ func TestProjectionReuse_sameSourceHashReturnsCachedProjection(t *testing.T) {
 	}
 	if r.SourceHash != p1.SourceHash {
 		t.Fatalf("reuse record SourceHash = %s, want %s", r.SourceHash, p1.SourceHash)
+	}
+}
+
+// ── Role contract phrase assertions (Fix 2) ──────────────────────────────────
+
+func TestRoleContract_reviewerAndTesterPhrases(t *testing.T) {
+	t.Parallel()
+
+	reviewer := roleContract(schema.ProjectionRoleReviewer)
+	for _, phrase := range []string{
+		"adjacent-code convention consistency",
+		"divergence from nearby code patterns",
+		"test-independence",
+		"verifier-gate expectations",
+	} {
+		if !strings.Contains(reviewer, phrase) {
+			t.Errorf("reviewer role contract missing %q: %q", phrase, reviewer)
+		}
+	}
+
+	tester := roleContract(schema.ProjectionRoleTester)
+	if !strings.Contains(tester, "test-independence") {
+		t.Errorf("tester role contract missing test-independence: %q", tester)
+	}
+}
+
+// ── Diff body in reviewer/tester projections (Fix 1) ─────────────────────────
+
+// TestCompileReviewer_nonexistentDiffRendersUnavailable verifies that a patch
+// pointing to a nonexistent diff path renders the unavailable placeholder rather
+// than failing projection compilation.
+func TestCompileReviewer_nonexistentDiffRendersUnavailable(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-nofile"
+		conditionID = "GC-proj-nofile"
+		obligation  = "OB-proj-nofile"
+		capsuleID   = "CAP-proj-nofile"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+		Role:          schema.RoleReviewer,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-proj-nofile",
+		CapsuleID:            capsuleID,
+		DiffPath:             filepath.Join(t.TempDir(), "does-not-exist", "patch.diff"),
+		Summary:              "patch with missing diff",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	reviewer, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(reviewer, "diff unavailable") {
+		t.Fatalf("reviewer projection missing unavailable placeholder for nonexistent diff: %+v", reviewer.IncludedSections)
+	}
+}
+
+// TestCompileReviewer_emptyDiffPathRendersNoDiff verifies that a patch with an
+// empty DiffPath renders the "(no diff)" placeholder in the reviewer projection.
+func TestCompileReviewer_emptyDiffPathRendersNoDiff(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-nodiffpath"
+		conditionID = "GC-proj-nodiffpath"
+		obligation  = "OB-proj-nodiffpath"
+		capsuleID   = "CAP-proj-nodiffpath"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+		Role:          schema.RoleReviewer,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-proj-nodiffpath",
+		CapsuleID:            capsuleID,
+		DiffPath:             "",
+		Summary:              "patch with no diff path",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	reviewer, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(reviewer, "(no diff)") {
+		t.Fatalf("reviewer projection missing (no diff) for empty DiffPath: %+v", reviewer.IncludedSections)
+	}
+}
+
+func TestCompileReviewer_largeDiffRendersTruncationMarker(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-truncated"
+		conditionID = "GC-proj-truncated"
+		obligation  = "OB-proj-truncated"
+		capsuleID   = "CAP-proj-truncated"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+		Role:          schema.RoleReviewer,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	largeDiff := strings.Repeat("x", maxDiffBytes+64)
+	diffFile := filepath.Join(t.TempDir(), "large.patch.diff")
+	if err := os.WriteFile(diffFile, []byte(largeDiff), 0o600); err != nil {
+		t.Fatalf("WriteFile large diff: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-proj-truncated",
+		CapsuleID:            capsuleID,
+		DiffPath:             diffFile,
+		Summary:              "patch with oversized diff",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	reviewer, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(reviewer, "[truncated]") {
+		t.Fatalf("reviewer projection missing truncation marker: %+v", reviewer.IncludedSections)
+	}
+}
+
+// TestCompileReviewer_diffContentChangeInvalidatesReuse verifies that changing
+// the diff file content causes a new projection with a different SourceHash to
+// be compiled, preventing stale reuse when only the diff body changes.
+func TestCompileReviewer_diffContentChangeInvalidatesReuse(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-proj-diffreuse"
+		conditionID = "GC-proj-diffreuse"
+		obligation  = "OB-proj-diffreuse"
+		implID      = "CAP-proj-diffreuse-impl"
+		reviewerID  = "CAP-proj-diffreuse-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+
+	diffFile := filepath.Join(t.TempDir(), "patch.diff")
+	if err := os.WriteFile(diffFile, []byte("--- a/file.go\n+++ b/file.go\n@@ -1 +1,2 @@\n+// v1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile v1: %v", err)
+	}
+	for _, capsule := range []schema.ExecutionCapsule{
+		{
+			CapsuleID:     implID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleExecutor,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     reviewerID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleReviewer,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+	} {
+		capsule := capsule
+		if err := env.st.SaveCapsule(env.ctx, &capsule); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", capsule.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-proj-diffreuse",
+		CapsuleID:            implID,
+		DiffPath:             diffFile,
+		Summary:              "patch for diff reuse test",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	p1, err := compiler.CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("first CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(p1, "// v1") {
+		t.Fatalf("first projection missing initial diff content: %+v", p1.IncludedSections)
+	}
+
+	// Change diff file content — same path, new body.
+	if err := os.WriteFile(diffFile, []byte("--- a/file.go\n+++ b/file.go\n@@ -1 +1,2 @@\n+// v2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile v2: %v", err)
+	}
+
+	p2, err := compiler.CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("second CompileReviewer: %v", err)
+	}
+	if p2.ContextProjectionID == p1.ContextProjectionID {
+		t.Fatalf("changed diff content reused stale projection %s", p1.ContextProjectionID)
+	}
+	if p2.SourceHash == p1.SourceHash {
+		t.Fatalf("SourceHash did not change after diff file content changed")
+	}
+	if !projectionIncludes(p2, "// v2") {
+		t.Fatalf("new projection missing updated diff content: %+v", p2.IncludedSections)
 	}
 }
 

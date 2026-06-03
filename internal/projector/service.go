@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -16,6 +17,10 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
+
+// maxDiffBytes is the per-patch diff truncation limit for reviewer/tester
+// projections. Diffs exceeding this length are truncated with a [truncated] marker.
+const maxDiffBytes = 8192
 
 // Compiler builds role-specific context projections from the artifact graph.
 // Human summaries remain separate from agent projections. orca.md §5.4.
@@ -451,9 +456,15 @@ func sectionTexts(sections []projectionSection) []string {
 func roleContract(role schema.ProjectionRole) string {
 	switch role {
 	case schema.ProjectionRoleReviewer:
-		return "role contract: review the implementer output against obligations, scope, risks, and evidence quality; produce review evidence and claims, not implementation changes"
+		return "role contract: review the implementer output against obligations, scope, risks, and evidence quality; " +
+			"check adjacent-code convention consistency (naming, error handling, output routing patterns) and flag divergence from nearby code patterns; " +
+			"verify tests specify behavior not implementation details (test-independence); " +
+			"confirm verifier-gate expectations are met; " +
+			"produce review evidence and claims, not implementation changes"
 	case schema.ProjectionRoleTester:
-		return "role contract: test or challenge the patch against obligations and verifier gates; produce test evidence, risk notes, and follow-up claims, not implementation changes"
+		return "role contract: test or challenge the patch against obligations and verifier gates; " +
+			"write tests that specify behavior not implementation details (test-independence); " +
+			"produce test evidence, risk notes, and follow-up claims, not implementation changes"
 	default:
 		return "role contract: implement the assigned obligations within allowed scope and produce a proof-carrying patch"
 	}
@@ -582,9 +593,33 @@ func evidenceWeakens(item *schema.EvidenceArtifact, obligationID string) bool {
 	return slices.Contains(item.Weakens, obligationID)
 }
 
-func summarizePatches(patches []*schema.PatchArtifact) string {
+// readDiffContent loads the diff file at path and returns its text.
+// Returns "(no diff)" when path is empty, "(diff unavailable: <err>)" on I/O
+// error, and appends "[truncated]" when the content exceeds maxDiffBytes.
+func readDiffContent(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "(no diff)"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("(diff unavailable: %v)", err)
+	}
+	if len(data) == 0 {
+		return "(no diff)"
+	}
+	text := string(data)
+	if len(text) > maxDiffBytes {
+		return text[:maxDiffBytes] + "\n[truncated]"
+	}
+	return text
+}
+
+func summarizeCandidatePatches(role schema.ProjectionRole, patches []*schema.PatchArtifact) string {
+	if role != schema.ProjectionRoleReviewer && role != schema.ProjectionRoleTester {
+		return ""
+	}
 	if len(patches) == 0 {
-		return "none"
+		return "candidate patches: none"
 	}
 	parts := make([]string, 0, len(patches))
 	for _, patch := range patches {
@@ -593,19 +628,15 @@ func summarizePatches(patches []*schema.PatchArtifact) string {
 			summary = "(no summary)"
 		}
 		diffPath := strings.TrimSpace(patch.DiffPath)
-		if diffPath == "" {
-			diffPath = "(no diff path)"
+		displayPath := diffPath
+		if displayPath == "" {
+			displayPath = "(no diff path)"
 		}
-		parts = append(parts, fmt.Sprintf("%s status=%s diff=%s summary=%s", patch.PatchID, patch.Status, diffPath, summary))
+		diffText := readDiffContent(diffPath)
+		parts = append(parts, fmt.Sprintf("%s status=%s diff=%s summary=%s\ndiff content:\n%s",
+			patch.PatchID, patch.Status, displayPath, summary, diffText))
 	}
-	return strings.Join(parts, "; ")
-}
-
-func summarizeCandidatePatches(role schema.ProjectionRole, patches []*schema.PatchArtifact) string {
-	if role != schema.ProjectionRoleReviewer && role != schema.ProjectionRoleTester {
-		return ""
-	}
-	return "candidate patches: " + summarizePatches(patches)
+	return "candidate patches: " + strings.Join(parts, "\n")
 }
 
 func summarizeClaims(claims []*schema.ClaimArtifact, freshnessBase string) string {
