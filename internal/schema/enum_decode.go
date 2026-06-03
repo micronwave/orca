@@ -95,7 +95,7 @@ func (o *ObligationStatus) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	switch ObligationStatus(s) {
-	case ObligationOpen, ObligationSatisfied, ObligationFailed, ObligationWaived:
+	case ObligationOpen, ObligationSatisfied, ObligationFailed, ObligationWaived, ObligationStatusPartiallyMet:
 		*o = ObligationStatus(s)
 		return nil
 	}

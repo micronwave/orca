@@ -103,6 +103,13 @@ type ReconcileInput struct {
 	// is failed, Reconcile treats the verdict as waived (VerdictWaived) with
 	// WaivedBy set to the decision ID.
 	Waivers map[string]string
+
+	// AllowPartialEvidence, when true, allows a non-blocking obligation to be
+	// marked PartiallyMet when it has some evidence IDs but not all gates
+	// produced evidence. The merge recommendation will be ActionHumanReview,
+	// not ActionAccept, so a human must sign off on any partial acceptance.
+	// Blocking obligations are still rejected regardless of this flag.
+	AllowPartialEvidence bool
 }
 
 // ReconcileResult summarizes the reconciler's decision for one patch.
@@ -199,76 +206,43 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 	satisfiedBy := make(map[string][]string, len(vr.ObligationResults))
 	verdictsByObligation := make(map[string]bool, len(vr.ObligationResults))
 	highRisk := false
+	hasPartialEvidence := false
 
 	if len(vr.ObligationResults) == 0 {
 		reject(&result, fmt.Sprintf("patch %s has no obligation verdicts", patch.PatchID))
 	}
 
 	for _, verdict := range vr.ObligationResults {
-		verdictsByObligation[verdict.ObligationID] = true
-		obl, err := s.store.LoadObligation(ctx, verdict.ObligationID)
+		pvr, err := s.processObligationVerdict(ctx, verdict, in.AllowPartialEvidence)
 		if err != nil {
-			return ReconcileResult{}, fmt.Errorf("reconciler: load obligation %s: %w", verdict.ObligationID, err)
+			return ReconcileResult{}, err
 		}
-		loadedObligations = append(loadedObligations, obl)
-		if obl.RiskLevel == schema.RiskHigh {
+		verdictsByObligation[verdict.ObligationID] = true
+		loadedObligations = append(loadedObligations, pvr.loadedObligation)
+		updatedStatuses[pvr.loadedObligation.ObligationID] = pvr.status
+		if pvr.satisfiedBy != nil {
+			satisfiedBy[pvr.loadedObligation.ObligationID] = pvr.satisfiedBy
+		}
+		if pvr.highRisk {
 			highRisk = true
 		}
-
-		status := statusForVerdict(verdict.Verdict)
-		updatedStatuses[obl.ObligationID] = status
-		if status == schema.ObligationSatisfied {
-			satisfiedBy[obl.ObligationID] = append([]string(nil), verdict.EvidenceIDs...)
+		if pvr.status == schema.ObligationStatusPartiallyMet {
+			hasPartialEvidence = true
 		}
-
-		if obl.Blocking {
-			if verdict.Verdict != schema.VerdictSatisfied && verdict.Verdict != schema.VerdictWaived {
-				reject(&result, fmt.Sprintf("blocking obligation %s verdict is %s", obl.ObligationID, verdict.Verdict))
-				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
-			}
-			// A waiver does not require evidence IDs — WaivedBy carries the human
-			// authorization token instead. An empty WaivedBy is not a valid waiver:
-			// no human approved the bypass, so the obligation must be rejected.
-			if verdict.Verdict == schema.VerdictWaived && strings.TrimSpace(verdict.WaivedBy) == "" {
-				reject(&result, fmt.Sprintf("blocking obligation %s waiver has no WaivedBy authorization", obl.ObligationID))
-				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
-				continue
-			}
-			if len(verdict.EvidenceIDs) == 0 && verdict.Verdict != schema.VerdictWaived {
-				reject(&result, fmt.Sprintf("blocking obligation %s has no evidence IDs", obl.ObligationID))
-				updatedStatuses[obl.ObligationID] = schema.ObligationFailed
-				continue
-			}
-		}
-
-		for _, evidenceID := range verdict.EvidenceIDs {
-			if _, err := s.store.LoadEvidence(ctx, evidenceID); err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					updatedStatuses[obl.ObligationID] = schema.ObligationFailed
-					if obl.Blocking {
-						reject(&result, fmt.Sprintf("blocking obligation %s references absent evidence artifact %s", obl.ObligationID, evidenceID))
-					}
-					continue
-				}
-				return ReconcileResult{}, fmt.Errorf("reconciler: load evidence %s: %w", evidenceID, err)
-			}
+		if pvr.blockingReason != "" {
+			reject(&result, pvr.blockingReason)
 		}
 	}
 
-	for _, obligationID := range patch.ObligationIDsClaimed {
-		if verdictsByObligation[obligationID] {
-			continue
-		}
-		obl, err := s.store.LoadObligation(ctx, obligationID)
-		if err != nil {
-			return ReconcileResult{}, fmt.Errorf("reconciler: load claimed obligation %s: %w", obligationID, err)
-		}
-		if obl.Blocking {
-			reject(&result, fmt.Sprintf("blocking obligation %s has no verifier verdict", obligationID))
-		}
-		if obl.RiskLevel == schema.RiskHigh {
-			highRisk = true
-		}
+	claimedHighRisk, err := s.processUnverifiedClaims(ctx, patch.ObligationIDsClaimed, verdictsByObligation, &result)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	if claimedHighRisk {
+		highRisk = true
+	}
+	if hasPartialEvidence {
+		recommendationRequiresHumanReview = true
 	}
 
 	for _, obl := range loadedObligations {
@@ -484,6 +458,104 @@ func statusForVerdict(verdict schema.VerifierVerdict) schema.ObligationStatus {
 	default:
 		return schema.ObligationFailed
 	}
+}
+
+// obligationVerdictResult holds the computed outcome for one ObligationVerdict.
+type obligationVerdictResult struct {
+	loadedObligation *schema.Obligation
+	status           schema.ObligationStatus
+	satisfiedBy      []string
+	highRisk         bool
+	blockingReason   string // non-empty means the caller should call reject
+}
+
+// processObligationVerdict loads the obligation for a single verdict, enforces
+// the waiver rule and evidence-presence contract, and returns the computed
+// outcome. The caller accumulates results and calls reject on the outer
+// ReconcileResult when blockingReason is non-empty.
+func (s *Reconciler) processObligationVerdict(
+	ctx context.Context,
+	verdict schema.ObligationVerdict,
+	allowPartialEvidence bool,
+) (obligationVerdictResult, error) {
+	obl, err := s.store.LoadObligation(ctx, verdict.ObligationID)
+	if err != nil {
+		return obligationVerdictResult{}, fmt.Errorf("reconciler: load obligation %s: %w", verdict.ObligationID, err)
+	}
+
+	res := obligationVerdictResult{
+		loadedObligation: obl,
+		status:           statusForVerdict(verdict.Verdict),
+		highRisk:         obl.RiskLevel == schema.RiskHigh,
+	}
+	if res.status == schema.ObligationSatisfied {
+		res.satisfiedBy = append([]string(nil), verdict.EvidenceIDs...)
+	}
+
+	if obl.Blocking {
+		if verdict.Verdict != schema.VerdictSatisfied && verdict.Verdict != schema.VerdictWaived {
+			res.blockingReason = fmt.Sprintf("blocking obligation %s verdict is %s", obl.ObligationID, verdict.Verdict)
+			res.status = schema.ObligationFailed
+		}
+		// A waiver does not require evidence IDs — WaivedBy carries the human
+		// authorization token instead. An empty WaivedBy is not a valid waiver:
+		// no human approved the bypass, so the obligation must be rejected.
+		if verdict.Verdict == schema.VerdictWaived && strings.TrimSpace(verdict.WaivedBy) == "" {
+			res.blockingReason = fmt.Sprintf("blocking obligation %s waiver has no WaivedBy authorization", obl.ObligationID)
+			res.status = schema.ObligationFailed
+			return res, nil
+		}
+		if len(verdict.EvidenceIDs) == 0 && verdict.Verdict != schema.VerdictWaived {
+			res.blockingReason = fmt.Sprintf("blocking obligation %s has no evidence IDs", obl.ObligationID)
+			res.status = schema.ObligationFailed
+			return res, nil
+		}
+	}
+
+	for _, evidenceID := range verdict.EvidenceIDs {
+		if _, err := s.store.LoadEvidence(ctx, evidenceID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				if allowPartialEvidence && !obl.Blocking {
+					res.status = schema.ObligationStatusPartiallyMet
+				} else {
+					res.status = schema.ObligationFailed
+					if obl.Blocking && res.blockingReason == "" {
+						res.blockingReason = fmt.Sprintf("blocking obligation %s references absent evidence artifact %s", obl.ObligationID, evidenceID)
+					}
+				}
+				continue
+			}
+			return obligationVerdictResult{}, fmt.Errorf("reconciler: load evidence %s: %w", evidenceID, err)
+		}
+	}
+	return res, nil
+}
+
+// processUnverifiedClaims checks claimed obligation IDs that have no verifier
+// verdict. Blocking unverified claims reject the patch; any high-risk claim
+// found is reported via the returned bool so the caller can set highRisk.
+func (s *Reconciler) processUnverifiedClaims(
+	ctx context.Context,
+	claimedIDs []string,
+	verdictsByObligation map[string]bool,
+	result *ReconcileResult,
+) (highRisk bool, err error) {
+	for _, obligationID := range claimedIDs {
+		if verdictsByObligation[obligationID] {
+			continue
+		}
+		obl, err := s.store.LoadObligation(ctx, obligationID)
+		if err != nil {
+			return false, fmt.Errorf("reconciler: load claimed obligation %s: %w", obligationID, err)
+		}
+		if obl.Blocking {
+			reject(result, fmt.Sprintf("blocking obligation %s has no verifier verdict", obligationID))
+		}
+		if obl.RiskLevel == schema.RiskHigh {
+			highRisk = true
+		}
+	}
+	return highRisk, nil
 }
 
 func reject(result *ReconcileResult, reason string) {

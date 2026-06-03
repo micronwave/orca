@@ -2486,3 +2486,157 @@ func TestReconcileWaiver_RejectsEmptyWaivedBy(t *testing.T) {
 		t.Fatalf("BlockingReason = %q, want WaivedBy authorization error", result.BlockingReason)
 	}
 }
+
+// ── Partial evidence acceptance (Finding B) ───────────────────────────────────
+
+// TestReconcile_partialEvidence_rejected_by_default verifies that a blocking
+// obligation with a missing evidence artifact is rejected when
+// AllowPartialEvidence is false (the default).
+func TestReconcile_partialEvidence_rejected_by_default(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "PARTIAL-DEFAULT",
+		evidenceIDs:  []string{"EV-PARTIAL-DEFAULT"},
+		saveEvidence: false,
+	})
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted = true, want false")
+	}
+	if !strings.Contains(result.BlockingReason, "absent evidence artifact") {
+		t.Fatalf("BlockingReason = %q, want absent evidence reason", result.BlockingReason)
+	}
+}
+
+// TestReconcile_partialEvidence_partiallyMet verifies that a non-blocking
+// obligation with a missing evidence artifact is marked partially_met when
+// AllowPartialEvidence is true, the patch is accepted, and human review is
+// required.
+func TestReconcile_partialEvidence_partiallyMet(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-PARTIAL-MET"
+		condID  = "GC-PARTIAL-MET"
+		oblID   = "OB-PARTIAL-MET"
+		capsID  = "CAP-PARTIAL-MET"
+		patchID = "PATCH-PARTIAL-MET"
+		vrID    = "VR-PARTIAL-MET"
+	)
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test partial evidence acceptance",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "scope check",
+		EvidenceRequired: []string{string(schema.EvidenceDiffRiskReport)},
+		Blocking:         false,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              patchID,
+		CapsuleID:            capsID,
+		ObligationIDsClaimed: []string{oblID},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// Evidence ID referenced in verdict but artifact never saved — ghost evidence.
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID: vrID,
+		PatchID:          patchID,
+		CapsuleID:        capsID,
+		ObligationResults: []schema.ObligationVerdict{{
+			ObligationID: oblID,
+			Verdict:      schema.VerdictSatisfied,
+			EvidenceIDs:  []string{"EV-PARTIAL-MET-GHOST"},
+		}},
+		RecommendedAction:       schema.ActionAccept,
+		RecommendationRationale: "scope check passed",
+		CreatedAt:               now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID, ReconcileInput{AllowPartialEvidence: true})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.PatchAccepted {
+		t.Fatalf("PatchAccepted = false, reason=%q; partial evidence on a non-blocking obligation must not reject the patch", result.BlockingReason)
+	}
+	if !result.MergeReady {
+		t.Fatalf("MergeReady = false, reason=%q", result.BlockingReason)
+	}
+	if !result.HumanGateRequired {
+		t.Fatal("HumanGateRequired = false, want true when partial evidence forces human review")
+	}
+
+	obl, err := env.st.LoadObligation(env.ctx, oblID)
+	if err != nil {
+		t.Fatalf("LoadObligation: %v", err)
+	}
+	if obl.Status != schema.ObligationStatusPartiallyMet {
+		t.Fatalf("obligation status = %s, want %s", obl.Status, schema.ObligationStatusPartiallyMet)
+	}
+}
+
+// TestReconcile_partialEvidence_blocking_obligation verifies that a blocking
+// obligation with a missing evidence artifact is still rejected even when
+// AllowPartialEvidence is true — blocking obligations cannot be partially met.
+func TestReconcile_partialEvidence_blocking_obligation(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "PARTIAL-BLOCKING",
+		evidenceIDs:  []string{"EV-PARTIAL-BLOCKING"},
+		saveEvidence: false,
+	})
+
+	result, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID, ReconcileInput{AllowPartialEvidence: true})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.PatchAccepted {
+		t.Fatal("PatchAccepted = true; blocking obligation with missing evidence must be rejected even with AllowPartialEvidence")
+	}
+	if !strings.Contains(result.BlockingReason, "absent evidence artifact") {
+		t.Fatalf("BlockingReason = %q, want absent evidence reason", result.BlockingReason)
+	}
+
+	obl, err := env.st.LoadObligation(env.ctx, ids.obligationID)
+	if err != nil {
+		t.Fatalf("LoadObligation: %v", err)
+	}
+	if obl.Status != schema.ObligationFailed {
+		t.Fatalf("obligation status = %s, want failed", obl.Status)
+	}
+}

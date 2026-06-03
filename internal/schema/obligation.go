@@ -4,10 +4,11 @@ package schema
 type ObligationStatus string
 
 const (
-	ObligationOpen      ObligationStatus = "open"
-	ObligationSatisfied ObligationStatus = "satisfied"
-	ObligationFailed    ObligationStatus = "failed"
-	ObligationWaived    ObligationStatus = "waived"
+	ObligationOpen               ObligationStatus = "open"
+	ObligationSatisfied          ObligationStatus = "satisfied"
+	ObligationFailed             ObligationStatus = "failed"
+	ObligationWaived             ObligationStatus = "waived"
+	ObligationStatusPartiallyMet ObligationStatus = "partially_met"
 )
 
 // Obligation is a checkable requirement that must be discharged before Orca
