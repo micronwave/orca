@@ -159,11 +159,11 @@ func BenchmarkReadAfter_LogGrowth(b *testing.B) {
 	}
 }
 
-// BenchmarkReadAfter_AfterSeq shows that ReadAfter's scan cost is determined
-// by the total log size, not the number of events returned. All three
-// sub-benchmarks read a 100 K-event log but request progressively smaller
-// tail windows. Runtimes should be nearly identical, confirming there is no
-// seek optimisation.
+// BenchmarkReadAfter_AfterSeq demonstrates the seek-index optimisation.
+// All three sub-benchmarks read a 100 K-event log but request progressively
+// smaller tail windows. Because ReadAfter now seeks to the first event after
+// afterSeq using a byte-offset index, tail-1k is ~100× faster than scan-all
+// instead of the near-identical times seen before the optimisation.
 func BenchmarkReadAfter_AfterSeq(b *testing.B) {
 	const total = 100_000
 

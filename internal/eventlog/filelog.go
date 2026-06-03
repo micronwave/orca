@@ -28,6 +28,15 @@ type FileLog struct {
 	f    *os.File
 	err  error
 	done bool
+
+	// offsets is a dense byte-offset index: offsets[seq-1] is the byte offset
+	// of the line containing the event with SequenceNum=seq. Built by Open and
+	// grown by Append. len(offsets) == seq invariant is maintained under mu.
+	offsets []int64
+
+	// size is the current byte length of the log file. Maintained under mu so
+	// Append can record the start offset of each new event without a Seek call.
+	size int64
 }
 
 var (
@@ -49,7 +58,7 @@ func Open(path string) (*FileLog, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("eventlog: mkdir %s: %w", filepath.Dir(path), err)
 	}
-	maxSeq, repairAt, err := scanMaxSeq(path)
+	maxSeq, repairAt, offsets, initSize, err := scanMaxSeq(path)
 	if err != nil {
 		return nil, err
 	}
@@ -57,26 +66,32 @@ func Open(path string) (*FileLog, error) {
 		if err := os.Truncate(path, repairAt); err != nil {
 			return nil, fmt.Errorf("eventlog: truncate partial final line: %w", err)
 		}
+		// initSize is already set to repairAt by scanMaxSeq.
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: open for append: %w", err)
 	}
-	return &FileLog{path: path, seq: maxSeq, f: f}, nil
+	return &FileLog{path: path, seq: maxSeq, f: f, offsets: offsets, size: initSize}, nil
 }
 
-// scanMaxSeq reads path and returns the highest SequenceNum found.
-// Returns 0 if the file does not exist or is empty.
-// Returns an error if any completed line cannot be parsed. A malformed final
-// unterminated line is treated as a crash-partial append and returned as a
-// truncation point for Open to repair.
-func scanMaxSeq(path string) (maxSeq int64, repairAt int64, err error) {
+// scanMaxSeq reads path and returns the highest SequenceNum found, an
+// in-memory byte-offset index (offsets[seq-1] = byte offset of that event's
+// line), and the usable file size (scannedSize). scannedSize equals the byte
+// length of all complete lines; when a partial final line is detected it
+// equals the truncation point (repairAt).
+//
+// Returns maxSeq=0, repairAt=-1, offsets=nil, scannedSize=0 if the file does
+// not exist or is empty. Returns an error if any completed line cannot be
+// parsed. A malformed unterminated final line is treated as a crash-partial
+// append and returned as a truncation point for Open to repair.
+func scanMaxSeq(path string) (maxSeq int64, repairAt int64, offsets []int64, scannedSize int64, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, -1, nil
+		return 0, -1, nil, 0, nil
 	}
 	if err != nil {
-		return 0, -1, fmt.Errorf("eventlog: open for scan: %w", err)
+		return 0, -1, nil, 0, fmt.Errorf("eventlog: open for scan: %w", err)
 	}
 	defer f.Close()
 
@@ -93,7 +108,7 @@ func scanMaxSeq(path string) (maxSeq int64, repairAt int64, err error) {
 		lineNum++
 		if len(line) == 0 {
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				return 0, -1, fmt.Errorf("eventlog: scan: %w", readErr)
+				return 0, -1, nil, 0, fmt.Errorf("eventlog: scan: %w", readErr)
 			}
 			break
 		}
@@ -101,7 +116,7 @@ func scanMaxSeq(path string) (maxSeq int64, repairAt int64, err error) {
 		line = bytesTrimRightNewline(line)
 		if len(line) == 0 {
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				return 0, -1, fmt.Errorf("eventlog: scan: %w", readErr)
+				return 0, -1, nil, 0, fmt.Errorf("eventlog: scan: %w", readErr)
 			}
 			if errors.Is(readErr, io.EOF) {
 				break
@@ -112,28 +127,30 @@ func scanMaxSeq(path string) (maxSeq int64, repairAt int64, err error) {
 		var e schema.Event
 		if err := json.Unmarshal(line, &e); err != nil {
 			if !terminated && errors.Is(readErr, io.EOF) {
-				return maxSeq, lineStart, nil
+				// Partial JSON at EOF: truncate to lineStart.
+				return maxSeq, lineStart, offsets, lineStart, nil
 			}
-			return 0, -1, fmt.Errorf("eventlog: corrupt line %d: %w", lineNum, err)
+			return 0, -1, nil, 0, fmt.Errorf("eventlog: corrupt line %d: %w", lineNum, err)
 		}
 		// A valid-JSON record that is not newline-terminated is an incomplete
 		// append (e.g. crash after write, before the '\n' was flushed). The next
 		// Append would concatenate JSON directly onto it, corrupting the log.
 		if !terminated && errors.Is(readErr, io.EOF) {
-			return maxSeq, lineStart, nil
+			return maxSeq, lineStart, offsets, lineStart, nil
 		}
 		if e.SequenceNum != maxSeq+1 {
-			return 0, -1, fmt.Errorf("eventlog: ordering violation at line %d: got seq %d, want %d", lineNum, e.SequenceNum, maxSeq+1)
+			return 0, -1, nil, 0, fmt.Errorf("eventlog: ordering violation at line %d: got seq %d, want %d", lineNum, e.SequenceNum, maxSeq+1)
 		}
+		offsets = append(offsets, lineStart) // offsets[seq-1] = lineStart
 		maxSeq = e.SequenceNum
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return 0, -1, fmt.Errorf("eventlog: scan: %w", readErr)
+			return 0, -1, nil, 0, fmt.Errorf("eventlog: scan: %w", readErr)
 		}
 	}
-	return maxSeq, -1, nil
+	return maxSeq, -1, offsets, offset, nil
 }
 
 func bytesTrimRightNewline(line []byte) []byte {
@@ -205,11 +222,15 @@ func (l *FileLog) Append(ctx context.Context, e schema.Event) (schema.Event, err
 	}
 	line = append(line, '\n')
 
+	// Record the byte offset of this event's line before writing.
+	eventOffset := l.size
+
 	n, err := l.f.Write(line)
 	if err != nil {
 		if n > 0 {
 			// Partial write: bytes may be on disk. Cannot reuse seq safely;
 			// poison the log so callers do not continue on corrupt state.
+			l.size += int64(n)
 			l.err = fmt.Errorf("%w: partial write (%d/%d bytes): %v", ErrUncertainCommit, n, len(line), err)
 			return schema.Event{}, l.err
 		}
@@ -217,9 +238,12 @@ func (l *FileLog) Append(ctx context.Context, e schema.Event) (schema.Event, err
 		return schema.Event{}, fmt.Errorf("eventlog: write: %w", err)
 	}
 	if n != len(line) {
+		l.size += int64(n)
 		l.err = fmt.Errorf("%w: wrote %d of %d bytes", io.ErrShortWrite, n, len(line))
 		return schema.Event{}, l.err
 	}
+	l.size += int64(len(line))
+
 	// Write succeeded. Sequence number is committed even if Sync fails;
 	// the OS may flush the buffer independently, so rolling back seq would
 	// risk re-using a number that is already on disk.
@@ -227,6 +251,10 @@ func (l *FileLog) Append(ctx context.Context, e schema.Event) (schema.Event, err
 		l.err = fmt.Errorf("%w: %v", ErrUncertainCommit, err)
 		return schema.Event{}, l.err
 	}
+
+	// Index the event offset only after a durable sync.
+	// offsets[seq-1] = eventOffset maintains len(offsets) == seq invariant.
+	l.offsets = append(l.offsets, eventOffset)
 	return e, nil
 }
 
@@ -272,7 +300,17 @@ func (l *FileLog) ReadForGoal(ctx context.Context, goalID string, afterSeq int64
 // scan reads the JSONL file, skipping events with SequenceNum <= afterSeq,
 // collecting up to limit events (0 = no limit) that satisfy pred.
 // Caller must hold at least l.mu.RLock().
+//
+// When afterSeq > 0 the offset index is used to seek directly to the first
+// event after afterSeq, avoiding a full scan from byte 0.
 func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func(schema.Event) bool) ([]schema.Event, error) {
+	// Fast path: no events can exist after afterSeq when afterSeq >= l.seq.
+	// Only safe when afterSeq > 0; for afterSeq == 0 we always open the file
+	// so that externally-detected ordering violations are caught on the full scan.
+	if afterSeq > 0 && afterSeq >= l.seq {
+		return nil, nil
+	}
+
 	f, err := os.Open(l.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -282,9 +320,20 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 	}
 	defer f.Close()
 
+	// Seek past events we don't need. afterSeq > 0 is guaranteed here because
+	// afterSeq < l.seq implies l.seq >= 1, so the index has at least one entry.
+	// offsets[afterSeq] is the byte offset of the event with SequenceNum=afterSeq+1.
+	var prevSeq int64
+	if afterSeq > 0 {
+		seekOffset := l.offsets[afterSeq]
+		if _, err := f.Seek(seekOffset, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("eventlog: seek to offset %d: %w", seekOffset, err)
+		}
+		prevSeq = afterSeq
+	}
+
 	var out []schema.Event
 	r := bufio.NewReaderSize(f, 1<<20)
-	var prevSeq int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err

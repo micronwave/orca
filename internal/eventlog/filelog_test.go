@@ -823,3 +823,151 @@ func TestFileLog_ConcurrentReadWrite(t *testing.T) {
 		t.Errorf("final event count = %d, want %d", len(events), writes)
 	}
 }
+
+// --- Seek-index correctness ---
+//
+// These tests verify that the byte-offset index built during Append and Open
+// produces identical results to a full scan from byte 0 for every afterSeq value.
+
+// TestReadAfter_SeekIndex_AppendPath verifies that the index built incrementally
+// by Append lets ReadAfter seek correctly to any mid-log position.
+func TestReadAfter_SeekIndex_AppendPath(t *testing.T) {
+	const n = 100
+	l := openLog(t)
+	for i := 0; i < n; i++ {
+		append1(t, l, schema.EventGoalCreated, "G-1")
+	}
+
+	cases := []struct {
+		afterSeq int64
+		wantLen  int
+		wantFirst int64
+	}{
+		{0, n, 1},
+		{1, n - 1, 2},
+		{50, 50, 51},
+		{99, 1, 100},
+		{100, 0, 0}, // past the last event
+		{200, 0, 0}, // well past the end
+	}
+	for _, tc := range cases {
+		events, err := l.ReadAfter(context.Background(), tc.afterSeq, 0)
+		if err != nil {
+			t.Fatalf("ReadAfter(%d): %v", tc.afterSeq, err)
+		}
+		if len(events) != tc.wantLen {
+			t.Errorf("ReadAfter(%d): got %d events, want %d", tc.afterSeq, len(events), tc.wantLen)
+			continue
+		}
+		if tc.wantLen > 0 && events[0].SequenceNum != tc.wantFirst {
+			t.Errorf("ReadAfter(%d): first seq=%d, want %d", tc.afterSeq, events[0].SequenceNum, tc.wantFirst)
+		}
+		if tc.wantLen > 0 && events[len(events)-1].SequenceNum != int64(n) {
+			t.Errorf("ReadAfter(%d): last seq=%d, want %d", tc.afterSeq, events[len(events)-1].SequenceNum, n)
+		}
+	}
+}
+
+// TestReadAfter_SeekIndex_ScanPath verifies that the index built from the
+// initial file scan by Open (not by incremental Append) also produces correct
+// seek behaviour. seedLog writes events directly to disk, then Open rescans.
+func TestReadAfter_SeekIndex_ScanPath(t *testing.T) {
+	const n = 500
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+	seedLog(t, path, n)
+
+	l := openLogAt(t, path)
+
+	// Tail read: seek deep into a log whose index was built by Open's scan.
+	const tail = 10
+	events, err := l.ReadAfter(context.Background(), int64(n-tail), 0)
+	if err != nil {
+		t.Fatalf("ReadAfter tail: %v", err)
+	}
+	if len(events) != tail {
+		t.Fatalf("ReadAfter tail: got %d events, want %d", len(events), tail)
+	}
+	if events[0].SequenceNum != int64(n-tail+1) {
+		t.Errorf("first seq=%d, want %d", events[0].SequenceNum, n-tail+1)
+	}
+	if events[len(events)-1].SequenceNum != int64(n) {
+		t.Errorf("last seq=%d, want %d", events[len(events)-1].SequenceNum, n)
+	}
+}
+
+// TestReadAfter_SeekIndex_SeekMatchesFullScan checks that seek and full-scan
+// results are identical for a representative set of afterSeq values.
+func TestReadAfter_SeekIndex_SeekMatchesFullScan(t *testing.T) {
+	const n = 50
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	// First session: write events.
+	l := openLogAt(t, path)
+	for i := 0; i < n; i++ {
+		append1(t, l, schema.EventObligationCreated, "G-cmp")
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Second session: reopen so the index is built by scanMaxSeq.
+	l2 := openLogAt(t, path)
+
+	// For each afterSeq, compare seek-based result with full-scan slice.
+	fullScan, err := l2.ReadAfter(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("full scan: %v", err)
+	}
+
+	for afterSeq := int64(0); afterSeq <= int64(n); afterSeq++ {
+		got, err := l2.ReadAfter(context.Background(), afterSeq, 0)
+		if err != nil {
+			t.Fatalf("ReadAfter(%d): %v", afterSeq, err)
+		}
+		want := fullScan[afterSeq:]
+		if len(got) != len(want) {
+			t.Errorf("ReadAfter(%d): len=%d, want %d", afterSeq, len(got), len(want))
+			continue
+		}
+		for i := range got {
+			if got[i].SequenceNum != want[i].SequenceNum {
+				t.Errorf("ReadAfter(%d)[%d]: seq=%d, want %d", afterSeq, i, got[i].SequenceNum, want[i].SequenceNum)
+			}
+		}
+	}
+}
+
+// TestReadAfter_SeekIndex_ReadByType verifies that ReadByType also benefits
+// from the offset index when afterSeq > 0.
+func TestReadAfter_SeekIndex_ReadByType(t *testing.T) {
+	const n = 40
+	l := openLog(t)
+	for i := 0; i < n; i++ {
+		typ := schema.EventGoalCreated
+		if i%2 == 1 {
+			typ = schema.EventObligationCreated
+		}
+		append1(t, l, typ, "G-1")
+	}
+
+	// afterSeq=20 means events 21..40; half of those are obligation_created.
+	events, err := l.ReadByType(context.Background(), schema.EventObligationCreated, 20, 0)
+	if err != nil {
+		t.Fatalf("ReadByType: %v", err)
+	}
+	// Events 21..40: odd indices (1-based) among [21..40] are obligation_created.
+	// seq 21=goal, 22=obl, 23=goal, 24=obl, ... 40=obl → 10 obligation events.
+	if len(events) != 10 {
+		t.Errorf("ReadByType after afterSeq=20: got %d events, want 10", len(events))
+	}
+	for _, e := range events {
+		if e.Type != schema.EventObligationCreated {
+			t.Errorf("unexpected event type: %s", e.Type)
+		}
+		if e.SequenceNum <= 20 {
+			t.Errorf("event seq=%d should be > 20", e.SequenceNum)
+		}
+	}
+}
