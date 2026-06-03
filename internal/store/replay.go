@@ -86,7 +86,17 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("obligation", v.ObligationID); err != nil {
 			return err
 		}
-		return s.writeFileReplay(ctx, s.artifactPath(dirObligations, v.ObligationID), &v)
+		if err := s.writeFileReplay(ctx, s.artifactPath(dirObligations, v.ObligationID), &v); err != nil {
+			return err
+		}
+		if v.Status == schema.ObligationOpen && v.GoalConditionID != "" {
+			goalID, err := s.findGoalIDForCondition(ctx, v.GoalConditionID)
+			if err != nil {
+				return fmt.Errorf("resolve goal for obligation %s: %w", v.ObligationID, err)
+			}
+			s.addToOpenIdx(goalID, v.ObligationID)
+		}
+		return nil
 
 	case schema.EventCapsuleCreated:
 		var v schema.ExecutionCapsule
@@ -433,18 +443,30 @@ func (s *FileStore) updateGoalStatusNoLock(ctx context.Context, goalID string, s
 }
 
 // updateObligationStatusNoLock reads the obligation file, updates Status and
-// SatisfiedBy, then writes back. Caller must hold s.mu.Lock().
+// SatisfiedBy, then writes back and updates the open-obligations index.
+// Caller must hold s.mu.Lock().
 func (s *FileStore) updateObligationStatusNoLock(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
 	path := s.artifactPath(dirObligations, obligationID)
 	o, err := readFile[schema.Obligation](ctx, path)
 	if err != nil {
 		return err
 	}
+	conditionID := o.GoalConditionID
 	o.Status = status
 	if satisfiedBy != nil {
 		o.SatisfiedBy = *satisfiedBy
 	}
-	return s.writeFileReplay(ctx, path, o)
+	if err := s.writeFileReplay(ctx, path, o); err != nil {
+		return err
+	}
+	if conditionID != "" {
+		goalID, err := s.findGoalIDForCondition(ctx, conditionID)
+		if err != nil {
+			return fmt.Errorf("resolve goal for obligation %s: %w", obligationID, err)
+		}
+		s.updateOpenIdx(goalID, obligationID, status)
+	}
+	return nil
 }
 
 // updateClaimSupersessionNoLock sets SupersededBy on a claim artifact file.

@@ -128,7 +128,13 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirObligations, o.ObligationID), o))
+	if err := s.writeFile(ctx, s.artifactPath(dirObligations, o.ObligationID), o); err != nil {
+		return materializationError(ev, err)
+	}
+	if o.Status == schema.ObligationOpen {
+		s.addToOpenIdx(goalID, o.ObligationID)
+	}
+	return nil
 }
 
 func (s *FileStore) LoadObligation(ctx context.Context, obligationID string) (*schema.Obligation, error) {
@@ -146,24 +152,20 @@ func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// Build the set of condition IDs that belong to this goal.
-	g, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
-	if err != nil {
+	if _, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID)); err != nil {
 		return nil, fmt.Errorf("store: LoadOpenObligations: %w", err)
 	}
-	conditionIDs := make(map[string]bool, len(g.GoalConditions))
-	for _, c := range g.GoalConditions {
-		conditionIDs[c.ID] = true
+	openIDs := s.openOblIdx[goalID]
+	if len(openIDs) == 0 {
+		return nil, nil
 	}
-	all, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
-	if err != nil {
-		return nil, err
-	}
-	var out []*schema.Obligation
-	for _, o := range all {
-		if o.Status == schema.ObligationOpen && conditionIDs[o.GoalConditionID] {
-			out = append(out, o)
+	out := make([]*schema.Obligation, 0, len(openIDs))
+	for oblID := range openIDs {
+		o, err := readFile[schema.Obligation](ctx, s.artifactPath(dirObligations, oblID))
+		if err != nil {
+			return nil, fmt.Errorf("store: LoadOpenObligations: %w", err)
 		}
+		out = append(out, o)
 	}
 	return out, nil
 }
@@ -207,7 +209,11 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	if satisfiedBy != nil {
 		o.SatisfiedBy = *satisfiedBy
 	}
-	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirObligations, obligationID), o))
+	if err := s.writeFile(ctx, s.artifactPath(dirObligations, obligationID), o); err != nil {
+		return materializationError(ev, err)
+	}
+	s.updateOpenIdx(goalID, obligationID, status)
+	return nil
 }
 
 // ── Execution Capsules ───────────────────────────────────────────────────────

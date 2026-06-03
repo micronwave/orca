@@ -107,6 +107,11 @@ type FileStore struct {
 	root string
 	log  *eventlog.FileLog
 	mu   sync.RWMutex
+
+	// openOblIdx maps goalID → set of obligationIDs whose status is ObligationOpen.
+	// Maintained under mu.Lock for writes; read under mu.RLock.
+	// Built from disk on New and updated on every obligation save/status change.
+	openOblIdx map[string]map[string]bool
 }
 
 // New creates or opens the FileStore at root, building the required directory
@@ -129,7 +134,68 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 			return nil, fmt.Errorf("store: create dir %s: %w", d, err)
 		}
 	}
-	return &FileStore{root: root, log: log}, nil
+	ctx := context.Background()
+	s := &FileStore{root: root, log: log, openOblIdx: make(map[string]map[string]bool)}
+	if err := s.initOpenObligationsIndex(ctx); err != nil {
+		return nil, fmt.Errorf("store: build open-obligations index: %w", err)
+	}
+	return s, nil
+}
+
+// initOpenObligationsIndex scans the goals and obligations directories once at
+// startup and populates openOblIdx with every obligation whose status is Open.
+// Caller must NOT hold s.mu (called from New before the store is published).
+func (s *FileStore) initOpenObligationsIndex(ctx context.Context) error {
+	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
+	if err != nil {
+		return err
+	}
+	condToGoal := make(map[string]string)
+	for _, g := range goals {
+		for _, c := range g.GoalConditions {
+			condToGoal[c.ID] = g.GoalID
+		}
+	}
+	obligations, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
+	if err != nil {
+		return err
+	}
+	for _, o := range obligations {
+		if o.Status == schema.ObligationOpen {
+			goalID := condToGoal[o.GoalConditionID]
+			if goalID == "" {
+				return fmt.Errorf("store: open obligation %s references unknown condition %s: %w",
+					o.ObligationID, o.GoalConditionID, ErrNotFound)
+			}
+			s.addToOpenIdx(goalID, o.ObligationID)
+		}
+	}
+	return nil
+}
+
+// addToOpenIdx records obligationID as open for goalID.
+// Caller must hold s.mu.Lock().
+func (s *FileStore) addToOpenIdx(goalID, obligationID string) {
+	if s.openOblIdx[goalID] == nil {
+		s.openOblIdx[goalID] = make(map[string]bool)
+	}
+	s.openOblIdx[goalID][obligationID] = true
+}
+
+// removeFromOpenIdx removes obligationID from the open index for goalID.
+// Caller must hold s.mu.Lock().
+func (s *FileStore) removeFromOpenIdx(goalID, obligationID string) {
+	delete(s.openOblIdx[goalID], obligationID)
+}
+
+// updateOpenIdx adds obligationID to the open index when status is Open;
+// removes it otherwise. Caller must hold s.mu.Lock().
+func (s *FileStore) updateOpenIdx(goalID, obligationID string, status schema.ObligationStatus) {
+	if status == schema.ObligationOpen {
+		s.addToOpenIdx(goalID, obligationID)
+	} else {
+		s.removeFromOpenIdx(goalID, obligationID)
+	}
 }
 
 // ── low-level helpers (no locking; callers hold appropriate lock) ────────────
