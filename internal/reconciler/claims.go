@@ -39,11 +39,7 @@ func (s *Reconciler) processSupersededClaims(ctx context.Context, patch *schema.
 	return nil
 }
 
-func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string) error {
-	claims, err := s.store.LoadClaimsForCapsule(ctx, capsuleID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load claims for capsule %s: %w", capsuleID, err)
-	}
+func (s *Reconciler) verifyClaims(ctx context.Context, claims []*schema.ClaimArtifact, goalID string) error {
 	snapshotID, err := s.latestSnapshotID(ctx, goalID)
 	if err != nil {
 		return err
@@ -75,16 +71,12 @@ func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string)
 	return nil
 }
 
-func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr *schema.VerifierResult) error {
-	claims, err := s.store.LoadClaimsForGoal(ctx, goalID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load claims for disputes for goal %s: %w", goalID, err)
-	}
-	claimsByID := make(map[string]*schema.ClaimArtifact, len(claims))
-	for _, claim := range claims {
+func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, goalClaims []*schema.ClaimArtifact, vr *schema.VerifierResult) error {
+	claimsByID := make(map[string]*schema.ClaimArtifact, len(goalClaims))
+	for _, claim := range goalClaims {
 		claimsByID[claim.ClaimID] = claim
 	}
-	for _, claim := range claims {
+	for _, claim := range goalClaims {
 		if claim.Status != schema.ClaimVerified {
 			continue
 		}
@@ -302,13 +294,9 @@ func (s *Reconciler) latestSnapshotID(ctx context.Context, goalID string) (strin
 	return "", fmt.Errorf("reconciler: load latest snapshot for goal %s: %w", goalID, err)
 }
 
-func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
+func (s *Reconciler) invalidateStaleClaims(ctx context.Context, patch *schema.PatchArtifact, goalClaims []*schema.ClaimArtifact, capsuleClaims []*schema.ClaimArtifact) error {
 	if patch == nil {
 		return nil
-	}
-	goalClaims, err := s.store.LoadClaimsForGoal(ctx, goalID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load claims for goal %s: %w", goalID, err)
 	}
 	repoClaims, err := s.store.LoadRepoScopedClaims(ctx)
 	if err != nil {
@@ -317,18 +305,9 @@ func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, p
 	if len(goalClaims) == 0 && len(repoClaims) == 0 {
 		return nil
 	}
-	currentCapsuleClaims, err := s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load claims for capsule %s: %w", patch.CapsuleID, err)
-	}
 	changedFiles := normalizedSet(patch.ChangedFiles)
-	// changedSymbols is populated from the new capsule's claims, not from a static
-	// analysis of the diff. File overlap is the primary signal; symbol overlap is
-	// supplementary and only fires when producers populate AffectedSymbols. When
-	// AffectedSymbols is empty for all current capsule claims, changedSymbols is
-	// empty and hasOverlap returns false — file overlap alone drives stale detection.
 	changedSymbols := make(map[string]bool)
-	for _, claim := range currentCapsuleClaims {
+	for _, claim := range capsuleClaims {
 		for _, symbol := range claim.AffectedSymbols {
 			if normalized := normalizeSymbol(symbol); normalized != "" {
 				changedSymbols[normalized] = true

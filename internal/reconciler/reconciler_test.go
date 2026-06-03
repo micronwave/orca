@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,9 +16,10 @@ import (
 )
 
 type testEnv struct {
-	ctx context.Context
-	log *eventlog.FileLog
-	st  *store.FileStore
+	ctx  context.Context
+	log  *eventlog.FileLog
+	root string
+	st   *store.FileStore
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -32,7 +34,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	return &testEnv{ctx: context.Background(), log: log, st: st}
+	return &testEnv{ctx: context.Background(), log: log, root: root, st: st}
 }
 
 func TestReconcileRejectsBlockingObligationWithoutEvidenceIDs(t *testing.T) {
@@ -1787,6 +1789,9 @@ func TestReconcile_NoLearningSkipsTopologyOutcome(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveVerifierResult: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(env.root, "artifacts", "failures", "FAIL-BAD.json"), []byte("{"), 0o644); err != nil {
+		t.Fatalf("Write malformed failure: %v", err)
+	}
 
 	if _, err := New(env.st, env.log, Config{NoLearning: true}).Reconcile(env.ctx, patchID); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -1887,6 +1892,9 @@ func TestReconcile_TopologyOutcomeSkippedWhenNoTopologyDecisionID(t *testing.T) 
 		CreatedAt:         now,
 	}); err != nil {
 		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "artifacts", "failures", "FAIL-BAD.json"), []byte("{"), 0o644); err != nil {
+		t.Fatalf("Write malformed failure: %v", err)
 	}
 
 	// Reconcile must succeed — the missing TopologyDecisionID causes a silent

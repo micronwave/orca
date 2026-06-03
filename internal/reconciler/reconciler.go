@@ -278,38 +278,56 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		return ReconcileResult{}, fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)
 	}
 
+	var capsuleClaims []*schema.ClaimArtifact
+	if result.PatchAccepted || len(vr.Warnings) > 0 {
+		capsuleClaims, err = s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
+		if err != nil {
+			return ReconcileResult{}, fmt.Errorf("reconciler: load claims for capsule %s: %w", patch.CapsuleID, err)
+		}
+	}
+
 	// verifyClaims must only run for accepted patches. Promoting proposed claims
 	// to verified on a rejected patch makes failed work appear factual and
 	// eligible for downstream projection.
 	if result.PatchAccepted {
-		if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
+		if err := s.verifyClaims(ctx, capsuleClaims, goal.GoalID); err != nil {
 			return ReconcileResult{}, err
 		}
 		if err := s.processSupersededClaims(ctx, patch); err != nil {
 			return ReconcileResult{}, err
 		}
 	}
-	if err := s.detectClaimDisputes(ctx, goal.GoalID, vr); err != nil {
+	goalClaims, err := s.store.LoadClaimsForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("reconciler: load claims for goal %s: %w", goal.GoalID, err)
+	}
+	if err := s.detectClaimDisputes(ctx, goal.GoalID, goalClaims, vr); err != nil {
 		return ReconcileResult{}, err
 	}
 	if result.PatchAccepted {
-		if err := s.invalidateStaleClaims(ctx, goal.GoalID, patch); err != nil {
+		if err := s.invalidateStaleClaims(ctx, patch, goalClaims, capsuleClaims); err != nil {
 			return ReconcileResult{}, err
 		}
 	}
-	if err := s.createAdvancedTestGapClaims(ctx, patch, vr); err != nil {
+	if err := s.createAdvancedTestGapClaims(ctx, patch, vr, capsuleClaims); err != nil {
 		return ReconcileResult{}, err
 	}
 
+	var failures []*schema.FailureFingerprint
 	if !result.PatchAccepted {
-		followUps, err := s.createFollowUpObligations(ctx, patch.CapsuleID, loadedObligations)
+		failures, err = s.store.LoadFailuresForCapsule(ctx, patch.CapsuleID)
+		if err != nil {
+			return ReconcileResult{}, fmt.Errorf("reconciler: load failures for capsule %s: %w", patch.CapsuleID, err)
+		}
+	}
+
+	if !result.PatchAccepted {
+		followUps, err := s.createFollowUpObligations(ctx, failures, loadedObligations)
 		if err != nil {
 			return ReconcileResult{}, err
 		}
 		result.FollowUpObligationIDs = followUps
-		if actions, err := s.recommendedFailureActions(ctx, patch.CapsuleID); err != nil {
-			return ReconcileResult{}, err
-		} else if len(actions) > 0 {
+		if actions := recommendedFailureActions(failures); len(actions) > 0 {
 			result.BlockingReason = strings.TrimSpace(result.BlockingReason + "; recommended next action: " + strings.Join(actions, "; "))
 		}
 	}
@@ -347,7 +365,7 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		return ReconcileResult{}, fmt.Errorf("reconciler: save snapshot: %w", err)
 	}
 
-	if err := s.saveTopologyOutcome(ctx, goal.GoalID, patch, loadedObligations, updatedStatuses, result.PatchAccepted, now); err != nil {
+	if err := s.saveTopologyOutcome(ctx, failures, goal.GoalID, patch, loadedObligations, updatedStatuses, result.PatchAccepted, now); err != nil {
 		return ReconcileResult{}, err
 	}
 
@@ -629,11 +647,7 @@ func (s *Reconciler) appendEvent(ctx context.Context, eventType schema.EventType
 	return ev, nil
 }
 
-func (s *Reconciler) createFollowUpObligations(ctx context.Context, capsuleID string, source []*schema.Obligation) ([]string, error) {
-	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
-	if err != nil {
-		return nil, fmt.Errorf("reconciler: load failures for capsule %s: %w", capsuleID, err)
-	}
+func (s *Reconciler) createFollowUpObligations(ctx context.Context, failures []*schema.FailureFingerprint, source []*schema.Obligation) ([]string, error) {
 	if len(failures) == 0 || len(source) == 0 {
 		return nil, nil
 	}
@@ -709,11 +723,7 @@ func evidenceRequiredForFailure(ft schema.FailureType) []string {
 	}
 }
 
-func (s *Reconciler) recommendedFailureActions(ctx context.Context, capsuleID string) ([]string, error) {
-	failures, err := s.store.LoadFailuresForCapsule(ctx, capsuleID)
-	if err != nil {
-		return nil, fmt.Errorf("reconciler: load failure recommendations for capsule %s: %w", capsuleID, err)
-	}
+func recommendedFailureActions(failures []*schema.FailureFingerprint) []string {
 	actions := make([]string, 0, len(failures))
 	seen := make(map[string]bool, len(failures))
 	for _, failure := range failures {
@@ -725,7 +735,7 @@ func (s *Reconciler) recommendedFailureActions(ctx context.Context, capsuleID st
 		actions = append(actions, action)
 	}
 	sort.Strings(actions)
-	return actions, nil
+	return actions
 }
 
 func (s *Reconciler) saveBudgetRecords(
@@ -875,17 +885,13 @@ func (s *Reconciler) saveBudgetRecords(
 	return nil
 }
 
-func (s *Reconciler) createAdvancedTestGapClaims(ctx context.Context, patch *schema.PatchArtifact, vr *schema.VerifierResult) error {
+func (s *Reconciler) createAdvancedTestGapClaims(ctx context.Context, patch *schema.PatchArtifact, vr *schema.VerifierResult, existing []*schema.ClaimArtifact) error {
 	if patch == nil || vr == nil {
 		return fmt.Errorf("reconciler: patch and verifier result are required for advanced test-gap claims")
 	}
 	warnings := advancedTestGapWarnings(vr.Warnings)
 	if len(warnings) == 0 {
 		return nil
-	}
-	existing, err := s.store.LoadClaimsForCapsule(ctx, patch.CapsuleID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load claims for capsule %s: %w", patch.CapsuleID, err)
 	}
 	seen := make(map[string]bool, len(existing))
 	for _, claim := range existing {
@@ -1091,6 +1097,7 @@ func newArtifactID(prefix, patchID string, now time.Time) string {
 
 func (s *Reconciler) saveTopologyOutcome(
 	ctx context.Context,
+	failures []*schema.FailureFingerprint,
 	goalID string,
 	patch *schema.PatchArtifact,
 	loadedObligations []*schema.Obligation,
@@ -1119,6 +1126,12 @@ func (s *Reconciler) saveTopologyOutcome(
 		return fmt.Errorf("reconciler: load decision %s for topology outcome: %w", capsule.TopologyDecisionID, err)
 	}
 	topology := schema.Topology(decision.Decision)
+	if failures == nil {
+		failures, err = s.store.LoadFailuresForCapsule(ctx, patch.CapsuleID)
+		if err != nil {
+			return fmt.Errorf("reconciler: load failures for topology outcome %s: %w", patch.CapsuleID, err)
+		}
+	}
 
 	obligationsMet := 0
 	for _, status := range updatedStatuses {
@@ -1137,11 +1150,6 @@ func (s *Reconciler) saveTopologyOutcome(
 				maxRisk = schema.RiskMedium
 			}
 		}
-	}
-
-	failures, err := s.store.LoadFailuresForCapsule(ctx, patch.CapsuleID)
-	if err != nil {
-		return fmt.Errorf("reconciler: load failures for topology outcome %s: %w", patch.CapsuleID, err)
 	}
 
 	outcomeID := newArtifactID("TOP-OUT", patch.PatchID, now)
