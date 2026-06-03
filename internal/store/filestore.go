@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,15 +63,15 @@ const (
 	dirDecisions        = "artifacts/decisions"
 	dirBudgets          = "artifacts/budgets"
 	dirVerifierResults  = "artifacts/verifier_results"
-	dirTopologyOutcomes  = "artifacts/topology_outcomes"
-	dirProjReuse         = "artifacts/projections/reuse"
-	dirPRs               = "artifacts/prs"
-	dirCIStatus          = "artifacts/ci_status"
-	dirIntake            = "artifacts/intake"
-	dirCapsuleRuntime    = "state/capsule_runtime"
-	dirStartupBundles    = "artifacts/startup_bundles"
-	dirRecoveryLedger    = "artifacts/recovery"
-	dirRepoStatus        = "artifacts/repo_status"
+	dirTopologyOutcomes = "artifacts/topology_outcomes"
+	dirProjReuse        = "artifacts/projections/reuse"
+	dirPRs              = "artifacts/prs"
+	dirCIStatus         = "artifacts/ci_status"
+	dirIntake           = "artifacts/intake"
+	dirCapsuleRuntime   = "state/capsule_runtime"
+	dirStartupBundles   = "artifacts/startup_bundles"
+	dirRecoveryLedger   = "artifacts/recovery"
+	dirRepoStatus       = "artifacts/repo_status"
 )
 
 // FileStore is the file-backed JSON implementation of ArtifactStore.
@@ -139,15 +140,35 @@ func validateArtifactID(kind, id string) error {
 }
 
 // writeFile marshals v to JSON and atomically writes it to path via a
-// temp-file rename.
+// temp-file rename. The temp file is synced before the rename so that a
+// power loss between write and rename cannot leave a corrupt artifact.
 func (s *FileStore) writeFile(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: marshal: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("store: write tmp: %w", err)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("store: create tmp: %w", err)
+	}
+	n, werr := f.Write(data)
+	if werr == nil && n != len(data) {
+		werr = io.ErrShortWrite
+	}
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("store: write tmp: %w", werr)
+	}
+	if serr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("store: sync tmp: %w", serr)
+	}
+	if cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("store: close tmp: %w", cerr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return errors.Join(fmt.Errorf("store: rename to %s: %w", path, err), os.Remove(tmp))
