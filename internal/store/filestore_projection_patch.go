@@ -36,7 +36,7 @@ func (s *FileStore) SaveProjection(ctx context.Context, p *schema.ContextProject
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dir, saved.ContextProjectionID), &saved))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dir, saved.ContextProjectionID), &saved))
 }
 
 func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.HumanSummaryProjection) error {
@@ -61,7 +61,7 @@ func (s *FileStore) SaveHumanSummaryProjection(ctx context.Context, p *schema.Hu
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirProjHuman, saved.ContextProjectionID), &saved))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirProjHuman, saved.ContextProjectionID), &saved))
 }
 
 func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*schema.ContextProjection, error) {
@@ -71,7 +71,7 @@ func (s *FileStore) LoadProjection(ctx context.Context, projectionID string) (*s
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, dir := range []string{dirProjExecutor, dirProjReviewer, dirProjTester} {
-		projection, err := readFile[schema.ContextProjection](s.artifactPath(dir, projectionID))
+		projection, err := readFile[schema.ContextProjection](ctx, s.artifactPath(dir, projectionID))
 		if err == nil {
 			return projection, nil
 		}
@@ -88,7 +88,7 @@ func (s *FileStore) LoadHumanSummaryProjection(ctx context.Context, projectionID
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.HumanSummaryProjection](s.artifactPath(dirProjHuman, projectionID))
+	return readFile[schema.HumanSummaryProjection](ctx, s.artifactPath(dirProjHuman, projectionID))
 }
 
 func (s *FileStore) LoadHumanSummaryProjectionForCapsule(ctx context.Context, capsuleID string) (*schema.HumanSummaryProjection, error) {
@@ -133,7 +133,7 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirPatches, p.PatchID), p))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirPatches, p.PatchID), p))
 }
 
 func (s *FileStore) LoadPatch(ctx context.Context, patchID string) (*schema.PatchArtifact, error) {
@@ -142,7 +142,7 @@ func (s *FileStore) LoadPatch(ctx context.Context, patchID string) (*schema.Patc
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.PatchArtifact](s.artifactPath(dirPatches, patchID))
+	return readFile[schema.PatchArtifact](ctx, s.artifactPath(dirPatches, patchID))
 }
 
 func (s *FileStore) UpdatePatchStatus(ctx context.Context, patchID string, status schema.PatchStatus) error {
@@ -151,12 +151,12 @@ func (s *FileStore) UpdatePatchStatus(ctx context.Context, patchID string, statu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, err := readFile[schema.PatchArtifact](s.artifactPath(dirPatches, patchID))
+	p, err := readFile[schema.PatchArtifact](ctx, s.artifactPath(dirPatches, patchID))
 	if err != nil {
 		return err
 	}
 	p.Status = status
-	return s.writeFile(s.artifactPath(dirPatches, patchID), p)
+	return s.writeFile(ctx, s.artifactPath(dirPatches, patchID), p)
 }
 
 func (s *FileStore) LoadPatchesForCapsule(ctx context.Context, capsuleID string) ([]*schema.PatchArtifact, error) {
@@ -216,7 +216,7 @@ func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirEvidence, e.EvidenceID), e))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirEvidence, e.EvidenceID), e))
 }
 
 func (s *FileStore) LoadEvidence(ctx context.Context, evidenceID string) (*schema.EvidenceArtifact, error) {
@@ -225,7 +225,7 @@ func (s *FileStore) LoadEvidence(ctx context.Context, evidenceID string) (*schem
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.EvidenceArtifact](s.artifactPath(dirEvidence, evidenceID))
+	return readFile[schema.EvidenceArtifact](ctx, s.artifactPath(dirEvidence, evidenceID))
 }
 
 func (s *FileStore) LoadEvidenceForObligation(ctx context.Context, obligationID string) ([]*schema.EvidenceArtifact, error) {

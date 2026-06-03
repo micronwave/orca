@@ -142,60 +142,110 @@ func validateArtifactID(kind, id string) error {
 // writeFile marshals v to JSON and atomically writes it to path via a
 // temp-file rename. The temp file is synced before the rename so that a
 // power loss between write and rename cannot leave a corrupt artifact.
-func (s *FileStore) writeFile(path string, v any) error {
+// The operation runs in a goroutine; if ctx is canceled before it completes,
+// writeFile returns immediately with a context error. The goroutine may still
+// finish in the background — this is acceptable since Go cannot cancel OS calls.
+func (s *FileStore) writeFile(ctx context.Context, path string, v any) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("store: write %s: %w", path, err)
+	}
+
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: marshal: %w", err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("store: create tmp: %w", err)
+
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	go func() {
+		tmp := path + ".tmp"
+		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			ch <- result{fmt.Errorf("store: create tmp: %w", err)}
+			return
+		}
+		n, werr := f.Write(data)
+		if werr == nil && n != len(data) {
+			werr = io.ErrShortWrite
+		}
+		serr := f.Sync()
+		cerr := f.Close()
+		if werr != nil {
+			_ = os.Remove(tmp)
+			ch <- result{fmt.Errorf("store: write tmp: %w", werr)}
+			return
+		}
+		if serr != nil {
+			_ = os.Remove(tmp)
+			ch <- result{fmt.Errorf("store: sync tmp: %w", serr)}
+			return
+		}
+		if cerr != nil {
+			_ = os.Remove(tmp)
+			ch <- result{fmt.Errorf("store: close tmp: %w", cerr)}
+			return
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			ch <- result{errors.Join(fmt.Errorf("store: rename to %s: %w", path, err), os.Remove(tmp))}
+			return
+		}
+		ch <- result{}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("store: write %s: %w", path, ctx.Err())
+	case r := <-ch:
+		return r.err
 	}
-	n, werr := f.Write(data)
-	if werr == nil && n != len(data) {
-		werr = io.ErrShortWrite
-	}
-	serr := f.Sync()
-	cerr := f.Close()
-	if werr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: write tmp: %w", werr)
-	}
-	if serr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: sync tmp: %w", serr)
-	}
-	if cerr != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: close tmp: %w", cerr)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return errors.Join(fmt.Errorf("store: rename to %s: %w", path, err), os.Remove(tmp))
-	}
-	return nil
 }
 
 // readFile reads and JSON-unmarshals the file at path into a new T.
 // Returns ErrNotFound if the file does not exist.
-func readFile[T any](path string) (*T, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
+// The operation runs in a goroutine; if ctx is canceled before it completes,
+// readFile returns immediately with a context error.
+func readFile[T any](ctx context.Context, path string) (*T, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("store: read %s: %w", path, err)
 	}
-	var v T
-	if err := json.Unmarshal(data, &v); err != nil {
-		return nil, fmt.Errorf("store: unmarshal %s: %w", path, err)
+
+	type result struct {
+		v   *T
+		err error
 	}
-	return &v, nil
+	ch := make(chan result, 1)
+	go func() {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			ch <- result{nil, ErrNotFound}
+			return
+		}
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("store: read %s: %w", path, err)}
+			return
+		}
+		var v T
+		if err := json.Unmarshal(data, &v); err != nil {
+			ch <- result{nil, fmt.Errorf("store: unmarshal %s: %w", path, err)}
+			return
+		}
+		ch <- result{&v, nil}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("store: read %s: %w", path, ctx.Err())
+	case r := <-ch:
+		return r.v, r.err
+	}
 }
 
 // scanDir reads every .json file in the absolute directory dir and returns
 // the unmarshaled values. Returns nil slice (not error) if dir is missing.
 func scanDir[T any](ctx context.Context, dir string) ([]*T, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -211,7 +261,7 @@ func scanDir[T any](ctx context.Context, dir string) ([]*T, error) {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		v, err := readFile[T](filepath.Join(dir, e.Name()))
+		v, err := readFile[T](ctx, filepath.Join(dir, e.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -284,8 +334,8 @@ func (s *FileStore) findGoalIDForCondition(ctx context.Context, conditionID stri
 	return "", fmt.Errorf("store: no goal contains condition %s: %w", conditionID, ErrNotFound)
 }
 
-func (s *FileStore) goalExists(goalID string) (bool, error) {
-	_, err := readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
+func (s *FileStore) goalExists(ctx context.Context, goalID string) (bool, error) {
+	_, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
 	if err == nil {
 		return true, nil
 	}
@@ -295,11 +345,11 @@ func (s *FileStore) goalExists(goalID string) (bool, error) {
 	return false, err
 }
 
-func (s *FileStore) requireExistingGoal(goalID string) error {
+func (s *FileStore) requireExistingGoal(ctx context.Context, goalID string) error {
 	if err := validateArtifactID("goal", goalID); err != nil {
 		return err
 	}
-	exists, err := s.goalExists(goalID)
+	exists, err := s.goalExists(ctx, goalID)
 	if err != nil {
 		return err
 	}
@@ -313,7 +363,7 @@ func (s *FileStore) goalIDForObligation(ctx context.Context, obligationID string
 	if err := validateArtifactID("obligation", obligationID); err != nil {
 		return "", err
 	}
-	obl, err := readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
+	obl, err := readFile[schema.Obligation](ctx, s.artifactPath(dirObligations, obligationID))
 	if err != nil {
 		return "", fmt.Errorf("store: load obligation %s: %w", obligationID, err)
 	}
@@ -325,7 +375,7 @@ func (s *FileStore) goalIDForCapsule(ctx context.Context, capsuleID string) (str
 	if err := validateArtifactID("capsule", capsuleID); err != nil {
 		return "", err
 	}
-	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
+	c, err := readFile[schema.ExecutionCapsule](ctx, s.artifactPath(dirCapsules, capsuleID))
 	if err != nil {
 		return "", fmt.Errorf("store: load capsule %s: %w", capsuleID, err)
 	}
@@ -379,7 +429,7 @@ func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []
 		}
 	}
 	for _, id := range sourceIDs {
-		exists, err := s.goalExists(id)
+		exists, err := s.goalExists(ctx, id)
 		if err != nil {
 			return "", err
 		}
@@ -401,7 +451,7 @@ func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string
 	}
 	resolvers := []func(string) (string, error){
 		func(id string) (string, error) {
-			exists, err := s.goalExists(id)
+			exists, err := s.goalExists(ctx, id)
 			if err != nil {
 				return "", err
 			}
@@ -413,35 +463,35 @@ func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string
 		func(id string) (string, error) { return s.goalIDForObligation(ctx, id) },
 		func(id string) (string, error) { return s.goalIDForCapsule(ctx, id) },
 		func(id string) (string, error) {
-			p, err := readFile[schema.PatchArtifact](s.artifactPath(dirPatches, id))
+			p, err := readFile[schema.PatchArtifact](ctx, s.artifactPath(dirPatches, id))
 			if err != nil {
 				return "", err
 			}
 			return s.goalIDForCapsule(ctx, p.CapsuleID)
 		},
 		func(id string) (string, error) {
-			c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, id))
+			c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, id))
 			if err != nil {
 				return "", err
 			}
 			return s.goalIDForCapsule(ctx, c.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
-			f, err := readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, id))
+			f, err := readFile[schema.FailureFingerprint](ctx, s.artifactPath(dirFailures, id))
 			if err != nil {
 				return "", err
 			}
 			return s.goalIDForCapsule(ctx, f.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
-			r, err := readFile[schema.VerifierResult](s.artifactPath(dirVerifierResults, id))
+			r, err := readFile[schema.VerifierResult](ctx, s.artifactPath(dirVerifierResults, id))
 			if err != nil {
 				return "", err
 			}
 			return s.goalIDForCapsule(ctx, r.CapsuleID)
 		},
 		func(id string) (string, error) {
-			ev, err := readFile[schema.EvidenceArtifact](s.artifactPath(dirEvidence, id))
+			ev, err := readFile[schema.EvidenceArtifact](ctx, s.artifactPath(dirEvidence, id))
 			if err != nil {
 				return "", err
 			}

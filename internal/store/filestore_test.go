@@ -3312,6 +3312,53 @@ func TestExternalRecords_ReplayReconstructsArtifacts(t *testing.T) {
 	}
 }
 
+// ── Context cancellation ──────────────────────────────────────────────────────
+
+func TestStore_CanceledContext_ReadReturnsContextError(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled
+
+	_, err := e.st.LoadGoal(ctx, "G-1")
+	if err == nil {
+		t.Fatal("LoadGoal with canceled context returned nil error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("LoadGoal canceled context error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+}
+
+func TestStore_CanceledContext_WriteReturnsContextError(t *testing.T) {
+	e := newEnv(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled
+
+	err := e.st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         "G-canceled",
+		OriginalIntent: "test",
+		GoalConditions: []schema.GoalCondition{{
+			ID: "GC-canceled", Description: "c", EffectiveDescription: "c",
+			Status: schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	})
+	if err == nil {
+		t.Fatal("SaveGoal with canceled context returned nil error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("SaveGoal canceled context error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+
+	if _, err := e.st.LoadGoal(context.Background(), "G-canceled"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("LoadGoal after canceled SaveGoal error = %v, want ErrNotFound", err)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func wipeArtifacts(t *testing.T, e *testEnv) {

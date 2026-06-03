@@ -23,7 +23,7 @@ func (s *FileStore) SaveProjectionReuseRecord(ctx context.Context, r *schema.Pro
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirProjReuse, r.ReuseID), r))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirProjReuse, r.ReuseID), r))
 }
 
 // LoadProjectionReuseRecordsForGoal returns all reuse records whose GoalID

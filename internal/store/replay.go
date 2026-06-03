@@ -76,7 +76,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("goal", v.GoalID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirGoals, v.GoalID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirGoals, v.GoalID), &v)
 
 	case schema.EventObligationCreated:
 		var v schema.Obligation
@@ -86,7 +86,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("obligation", v.ObligationID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirObligations, v.ObligationID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirObligations, v.ObligationID), &v)
 
 	case schema.EventCapsuleCreated:
 		var v schema.ExecutionCapsule
@@ -96,7 +96,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("capsule", v.CapsuleID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirCapsules, v.CapsuleID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirCapsules, v.CapsuleID), &v)
 
 	case schema.EventContextProjectionCreated:
 		// Distinguish projection storage by the Role field.
@@ -112,13 +112,13 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 			if err := json.Unmarshal(e.Payload, &v); err != nil {
 				return fmt.Errorf("unmarshal HumanSummaryProjection: %w", err)
 			}
-			return s.writeFile(s.artifactPath(dirProjHuman, v.ContextProjectionID), &v)
+			return s.writeFile(ctx, s.artifactPath(dirProjHuman, v.ContextProjectionID), &v)
 		}
 		dir, err := projectionDir(base.Role)
 		if err != nil {
 			return fmt.Errorf("invalid context_projection_created payload: %w", err)
 		}
-		return s.writeFile(s.artifactPath(dir, base.ContextProjectionID), &base)
+		return s.writeFile(ctx, s.artifactPath(dir, base.ContextProjectionID), &base)
 
 	case schema.EventPatchArtifactCreated:
 		var v schema.PatchArtifact
@@ -128,7 +128,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("patch", v.PatchID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirPatches, v.PatchID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirPatches, v.PatchID), &v)
 
 	case schema.EventEvidenceArtifactCreated:
 		var v schema.EvidenceArtifact
@@ -138,7 +138,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("evidence", v.EvidenceID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirEvidence, v.EvidenceID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirEvidence, v.EvidenceID), &v)
 
 	case schema.EventClaimCreated:
 		var v schema.ClaimArtifact
@@ -148,7 +148,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("claim", v.ClaimID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirClaims, v.ClaimID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirClaims, v.ClaimID), &v)
 
 	case schema.EventFailureFingerprintCreated:
 		var v schema.FailureFingerprint
@@ -158,7 +158,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("failure", v.FailureID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirFailures, v.FailureID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirFailures, v.FailureID), &v)
 
 	case schema.EventVerifierResultCreated, schema.EventVerifierResultUpdated:
 		var v schema.VerifierResult
@@ -168,7 +168,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("verifier result", v.VerifierResultID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirVerifierResults, v.VerifierResultID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirVerifierResults, v.VerifierResultID), &v)
 
 	case schema.EventDecisionRecordCreated:
 		var v schema.DecisionRecord
@@ -178,7 +178,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("decision", v.DecisionID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirDecisions, v.DecisionID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirDecisions, v.DecisionID), &v)
 
 	case schema.EventBudgetRecordSaved, schema.EventBudgetRecordUpdated:
 		var v schema.BudgetRecord
@@ -188,7 +188,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("budget", v.BudgetID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirBudgets, v.BudgetID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirBudgets, v.BudgetID), &v)
 
 	case schema.EventStateSnapshotSaved:
 		var v schema.StateSnapshot
@@ -198,7 +198,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("snapshot", v.SnapshotID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirSnapshots, v.SnapshotID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirSnapshots, v.SnapshotID), &v)
 
 	case schema.EventTopologyOutcomeRecorded:
 		var v schema.TopologyOutcomeRecord
@@ -208,7 +208,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("topology outcome", v.OutcomeID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirTopologyOutcomes, v.OutcomeID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirTopologyOutcomes, v.OutcomeID), &v)
 
 	case schema.EventProjectionReuseRecorded:
 		var v schema.ProjectionReuseRecord
@@ -218,7 +218,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("projection reuse record", v.ReuseID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirProjReuse, v.ReuseID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirProjReuse, v.ReuseID), &v)
 
 	case schema.EventPRCreated:
 		var v schema.PRRecord
@@ -228,7 +228,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("pr", v.PRID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirPRs, v.PRID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirPRs, v.PRID), &v)
 
 	case schema.EventCIStatusReceived:
 		var v schema.CIStatusRecord
@@ -238,7 +238,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("ci status", v.RecordID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirCIStatus, v.RecordID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirCIStatus, v.RecordID), &v)
 
 	case schema.EventIntakeIssueIngested:
 		var v schema.IntakeRecord
@@ -248,7 +248,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("intake", v.RecordID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirIntake, v.RecordID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirIntake, v.RecordID), &v)
 
 	// ── state transitions: update existing files ─────────────────────────────
 
@@ -263,7 +263,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("goal", p.GoalID); err != nil {
 			return err
 		}
-		return s.updateGoalStatusNoLock(p.GoalID, p.Status)
+		return s.updateGoalStatusNoLock(ctx, p.GoalID, p.Status)
 
 	case schema.EventObligationStatusUpdated:
 		var p schema.ObligationStatusPayload
@@ -276,7 +276,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("obligation", p.ObligationID); err != nil {
 			return err
 		}
-		return s.updateObligationStatusNoLock(p.ObligationID, p.Status, p.SatisfiedBy)
+		return s.updateObligationStatusNoLock(ctx, p.ObligationID, p.Status, p.SatisfiedBy)
 
 	case schema.EventClaimStatusUpdated:
 		var p schema.ClaimStatusPayload
@@ -289,7 +289,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("claim", p.ClaimID); err != nil {
 			return err
 		}
-		return s.updateClaimStatusNoLock(p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
+		return s.updateClaimStatusNoLock(ctx, p.ClaimID, p.Status, p.LastValidatedAgainst, p.ContradictedBy, p.InvalidatedBy)
 
 	case schema.EventClaimSuperseded:
 		var p schema.ClaimSupersededPayload
@@ -302,7 +302,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("claim", p.ClaimID); err != nil {
 			return err
 		}
-		return s.updateClaimSupersessionNoLock(p.ClaimID, p.SupersededBy)
+		return s.updateClaimSupersessionNoLock(ctx, p.ClaimID, p.SupersededBy)
 
 	case schema.EventCapsuleStarted, schema.EventCapsuleStateUpdated, schema.EventCapsuleCompleted:
 		var p schema.CapsuleTransitionPayload
@@ -315,7 +315,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("capsule", p.CapsuleID); err != nil {
 			return err
 		}
-		return s.updateCapsuleStateNoLock(p.CapsuleID, p.State)
+		return s.updateCapsuleStateNoLock(ctx, p.CapsuleID, p.State)
 
 	case schema.EventCapsuleProjectionLinked:
 		var p schema.CapsuleProjectionPayload
@@ -331,7 +331,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("projection", p.ProjectionID); err != nil {
 			return err
 		}
-		return s.updateCapsuleProjectionIDNoLock(p.CapsuleID, p.ProjectionID)
+		return s.updateCapsuleProjectionIDNoLock(ctx, p.CapsuleID, p.ProjectionID)
 
 	case schema.EventPatchAccepted:
 		var p schema.PatchStatusPayload
@@ -344,7 +344,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("patch", p.PatchID); err != nil {
 			return err
 		}
-		return s.updatePatchStatusNoLock(p.PatchID, schema.PatchAccepted)
+		return s.updatePatchStatusNoLock(ctx, p.PatchID, schema.PatchAccepted)
 
 	case schema.EventPatchRejected:
 		var p schema.PatchStatusPayload
@@ -357,7 +357,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("patch", p.PatchID); err != nil {
 			return err
 		}
-		return s.updatePatchStatusNoLock(p.PatchID, schema.PatchRejected)
+		return s.updatePatchStatusNoLock(ctx, p.PatchID, schema.PatchRejected)
 
 	case schema.EventCapsuleRuntimeStatus:
 		var v schema.CapsuleRuntimeEvent
@@ -371,7 +371,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 			return err
 		}
 		v.Seq = e.SequenceNum
-		return s.writeFile(s.artifactPath(dirCapsuleRuntime, v.CapsuleID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirCapsuleRuntime, v.CapsuleID), &v)
 
 	case schema.EventStartupBundleCreated:
 		var v schema.StartupEvidenceBundle
@@ -384,7 +384,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("startup bundle", v.CapsuleID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirStartupBundles, v.CapsuleID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirStartupBundles, v.CapsuleID), &v)
 
 	// ── events that require no artifact file change ──────────────────────────
 
@@ -396,7 +396,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("recovery entry", v.EntryID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirRecoveryLedger, v.EntryID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirRecoveryLedger, v.EntryID), &v)
 
 	case schema.EventRepoStatusSnapshotSaved:
 		var v schema.RepoStatusSnapshot
@@ -406,7 +406,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("repo status snapshot", v.SnapshotID); err != nil {
 			return err
 		}
-		return s.writeFile(s.artifactPath(dirRepoStatus, v.SnapshotID), &v)
+		return s.writeFile(ctx, s.artifactPath(dirRepoStatus, v.SnapshotID), &v)
 
 	case schema.EventTopologySelected,
 		schema.EventMergeApplied,
@@ -422,21 +422,21 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 
 // updateGoalStatusNoLock reads the goal file, updates Status, writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateGoalStatusNoLock(goalID string, status schema.GoalStatus) error {
+func (s *FileStore) updateGoalStatusNoLock(ctx context.Context, goalID string, status schema.GoalStatus) error {
 	path := s.artifactPath(dirGoals, goalID)
-	g, err := readFile[schema.GoalIR](path)
+	g, err := readFile[schema.GoalIR](ctx, path)
 	if err != nil {
 		return err
 	}
 	g.Status = status
-	return s.writeFile(path, g)
+	return s.writeFile(ctx, path, g)
 }
 
 // updateObligationStatusNoLock reads the obligation file, updates Status and
 // SatisfiedBy, then writes back. Caller must hold s.mu.Lock().
-func (s *FileStore) updateObligationStatusNoLock(obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
+func (s *FileStore) updateObligationStatusNoLock(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
 	path := s.artifactPath(dirObligations, obligationID)
-	o, err := readFile[schema.Obligation](path)
+	o, err := readFile[schema.Obligation](ctx, path)
 	if err != nil {
 		return err
 	}
@@ -444,26 +444,26 @@ func (s *FileStore) updateObligationStatusNoLock(obligationID string, status sch
 	if satisfiedBy != nil {
 		o.SatisfiedBy = *satisfiedBy
 	}
-	return s.writeFile(path, o)
+	return s.writeFile(ctx, path, o)
 }
 
 // updateClaimSupersessionNoLock sets SupersededBy on a claim artifact file.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateClaimSupersessionNoLock(claimID, supersededBy string) error {
+func (s *FileStore) updateClaimSupersessionNoLock(ctx context.Context, claimID, supersededBy string) error {
 	path := s.artifactPath(dirClaims, claimID)
-	c, err := readFile[schema.ClaimArtifact](path)
+	c, err := readFile[schema.ClaimArtifact](ctx, path)
 	if err != nil {
 		return err
 	}
 	c.SupersededBy = supersededBy
-	return s.writeFile(path, c)
+	return s.writeFile(ctx, path, c)
 }
 
 // updateClaimStatusNoLock reads the claim file, applies status metadata, writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateClaimStatusNoLock(claimID string, status schema.ClaimStatus, lastValidatedAgainst string, contradictedBy, invalidatedBy []string) error {
+func (s *FileStore) updateClaimStatusNoLock(ctx context.Context, claimID string, status schema.ClaimStatus, lastValidatedAgainst string, contradictedBy, invalidatedBy []string) error {
 	path := s.artifactPath(dirClaims, claimID)
-	c, err := readFile[schema.ClaimArtifact](path)
+	c, err := readFile[schema.ClaimArtifact](ctx, path)
 	if err != nil {
 		return err
 	}
@@ -477,19 +477,19 @@ func (s *FileStore) updateClaimStatusNoLock(claimID string, status schema.ClaimS
 	if invalidatedBy != nil {
 		c.InvalidatedBy = cloneStrings(invalidatedBy)
 	}
-	return s.writeFile(path, c)
+	return s.writeFile(ctx, path, c)
 }
 
 // updateCapsuleProjectionIDNoLock reads the capsule file, updates ContextProjectionID, writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateCapsuleProjectionIDNoLock(capsuleID, projectionID string) error {
+func (s *FileStore) updateCapsuleProjectionIDNoLock(ctx context.Context, capsuleID, projectionID string) error {
 	path := s.artifactPath(dirCapsules, capsuleID)
-	c, err := readFile[schema.ExecutionCapsule](path)
+	c, err := readFile[schema.ExecutionCapsule](ctx, path)
 	if err != nil {
 		return err
 	}
 	c.ContextProjectionID = projectionID
-	return s.writeFile(path, c)
+	return s.writeFile(ctx, path, c)
 }
 
 // validCapsuleTransitions is the strict runtime transition table. It enforces
@@ -573,9 +573,9 @@ var validReplayCapsuleTransitions = map[schema.CapsuleState]map[schema.CapsuleSt
 // transition using the replay-aware table (which allows forward skips for
 // non-logged intermediate states), updates State, and writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updateCapsuleStateNoLock(capsuleID string, state schema.CapsuleState) error {
+func (s *FileStore) updateCapsuleStateNoLock(ctx context.Context, capsuleID string, state schema.CapsuleState) error {
 	path := s.artifactPath(dirCapsules, capsuleID)
-	c, err := readFile[schema.ExecutionCapsule](path)
+	c, err := readFile[schema.ExecutionCapsule](ctx, path)
 	if err != nil {
 		return err
 	}
@@ -587,19 +587,19 @@ func (s *FileStore) updateCapsuleStateNoLock(capsuleID string, state schema.Caps
 		return fmt.Errorf("%w: capsule %s: %q → %q", ErrInvalidCapsuleTransition, capsuleID, c.State, state)
 	}
 	c.State = state
-	return s.writeFile(path, c)
+	return s.writeFile(ctx, path, c)
 }
 
 // updatePatchStatusNoLock reads the patch file, updates Status, writes back.
 // Caller must hold s.mu.Lock().
-func (s *FileStore) updatePatchStatusNoLock(patchID string, status schema.PatchStatus) error {
+func (s *FileStore) updatePatchStatusNoLock(ctx context.Context, patchID string, status schema.PatchStatus) error {
 	path := s.artifactPath(dirPatches, patchID)
-	p, err := readFile[schema.PatchArtifact](path)
+	p, err := readFile[schema.PatchArtifact](ctx, path)
 	if err != nil {
 		return err
 	}
 	p.Status = status
-	return s.writeFile(path, p)
+	return s.writeFile(ctx, path, p)
 }
 
 // ReplayDir returns the subdirectory paths that Replay populates, useful for

@@ -29,7 +29,7 @@ func (s *FileStore) SaveRecoveryEntry(ctx context.Context, entry *schema.Recover
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirRecoveryLedger, entry.EntryID), entry))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirRecoveryLedger, entry.EntryID), entry))
 }
 
 // LoadRecoveryEntry loads a single RecoveryLedgerEntry by ID.
@@ -39,7 +39,7 @@ func (s *FileStore) LoadRecoveryEntry(ctx context.Context, entryID string) (*sch
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.RecoveryLedgerEntry](s.artifactPath(dirRecoveryLedger, entryID))
+	return readFile[schema.RecoveryLedgerEntry](ctx, s.artifactPath(dirRecoveryLedger, entryID))
 }
 
 // LoadRecoveryEntriesForGoal returns all RecoveryLedgerEntry records for goalID,

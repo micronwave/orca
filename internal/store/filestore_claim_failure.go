@@ -30,7 +30,7 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 	// SourceCapsuleID == "") are not bound to any goal; their event goalID is "".
 	var goalID string
 	if strings.TrimSpace(c.GoalID) != "" {
-		if err := s.requireExistingGoal(c.GoalID); err != nil {
+		if err := s.requireExistingGoal(ctx, c.GoalID); err != nil {
 			return fmt.Errorf("store: SaveClaim: %w", err)
 		}
 		goalID = c.GoalID
@@ -46,7 +46,7 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirClaims, c.ClaimID), c))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirClaims, c.ClaimID), c))
 }
 
 func (s *FileStore) LoadClaim(ctx context.Context, claimID string) (*schema.ClaimArtifact, error) {
@@ -55,7 +55,7 @@ func (s *FileStore) LoadClaim(ctx context.Context, claimID string) (*schema.Clai
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, claimID))
+	return readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, claimID))
 }
 
 func (s *FileStore) LoadVerifiedClaimsForFiles(ctx context.Context, files []string) ([]*schema.ClaimArtifact, error) {
@@ -111,7 +111,7 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(goalID)
+	exists, err := s.goalExists(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(goalID)
+	exists, err := s.goalExists(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -222,12 +222,12 @@ func (s *FileStore) UpdateClaimSupersession(ctx context.Context, claimID, supers
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, claimID))
+	c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, claimID))
 	if err != nil {
 		return err
 	}
 	c.SupersededBy = supersededBy
-	return s.writeFile(s.artifactPath(dirClaims, claimID), c)
+	return s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c)
 }
 
 func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error {
@@ -236,12 +236,12 @@ func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, statu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, err := readFile[schema.ClaimArtifact](s.artifactPath(dirClaims, claimID))
+	c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, claimID))
 	if err != nil {
 		return err
 	}
 	c.Status = status
-	return s.writeFile(s.artifactPath(dirClaims, claimID), c)
+	return s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c)
 }
 
 func (s *FileStore) UpdateClaimDispute(ctx context.Context, claimID string, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
@@ -250,7 +250,7 @@ func (s *FileStore) UpdateClaimDispute(ctx context.Context, claimID string, stat
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateClaimStatusNoLock(claimID, status, "", contradictedBy, invalidatedBy)
+	return s.updateClaimStatusNoLock(ctx, claimID, status, "", contradictedBy, invalidatedBy)
 }
 
 func (s *FileStore) UpdateClaimValidation(ctx context.Context, claimID string, status schema.ClaimStatus, snapshotID string) error {
@@ -259,7 +259,7 @@ func (s *FileStore) UpdateClaimValidation(ctx context.Context, claimID string, s
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateClaimStatusNoLock(claimID, status, snapshotID, nil, nil)
+	return s.updateClaimStatusNoLock(ctx, claimID, status, snapshotID, nil, nil)
 }
 
 // ── Failure Fingerprints ─────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprin
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirFailures, f.FailureID), f))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirFailures, f.FailureID), f))
 }
 
 func (s *FileStore) LoadFailure(ctx context.Context, failureID string) (*schema.FailureFingerprint, error) {
@@ -293,7 +293,7 @@ func (s *FileStore) LoadFailure(ctx context.Context, failureID string) (*schema.
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, failureID))
+	return readFile[schema.FailureFingerprint](ctx, s.artifactPath(dirFailures, failureID))
 }
 
 func (s *FileStore) LoadFailuresForFiles(ctx context.Context, files []string) ([]*schema.FailureFingerprint, error) {
@@ -349,7 +349,7 @@ func (s *FileStore) LoadAllFailures(ctx context.Context, goalID string) ([]*sche
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(goalID)
+	exists, err := s.goalExists(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(goalID)
+	exists, err := s.goalExists(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +410,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 		if failure.ErrorSignature != errorSignature {
 			continue
 		}
-		current, err := readFile[schema.FailureFingerprint](s.artifactPath(dirFailures, failure.FailureID))
+		current, err := readFile[schema.FailureFingerprint](ctx, s.artifactPath(dirFailures, failure.FailureID))
 		if err != nil {
 			return nil, err
 		}

@@ -42,7 +42,7 @@ func (s *FileStore) AppendRuntimeEvent(ctx context.Context, ev *schema.CapsuleRu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.artifactPath(dirCapsuleRuntime, ev.CapsuleID)
-	if err := s.writeFile(path, ev); err != nil {
+	if err := s.writeFile(ctx, path, ev); err != nil {
 		return &MaterializationError{Event: logEv, Err: fmt.Errorf("store: write runtime status for capsule %s: %w", ev.CapsuleID, err)}
 	}
 	return nil
@@ -59,7 +59,7 @@ func (s *FileStore) LoadLatestRuntimeStatus(ctx context.Context, capsuleID strin
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.CapsuleRuntimeEvent](s.artifactPath(dirCapsuleRuntime, capsuleID))
+	return readFile[schema.CapsuleRuntimeEvent](ctx, s.artifactPath(dirCapsuleRuntime, capsuleID))
 }
 
 // SaveStartupBundle persists a StartupEvidenceBundle for a timed-out capsule.
@@ -91,7 +91,7 @@ func (s *FileStore) SaveStartupBundle(ctx context.Context, bundle *schema.Startu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.artifactPath(dirStartupBundles, bundle.CapsuleID)
-	if err := s.writeFile(path, bundle); err != nil {
+	if err := s.writeFile(ctx, path, bundle); err != nil {
 		return &MaterializationError{Event: logEv, Err: fmt.Errorf("store: write startup bundle for capsule %s: %w", bundle.CapsuleID, err)}
 	}
 	return nil
@@ -108,5 +108,5 @@ func (s *FileStore) LoadStartupBundle(ctx context.Context, capsuleID string) (*s
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.StartupEvidenceBundle](s.artifactPath(dirStartupBundles, capsuleID))
+	return readFile[schema.StartupEvidenceBundle](ctx, s.artifactPath(dirStartupBundles, capsuleID))
 }

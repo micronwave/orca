@@ -26,14 +26,14 @@ func (s *FileStore) SavePRRecord(ctx context.Context, goalID string, pr *schema.
 	if err := ensureArtifactAbsent("pr", s.artifactPath(dirPRs, pr.PRID), pr.PRID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(goalID); err != nil {
+	if err := s.requireExistingGoal(ctx, goalID); err != nil {
 		return fmt.Errorf("store: SavePRRecord: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventPRCreated, goalID, pr.PRID, pr)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirPRs, pr.PRID), pr))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirPRs, pr.PRID), pr))
 }
 
 // LoadPRRecord loads a PRRecord by its ID.
@@ -46,7 +46,7 @@ func (s *FileStore) LoadPRRecord(ctx context.Context, goalID string, prID string
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	pr, err := readFile[schema.PRRecord](s.artifactPath(dirPRs, prID))
+	pr, err := readFile[schema.PRRecord](ctx, s.artifactPath(dirPRs, prID))
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (s *FileStore) LoadCIStatusRecord(ctx context.Context, goalID string, recor
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r, err := readFile[schema.CIStatusRecord](s.artifactPath(dirCIStatus, recordID))
+	r, err := readFile[schema.CIStatusRecord](ctx, s.artifactPath(dirCIStatus, recordID))
 	if err != nil {
 		return nil, err
 	}
@@ -95,14 +95,14 @@ func (s *FileStore) SaveCIStatusRecord(ctx context.Context, goalID string, r *sc
 	if err := ensureArtifactAbsent("ci status", s.artifactPath(dirCIStatus, r.RecordID), r.RecordID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(goalID); err != nil {
+	if err := s.requireExistingGoal(ctx, goalID); err != nil {
 		return fmt.Errorf("store: SaveCIStatusRecord: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventCIStatusReceived, goalID, r.RecordID, r)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirCIStatus, r.RecordID), r))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirCIStatus, r.RecordID), r))
 }
 
 // ── Intake Records ───────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ func (s *FileStore) LoadIntakeRecord(ctx context.Context, goalID string, recordI
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r, err := readFile[schema.IntakeRecord](s.artifactPath(dirIntake, recordID))
+	r, err := readFile[schema.IntakeRecord](ctx, s.artifactPath(dirIntake, recordID))
 	if err != nil {
 		return nil, err
 	}
@@ -144,12 +144,12 @@ func (s *FileStore) SaveIntakeRecord(ctx context.Context, goalID string, r *sche
 	if err := ensureArtifactAbsent("intake", s.artifactPath(dirIntake, r.RecordID), r.RecordID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(goalID); err != nil {
+	if err := s.requireExistingGoal(ctx, goalID); err != nil {
 		return fmt.Errorf("store: SaveIntakeRecord: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventIntakeIssueIngested, goalID, r.RecordID, r)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirIntake, r.RecordID), r))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirIntake, r.RecordID), r))
 }

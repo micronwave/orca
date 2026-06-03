@@ -27,14 +27,14 @@ func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord
 	if err := ensureArtifactAbsent("budget", s.artifactPath(dirBudgets, b.BudgetID), b.BudgetID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(b.GoalID); err != nil {
+	if err := s.requireExistingGoal(ctx, b.GoalID); err != nil {
 		return fmt.Errorf("store: SaveBudgetRecord: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventBudgetRecordSaved, b.GoalID, b.BudgetID, b)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirBudgets, b.BudgetID), b))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirBudgets, b.BudgetID), b))
 }
 
 func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*schema.BudgetRecord, error) {
@@ -43,7 +43,7 @@ func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*sch
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.BudgetRecord](s.artifactPath(dirBudgets, budgetID))
+	return readFile[schema.BudgetRecord](ctx, s.artifactPath(dirBudgets, budgetID))
 }
 
 func (s *FileStore) LoadBudgetForGoal(ctx context.Context, goalID string) ([]*schema.BudgetRecord, error) {
@@ -89,17 +89,17 @@ func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetReco
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.artifactPath(dirBudgets, b.BudgetID)
-	if _, err := readFile[schema.BudgetRecord](path); err != nil {
+	if _, err := readFile[schema.BudgetRecord](ctx, path); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(b.GoalID); err != nil {
+	if err := s.requireExistingGoal(ctx, b.GoalID); err != nil {
 		return fmt.Errorf("store: UpdateBudgetRecord: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventBudgetRecordUpdated, b.GoalID, b.BudgetID, b)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(path, b))
+	return materializationError(ev, s.writeFile(ctx, path, b))
 }
 
 // ── State Snapshots ──────────────────────────────────────────────────────────
@@ -119,14 +119,14 @@ func (s *FileStore) SaveSnapshot(ctx context.Context, snap *schema.StateSnapshot
 	if err := ensureArtifactAbsent("snapshot", s.artifactPath(dirSnapshots, snap.SnapshotID), snap.SnapshotID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(snap.GoalID); err != nil {
+	if err := s.requireExistingGoal(ctx, snap.GoalID); err != nil {
 		return fmt.Errorf("store: SaveSnapshot: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventStateSnapshotSaved, snap.GoalID, snap.SnapshotID, snap)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirSnapshots, snap.SnapshotID), snap))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirSnapshots, snap.SnapshotID), snap))
 }
 
 // LoadLatestSnapshot returns the StateSnapshot for goalID with the highest
@@ -159,7 +159,7 @@ func (s *FileStore) LoadSnapshot(ctx context.Context, snapshotID string) (*schem
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.StateSnapshot](s.artifactPath(dirSnapshots, snapshotID))
+	return readFile[schema.StateSnapshot](ctx, s.artifactPath(dirSnapshots, snapshotID))
 }
 
 // ── utility ──────────────────────────────────────────────────────────────────

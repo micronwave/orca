@@ -30,7 +30,7 @@ func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierRe
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirVerifierResults, r.VerifierResultID), r))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirVerifierResults, r.VerifierResultID), r))
 }
 
 func (s *FileStore) LoadVerifierResult(ctx context.Context, resultID string) (*schema.VerifierResult, error) {
@@ -39,7 +39,7 @@ func (s *FileStore) LoadVerifierResult(ctx context.Context, resultID string) (*s
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.VerifierResult](s.artifactPath(dirVerifierResults, resultID))
+	return readFile[schema.VerifierResult](ctx, s.artifactPath(dirVerifierResults, resultID))
 }
 
 func (s *FileStore) LoadVerifierResultForPatch(ctx context.Context, patchID string) (*schema.VerifierResult, error) {
@@ -70,7 +70,7 @@ func (s *FileStore) UpdateVerifierResult(ctx context.Context, r *schema.Verifier
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.artifactPath(dirVerifierResults, r.VerifierResultID)
-	if _, err := readFile[schema.VerifierResult](path); err != nil {
+	if _, err := readFile[schema.VerifierResult](ctx, path); err != nil {
 		return err
 	}
 	goalID, err := s.goalIDForCapsule(ctx, r.CapsuleID)
@@ -81,7 +81,7 @@ func (s *FileStore) UpdateVerifierResult(ctx context.Context, r *schema.Verifier
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(path, r))
+	return materializationError(ev, s.writeFile(ctx, path, r))
 }
 
 // ── Decision Records ─────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ func (s *FileStore) SaveDecision(ctx context.Context, d *schema.DecisionRecord) 
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirDecisions, d.DecisionID), d))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirDecisions, d.DecisionID), d))
 }
 
 func (s *FileStore) LoadDecision(ctx context.Context, decisionID string) (*schema.DecisionRecord, error) {
@@ -115,7 +115,7 @@ func (s *FileStore) LoadDecision(ctx context.Context, decisionID string) (*schem
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.DecisionRecord](s.artifactPath(dirDecisions, decisionID))
+	return readFile[schema.DecisionRecord](ctx, s.artifactPath(dirDecisions, decisionID))
 }
 
 // ── Topology Outcomes ────────────────────────────────────────────────────────
@@ -132,20 +132,20 @@ func (s *FileStore) SaveTopologyOutcome(ctx context.Context, r *schema.TopologyO
 	if err := ensureArtifactAbsent("topology outcome", s.artifactPath(dirTopologyOutcomes, r.OutcomeID), r.OutcomeID); err != nil {
 		return err
 	}
-	if err := s.requireExistingGoal(r.GoalID); err != nil {
+	if err := s.requireExistingGoal(ctx, r.GoalID); err != nil {
 		return fmt.Errorf("store: SaveTopologyOutcome: %w", err)
 	}
 	ev, err := s.appendEvent(ctx, schema.EventTopologyOutcomeRecorded, r.GoalID, r.OutcomeID, r)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirTopologyOutcomes, r.OutcomeID), r))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirTopologyOutcomes, r.OutcomeID), r))
 }
 
 func (s *FileStore) LoadTopologyOutcomesForGoal(ctx context.Context, goalID string) ([]*schema.TopologyOutcomeRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.requireExistingGoal(goalID); err != nil {
+	if err := s.requireExistingGoal(ctx, goalID); err != nil {
 		return nil, err
 	}
 	all, err := scanDir[schema.TopologyOutcomeRecord](ctx, filepath.Join(s.root, dirTopologyOutcomes))

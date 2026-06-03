@@ -30,7 +30,7 @@ func (s *FileStore) SaveRepoStatusSnapshot(ctx context.Context, snap *schema.Rep
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirRepoStatus, snap.SnapshotID), snap))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirRepoStatus, snap.SnapshotID), snap))
 }
 
 // LoadLatestRepoStatusSnapshot loads the most recently created RepoStatusSnapshot

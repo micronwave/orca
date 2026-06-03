@@ -39,7 +39,7 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirGoals, g.GoalID), g))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirGoals, g.GoalID), g))
 }
 
 func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR, error) {
@@ -48,7 +48,7 @@ func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
+	return readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
 }
 
 // LoadActiveGoal scans all goal files and returns the one with status "active".
@@ -75,7 +75,7 @@ func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	g, err := readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
+	g, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status 
 		return fmt.Errorf("store: append goal_status_updated: %w", err)
 	}
 	g.Status = status
-	return s.writeFile(s.artifactPath(dirGoals, goalID), g)
+	return s.writeFile(ctx, s.artifactPath(dirGoals, goalID), g)
 }
 
 func (s *FileStore) LoadGoalCondition(ctx context.Context, conditionID string) (*schema.GoalCondition, error) {
@@ -127,7 +127,7 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirObligations, o.ObligationID), o))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirObligations, o.ObligationID), o))
 }
 
 func (s *FileStore) LoadObligation(ctx context.Context, obligationID string) (*schema.Obligation, error) {
@@ -136,7 +136,7 @@ func (s *FileStore) LoadObligation(ctx context.Context, obligationID string) (*s
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
+	return readFile[schema.Obligation](ctx, s.artifactPath(dirObligations, obligationID))
 }
 
 func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*schema.Obligation, error) {
@@ -146,7 +146,7 @@ func (s *FileStore) LoadOpenObligations(ctx context.Context, goalID string) ([]*
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	// Build the set of condition IDs that belong to this goal.
-	g, err := readFile[schema.GoalIR](s.artifactPath(dirGoals, goalID))
+	g, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
 	if err != nil {
 		return nil, fmt.Errorf("store: LoadOpenObligations: %w", err)
 	}
@@ -189,7 +189,7 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o, err := readFile[schema.Obligation](s.artifactPath(dirObligations, obligationID))
+	o, err := readFile[schema.Obligation](ctx, s.artifactPath(dirObligations, obligationID))
 	if err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	if satisfiedBy != nil {
 		o.SatisfiedBy = *satisfiedBy
 	}
-	return s.writeFile(s.artifactPath(dirObligations, obligationID), o)
+	return s.writeFile(ctx, s.artifactPath(dirObligations, obligationID), o)
 }
 
 // ── Execution Capsules ───────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ func (s *FileStore) SaveCapsule(ctx context.Context, c *schema.ExecutionCapsule)
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(s.artifactPath(dirCapsules, c.CapsuleID), c))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirCapsules, c.CapsuleID), c))
 }
 
 // goalIDForCapsuleFromObligation resolves the goalID from the capsule's
@@ -240,7 +240,7 @@ func (s *FileStore) LoadCapsule(ctx context.Context, capsuleID string) (*schema.
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
+	return readFile[schema.ExecutionCapsule](ctx, s.artifactPath(dirCapsules, capsuleID))
 }
 
 func (s *FileStore) UpdateCapsuleState(ctx context.Context, capsuleID string, state schema.CapsuleState) error {
@@ -250,7 +250,7 @@ func (s *FileStore) UpdateCapsuleState(ctx context.Context, capsuleID string, st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.artifactPath(dirCapsules, capsuleID)
-	c, err := readFile[schema.ExecutionCapsule](path)
+	c, err := readFile[schema.ExecutionCapsule](ctx, path)
 	if err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func (s *FileStore) UpdateCapsuleState(ctx context.Context, capsuleID string, st
 		return fmt.Errorf("%w: capsule %s: %q → %q", ErrInvalidCapsuleTransition, capsuleID, c.State, state)
 	}
 	c.State = state
-	return s.writeFile(path, c)
+	return s.writeFile(ctx, path, c)
 }
 
 func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, projectionID string) error {
@@ -274,7 +274,7 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, err := readFile[schema.ExecutionCapsule](s.artifactPath(dirCapsules, capsuleID))
+	c, err := readFile[schema.ExecutionCapsule](ctx, s.artifactPath(dirCapsules, capsuleID))
 	if err != nil {
 		return err
 	}
@@ -291,5 +291,5 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 		return err
 	}
 	c.ContextProjectionID = projectionID
-	return materializationError(ev, s.writeFile(s.artifactPath(dirCapsules, capsuleID), c))
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirCapsules, capsuleID), c))
 }
