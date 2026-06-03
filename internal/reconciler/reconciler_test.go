@@ -35,15 +35,6 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{ctx: context.Background(), log: log, st: st}
 }
 
-func marshalJSON(t *testing.T, v any) json.RawMessage {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-	return data
-}
-
 func TestReconcileRejectsBlockingObligationWithoutEvidenceIDs(t *testing.T) {
 	env := newTestEnv(t)
 	ids := saveReconcileScenario(t, env, scenarioOptions{
@@ -720,13 +711,8 @@ func TestFreshnessCheckMarksClaimsStaleAfterInterveningAcceptedPatch(t *testing.
 	}); err != nil {
 		t.Fatalf("SaveClaim keep: %v", err)
 	}
-	if _, err := env.log.Append(env.ctx, schema.Event{
-		Type:       schema.EventPatchAccepted,
-		GoalID:     ids.goalID,
-		ArtifactID: ids.patchID,
-		Payload:    marshalJSON(t, schema.PatchStatusPayload{PatchID: ids.patchID}),
-	}); err != nil {
-		t.Fatalf("append patch accepted: %v", err)
+	if err := env.st.UpdatePatchStatus(env.ctx, ids.patchID, schema.PatchAccepted); err != nil {
+		t.Fatalf("UpdatePatchStatus: %v", err)
 	}
 	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
 		SnapshotID:  "SNAP-FRESH-CURRENT",
@@ -2203,14 +2189,9 @@ func TestFreshnessCheck_MarksRepoScopedClaimsStale(t *testing.T) {
 		t.Fatalf("SaveClaim repo-scoped: %v", err)
 	}
 
-	// Simulate an accepted patch touching the same file via a log event.
-	if _, err := env.log.Append(env.ctx, schema.Event{
-		Type:       schema.EventPatchAccepted,
-		GoalID:     ids.goalID,
-		ArtifactID: ids.patchID,
-		Payload:    marshalJSON(t, schema.PatchStatusPayload{PatchID: ids.patchID}),
-	}); err != nil {
-		t.Fatalf("append patch accepted: %v", err)
+	// Transition the patch to accepted so the event log records patch_accepted.
+	if err := env.st.UpdatePatchStatus(env.ctx, ids.patchID, schema.PatchAccepted); err != nil {
+		t.Fatalf("UpdatePatchStatus: %v", err)
 	}
 	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
 		SnapshotID:  "SNAP-REPOFRESH-CURRENT",

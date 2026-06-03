@@ -860,16 +860,6 @@ func savePatchAndVerifierResult(t *testing.T, orcaDir, obligationID string, risk
 		t.Fatalf("save verifier result: %v", err)
 	}
 	if patchStatus == schema.PatchAccepted {
-		payload := schema.PatchStatusPayload{PatchID: "PATCH-1"}
-		data := mustJSON(t, payload)
-		if _, err := log.Append(ctx, schema.Event{
-			Type:       schema.EventPatchAccepted,
-			GoalID:     "G-1",
-			ArtifactID: "PATCH-1",
-			Payload:    data,
-		}); err != nil {
-			t.Fatalf("append patch accepted: %v", err)
-		}
 		if err := st.UpdatePatchStatus(ctx, "PATCH-1", schema.PatchAccepted); err != nil {
 			t.Fatalf("update patch status: %v", err)
 		}
@@ -881,19 +871,6 @@ func markObligationSatisfied(t *testing.T, orcaDir, obligationID string, evidenc
 	log, st := openStoreForTest(t, orcaDir)
 	defer log.Close()
 	ctx := context.Background()
-	data := mustJSON(t, schema.ObligationStatusPayload{
-		ObligationID: obligationID,
-		Status:       schema.ObligationSatisfied,
-		SatisfiedBy:  &evidenceIDs,
-	})
-	if _, err := log.Append(ctx, schema.Event{
-		Type:       schema.EventObligationStatusUpdated,
-		GoalID:     "G-1",
-		ArtifactID: obligationID,
-		Payload:    data,
-	}); err != nil {
-		t.Fatalf("append obligation status: %v", err)
-	}
 	if err := st.UpdateObligationStatus(ctx, obligationID, schema.ObligationSatisfied, &evidenceIDs); err != nil {
 		t.Fatalf("update obligation status: %v", err)
 	}

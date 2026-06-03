@@ -539,15 +539,6 @@ func seedResumeDir(t *testing.T, opts seedResumeOpts) string {
 	}
 
 	if opts.patchAccepted {
-		payload := mustJSON(t, schema.PatchStatusPayload{PatchID: "PATCH-R1"})
-		if _, err := log.Append(ctx, schema.Event{
-			Type:       schema.EventPatchAccepted,
-			GoalID:     "G-R1",
-			ArtifactID: "PATCH-R1",
-			Payload:    payload,
-		}); err != nil {
-			t.Fatalf("append patch_accepted: %v", err)
-		}
 		if err := st.UpdatePatchStatus(ctx, "PATCH-R1", schema.PatchAccepted); err != nil {
 			t.Fatalf("UpdatePatchStatus: %v", err)
 		}
@@ -627,15 +618,6 @@ func addResumePatch(t *testing.T, orcaDir, capsuleID, patchID, verifierID string
 		}
 	}
 	if patchStatus == schema.PatchAccepted {
-		payload := mustJSON(t, schema.PatchStatusPayload{PatchID: patchID})
-		if _, err := log.Append(ctx, schema.Event{
-			Type:       schema.EventPatchAccepted,
-			GoalID:     "G-R1",
-			ArtifactID: patchID,
-			Payload:    payload,
-		}); err != nil {
-			t.Fatalf("append patch_accepted %s: %v", patchID, err)
-		}
 		if err := st.UpdatePatchStatus(ctx, patchID, schema.PatchAccepted); err != nil {
 			t.Fatalf("UpdatePatchStatus %s: %v", patchID, err)
 		}

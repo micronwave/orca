@@ -732,6 +732,37 @@ func TestPatch_UpdateStatus(t *testing.T) {
 	if got.Status != schema.PatchAccepted {
 		t.Errorf("status = %s, want accepted", got.Status)
 	}
+	if n := e.countEvents(t, schema.EventPatchAccepted); n != 1 {
+		t.Fatalf("expected 1 patch_accepted event, got %d", n)
+	}
+}
+
+func TestPatch_UpdateStatus_RejectsUnsupportedStatusWithoutAppendingEvent(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	e.seedPatch(t, "PATCH-1", "CAP-1")
+
+	beforeAccepted := e.countEvents(t, schema.EventPatchAccepted)
+	beforeRejected := e.countEvents(t, schema.EventPatchRejected)
+	err := e.st.UpdatePatchStatus(e.ctx, "PATCH-1", schema.PatchSuperseded)
+	if err == nil {
+		t.Fatal("UpdatePatchStatus superseded succeeded, want error")
+	}
+	if after := e.countEvents(t, schema.EventPatchAccepted); after != beforeAccepted {
+		t.Fatalf("patch_accepted count after unsupported status = %d, want %d", after, beforeAccepted)
+	}
+	if after := e.countEvents(t, schema.EventPatchRejected); after != beforeRejected {
+		t.Fatalf("patch_rejected count after unsupported status = %d, want %d", after, beforeRejected)
+	}
+	got, err := e.st.LoadPatch(e.ctx, "PATCH-1")
+	if err != nil {
+		t.Fatalf("LoadPatch: %v", err)
+	}
+	if got.Status != schema.PatchCandidate {
+		t.Fatalf("status after unsupported update = %s, want candidate", got.Status)
+	}
 }
 
 func TestPatch_LoadForCapsule(t *testing.T) {
@@ -1076,6 +1107,9 @@ func TestClaim_UpdateDisputeAndValidation(t *testing.T) {
 	if got.Status != schema.ClaimVerified || got.LastValidatedAgainst != "SNAP-1" {
 		t.Fatalf("claim after validation = %+v", got)
 	}
+	if n := e.countEvents(t, schema.EventClaimStatusUpdated); n != 2 {
+		t.Fatalf("expected 2 claim_status_updated events, got %d", n)
+	}
 }
 
 // ── Repo-scoped Claims (item 9) ───────────────────────────────────────────────
@@ -1203,6 +1237,9 @@ func TestUpdateClaimSupersession(t *testing.T) {
 	}
 	if got.SupersededBy != "PATCH-new" {
 		t.Errorf("SupersededBy = %q, want %q", got.SupersededBy, "PATCH-new")
+	}
+	if n := e.countEvents(t, schema.EventClaimSuperseded); n != 1 {
+		t.Fatalf("expected 1 claim_superseded event, got %d", n)
 	}
 }
 
