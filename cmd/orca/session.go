@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/gate"
+	"github.com/micronwave/orca/internal/ui"
 	"golang.org/x/term"
 )
 
@@ -127,7 +128,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	signal.Notify(s.sigCh, os.Interrupt)
 	defer signal.Stop(s.sigCh)
 
-	fmt.Fprint(s.errout, "> ")
+	fmt.Fprint(s.errout, ui.Colorize(s.errout, ui.Cyan, "> "))
 	for {
 		select {
 		case line, ok := <-lineCh:
@@ -138,7 +139,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				return err
 			}
 			if !s.goalActive.Load() {
-				fmt.Fprint(s.errout, "> ")
+				fmt.Fprint(s.errout, ui.Colorize(s.errout, ui.Cyan, "> "))
 			}
 		case <-s.sigCh:
 			s.handleSignal()
@@ -283,7 +284,7 @@ func (s *Supervisor) startGoal(ctx context.Context, goalText string) error {
 	s.goalActive.Store(true)
 	s.cancelRequested.Store(false)
 
-	fmt.Fprintf(s.errout, "[orca] starting: %s\n", goalText)
+	fmt.Fprintf(s.errout, "%s %s %s\n", ui.IconOrca, ui.Colorize(s.errout, ui.OrcaBlue+ui.Bold, "Starting:"), goalText)
 
 	go func() {
 		defer func() {
@@ -294,15 +295,15 @@ func (s *Supervisor) startGoal(ctx context.Context, goalText string) error {
 			s.goalCtx = nil
 			s.goalCancel = nil
 			s.goalMu.Unlock()
-			fmt.Fprint(s.errout, "\n> ")
+			fmt.Fprintf(s.errout, "\n%s", ui.Colorize(s.errout, ui.Cyan, "> "))
 		}()
 
 		if runErr := s.rt.runControlLoop(goalCtx, goalText); runErr != nil {
 			if !errors.Is(runErr, context.Canceled) {
-				fmt.Fprintf(s.errout, "[orca] error: %v\n", runErr)
+				fmt.Fprintf(s.errout, "%s %s %v\n", ui.IconCross, ui.Colorize(s.errout, ui.Red+ui.Bold, "Error:"), runErr)
 			}
 		} else {
-			fmt.Fprintln(s.errout, "[orca] goal completed.")
+			fmt.Fprintf(s.errout, "%s %s\n", ui.IconCheck, ui.Colorize(s.errout, ui.Green, "Goal completed."))
 		}
 	}()
 
@@ -353,14 +354,14 @@ func (s *Supervisor) handleResume(ctx context.Context) error {
 			s.goalCtx = nil
 			s.goalCancel = nil
 			s.goalMu.Unlock()
-			fmt.Fprint(s.errout, "\n> ")
+			fmt.Fprintf(s.errout, "\n%s", ui.Colorize(s.errout, ui.Cyan, "> "))
 		}()
 		if runErr := s.rt.resumeFromCheckpoint(goalCtx, cp); runErr != nil {
 			if !errors.Is(runErr, context.Canceled) {
-				fmt.Fprintf(s.errout, "[orca] resume error: %v\n", runErr)
+				fmt.Fprintf(s.errout, "%s %s %v\n", ui.IconCross, ui.Colorize(s.errout, ui.Red+ui.Bold, "Resume error:"), runErr)
 			}
 		} else {
-			fmt.Fprintln(s.errout, "[orca] goal resumed and completed.")
+			fmt.Fprintf(s.errout, "%s %s\n", ui.IconCheck, ui.Colorize(s.errout, ui.Green, "Goal resumed and completed."))
 		}
 	}()
 	return nil
@@ -404,14 +405,14 @@ func (s *Supervisor) handleSignal() {
 	s.goalMu.Unlock()
 
 	if active && cancel != nil && !s.cancelRequested.Swap(true) {
-		fmt.Fprintln(s.errout, "\n[Cancelling active goal... press Ctrl+C again to force exit]")
+		fmt.Fprintf(s.errout, "\n%s %s\n", ui.IconWarning, ui.Colorize(s.errout, ui.Yellow, "Cancelling active goal... press Ctrl+C again to force exit"))
 		cancel()
 		if err := s.cancelActiveGoal(context.Background()); err != nil {
-			fmt.Fprintf(s.errout, "[orca] cancel: %v\n", err)
+			fmt.Fprintf(s.errout, "%s %s %v\n", ui.IconCross, ui.Colorize(s.errout, ui.Red+ui.Bold, "Cancel error:"), err)
 		}
 		return
 	}
-	fmt.Fprintln(s.errout, "\nExiting.")
+	fmt.Fprintf(s.errout, "\n%s\n", ui.Colorize(s.errout, ui.Black+ui.Bold, "Exiting."))
 	s.stopOnce.Do(func() { close(s.stop) })
 }
 
@@ -439,5 +440,7 @@ func writeInteractiveSessionHeader(w io.Writer) {
 	if w == nil {
 		return
 	}
-	fmt.Fprintf(w, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
+	fmt.Fprintf(w, "%s %s  local proof runtime\n", ui.IconOrca, ui.Colorize(w, ui.OrcaBlue+ui.Bold, "Orca"))
+	fmt.Fprintf(w, "Working directory: %s\n", ui.Colorize(w, ui.Black+ui.Bold, mustAbs(".")))
+	fmt.Fprintf(w, "Type a goal or %s for commands\n\n", ui.Colorize(w, ui.Cyan, "/help"))
 }

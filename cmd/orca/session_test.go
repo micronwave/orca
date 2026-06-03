@@ -228,7 +228,7 @@ func TestSupervisor_ClearCommandClearsTerminalAndDoesNotStartGoal(t *testing.T) 
 	if strings.Contains(string(got), "\x1b[2J") || strings.Contains(string(got), "\x1b[3J") {
 		t.Fatalf("non-terminal clear should not emit ANSI data, got %q", string(got))
 	}
-	want := "Orca  local proof runtime\nWorking directory: " + mustAbs(".") + "\n\n"
+	want := "≋ Orca  local proof runtime\nWorking directory: " + mustAbs(".") + "\nType a goal or /help for commands\n\n"
 	if string(got) != want {
 		t.Fatalf("clear output = %q, want %q", string(got), want)
 	}

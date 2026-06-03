@@ -14,6 +14,7 @@ import (
 	"github.com/micronwave/orca/internal/idgen"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
+	"github.com/micronwave/orca/internal/ui"
 )
 
 type lineResult struct {
@@ -147,7 +148,7 @@ func (s *Gatekeeper) ReviewProjection(ctx context.Context, capsuleID string, rev
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load human summary for capsule %s: %w", capsuleID, err)
 	}
-	display := renderProjection(projection)
+	display := renderProjection(projection, s.out)
 	approved, proceeded, notes, err := s.review(ctx, display, reviewWindow, true)
 	if err != nil {
 		return GateDecision{Approved: false}, err
@@ -164,7 +165,7 @@ func (s *Gatekeeper) ReviewMerge(ctx context.Context, patchID string) (GateDecis
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load patch for merge review %s: %w", patchID, err)
 	}
-	display := renderMerge(result, patch)
+	display := renderMerge(result, patch, s.out)
 	approved, proceeded, notes, err := s.review(ctx, display, 0, false)
 	if err != nil {
 		return GateDecision{Approved: false}, err
@@ -177,7 +178,7 @@ func (s *Gatekeeper) ReviewWaiver(ctx context.Context, obligationID string, reas
 	if err != nil {
 		return GateDecision{}, fmt.Errorf("gate: load obligation %s: %w", obligationID, err)
 	}
-	display := renderWaiver(obligation, reason)
+	display := renderWaiver(obligation, reason, s.out)
 	approved, proceeded, notes, err := s.review(ctx, display, 0, false)
 	if err != nil {
 		return GateDecision{Approved: false}, err
@@ -194,7 +195,12 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 		return false, false, "", err
 	}
 	if reviewWindow <= 0 {
-		if _, err := fmt.Fprint(s.out, "\n[Actions: press ENTER to approve · type 'reject' to reject · type 'cancel' to abort]\n"); err != nil {
+		sep := ui.Colorize(s.out, ui.OrcaBlue, strings.Repeat("─", 52))
+		approve := ui.Colorize(s.out, ui.Green+ui.Bold, "ENTER")+" to approve"
+		reject := ui.Colorize(s.out, ui.Red, "reject")
+		cancel := ui.Colorize(s.out, ui.Yellow, "cancel")
+		prompt := fmt.Sprintf("\n%s\n  %s  ·  %s  ·  %s\n%s\n", sep, approve, reject, cancel, sep)
+		if _, err := fmt.Fprint(s.out, prompt); err != nil {
 			return false, false, "", err
 		}
 		for {
@@ -223,7 +229,11 @@ func (s *Gatekeeper) review(ctx context.Context, display string, reviewWindow ti
 	if !allowTimeout {
 		return false, false, "", fmt.Errorf("gate: timeout is not allowed for this gate")
 	}
-	if _, err := fmt.Fprintf(s.out, "\n[Press ENTER to approve, type 'reject' + ENTER to reject. Auto-proceeding in %v...]\n", reviewWindow); err != nil {
+	autoMsg := fmt.Sprintf("\n%s  ENTER to approve · %s to reject · Auto-proceeding in %v\n",
+		ui.Colorize(s.out, ui.Green+ui.Bold, "›"),
+		ui.Colorize(s.out, ui.Red, "reject"),
+		reviewWindow)
+	if _, err := fmt.Fprint(s.out, autoMsg); err != nil {
 		return false, false, "", err
 	}
 	timer := s.timerFunc(reviewWindow)
@@ -307,150 +317,234 @@ func (s *Gatekeeper) saveDecision(ctx context.Context, gateContext, relatedID st
 	}, nil
 }
 
-func renderProjection(p *schema.HumanSummaryProjection) string {
+func renderProjection(p *schema.HumanSummaryProjection, w io.Writer) string {
+	c := func(code, s string) string { return ui.Colorize(w, code, s) }
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Human Summary Projection\n\n")
-	fmt.Fprintf(&b, "Goal: %s\n\n", p.GoalPlain)
-	fmt.Fprintf(&b, "Approach: %s\n\n", p.ImplementationApproach)
-	fmt.Fprintf(&b, "Topology: %s\n", p.Topology.Selected)
+
+	sep := c(ui.OrcaBlue, strings.Repeat("═", 52))
+	fmt.Fprintf(&b, "\n%s %s\n%s\n\n", ui.IconOrca, c(ui.OrcaBlue+ui.Bold, "Projection Review"), sep)
+
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Goal:    "), p.GoalPlain)
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Topology:"), c(ui.Cyan, string(p.Topology.Selected)))
 	if p.Topology.Rationale != "" {
-		fmt.Fprintf(&b, "Rationale: %s\n", p.Topology.Rationale)
+		fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Rationale:"), c(ui.Black+ui.Bold, p.Topology.Rationale))
 	}
-	// Why approval is required — derived from the topology chosen.
-	fmt.Fprintf(&b, "\nWhy approval is required:\n")
+	fmt.Fprintln(&b)
+
+	if p.ImplementationApproach != "" {
+		fmt.Fprintf(&b, "  %s\n  %s\n\n", c(ui.Bold, "Approach:"), p.ImplementationApproach)
+	}
+
+	// Why approval is required
+	fmt.Fprintf(&b, "  %s\n  ", c(ui.Yellow+ui.Bold, "Why approval is required:"))
 	switch p.Topology.Selected {
 	case schema.TopologyHumanGated:
-		fmt.Fprintf(&b, "  This goal is configured as human-gated. Explicit approval is required before any agent runs.\n")
+		fmt.Fprintf(&b, "This goal is human-gated. Explicit approval is required before any agent runs.\n\n")
 	case schema.TopologyImplementerReviewer:
-		fmt.Fprintf(&b, "  One or more obligations carry medium or high risk. Approval is required before the implementer agent runs.\n")
+		fmt.Fprintf(&b, "One or more obligations carry medium or high risk.\n  Approval is required before the implementer agent runs.\n\n")
 	case schema.TopologySingle:
-		fmt.Fprintf(&b, "  This goal uses the single-agent topology with an active review window. You may approve or wait for auto-proceed.\n")
+		fmt.Fprintf(&b, "Single-agent topology with an active review window. Approve or wait for auto-proceed.\n\n")
 	default:
-		fmt.Fprintf(&b, "  A gate condition requires your review before execution continues.\n")
+		fmt.Fprintf(&b, "A gate condition requires your review before execution continues.\n\n")
 	}
-	fmt.Fprintf(&b, "\nObligations:\n")
-	for _, obligation := range p.ObligationsAddressed {
-		fmt.Fprintf(&b, "  - [%s] %s: %s\n", obligation.RiskLevel, obligation.ObligationID, obligation.Description)
+
+	// Obligations
+	fmt.Fprintf(&b, "  %s\n", c(ui.Bold, "Obligations:"))
+	for _, obl := range p.ObligationsAddressed {
+		icon, riskColor := gateRiskStyle(obl.RiskLevel)
+		riskLabel := c(riskColor, fmt.Sprintf("[%-6s]", obl.RiskLevel))
+		oblShort := gateShortID(string(obl.ObligationID))
+		fmt.Fprintf(&b, "  %s %s %s  %s\n", icon, riskLabel, c(ui.Black+ui.Bold, oblShort), obl.Description)
 	}
-	// Verifier gates that will run after the capsule completes.
-	fmt.Fprintf(&b, "\nVerifier gates:\n")
+
+	// Verifier gates
+	fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Verifier gates:"))
 	if len(p.EvidencePlan.VerifierGates) > 0 {
 		for _, g := range p.EvidencePlan.VerifierGates {
-			fmt.Fprintf(&b, "  - %s\n", g)
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Cyan, ui.IconStep), g)
 		}
 	} else {
-		fmt.Fprintf(&b, "  (none configured)\n")
+		fmt.Fprintf(&b, "  %s\n", c(ui.Black+ui.Bold, "(none configured)"))
 	}
-	fmt.Fprintf(&b, "\nExpected files:\n")
-	writeList(&b, "read", p.ExpectedFileScope.ToRead)
-	writeList(&b, "write", p.ExpectedFileScope.ToWrite)
-	writeList(&b, "create", p.ExpectedFileScope.ToCreate)
-	// Budget limits declared for this capsule.
+
+	// Expected files
+	hasFiles := len(p.ExpectedFileScope.ToRead)+len(p.ExpectedFileScope.ToWrite)+len(p.ExpectedFileScope.ToCreate) > 0
+	if hasFiles {
+		fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Expected files:"))
+		writeColorList(&b, w, "read", p.ExpectedFileScope.ToRead)
+		writeColorList(&b, w, "write", p.ExpectedFileScope.ToWrite)
+		writeColorList(&b, w, "create", p.ExpectedFileScope.ToCreate)
+	}
+
+	// Budget
 	if p.Budget.MaxTokens > 0 || p.Budget.MaxWallTimeSeconds > 0 {
-		fmt.Fprintf(&b, "\nBudget limits:\n")
+		fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Budget limits:"))
 		if p.Budget.MaxTokens > 0 {
-			fmt.Fprintf(&b, "  Max tokens:    %d\n", p.Budget.MaxTokens)
+			fmt.Fprintf(&b, "  Max tokens:    %s\n", c(ui.Cyan, fmt.Sprintf("%d", p.Budget.MaxTokens)))
 		}
 		if p.Budget.MaxWallTimeSeconds > 0 {
-			fmt.Fprintf(&b, "  Max wall time: %ds\n", p.Budget.MaxWallTimeSeconds)
+			fmt.Fprintf(&b, "  Max wall time: %s\n", c(ui.Cyan, fmt.Sprintf("%ds", p.Budget.MaxWallTimeSeconds)))
 		}
 	}
+
 	if len(p.EvidencePlan.AdvancedChecks) > 0 {
 		fmt.Fprintln(&b)
 		for _, check := range p.EvidencePlan.AdvancedChecks {
-			fmt.Fprintf(&b, "%s\n", check)
+			fmt.Fprintf(&b, "  %s\n", check)
 		}
 	}
+
+	// Risks
 	if len(p.PreExecutionRisks) > 0 {
-		fmt.Fprintf(&b, "\nRisks:\n")
+		fmt.Fprintf(&b, "\n  %s %s\n", ui.IconWarning, c(ui.Yellow+ui.Bold, "Risks:"))
 		for _, risk := range p.PreExecutionRisks {
-			fmt.Fprintf(&b, "  - %s: %s\n", risk.Source, risk.Description)
+			fmt.Fprintf(&b, "  %s %s: %s\n", c(ui.Yellow, ui.IconStep), c(ui.Bold, risk.Source), risk.Description)
 		}
 	}
+
+	// Required approvals
 	if len(p.RequiredApprovals) > 0 {
-		fmt.Fprintf(&b, "\nRequired approvals:\n")
+		fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Required approvals:"))
 		for _, a := range p.RequiredApprovals {
-			fmt.Fprintf(&b, "  - %s\n", a)
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Yellow, ui.IconStep), a)
 		}
 	}
+
+	fmt.Fprintln(&b)
 	return b.String()
 }
 
-func renderMerge(r *schema.VerifierResult, p *schema.PatchArtifact) string {
+func renderMerge(r *schema.VerifierResult, p *schema.PatchArtifact, w io.Writer) string {
+	c := func(code, s string) string { return ui.Colorize(w, code, s) }
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Merge Review\n\n")
-	fmt.Fprintf(&b, "Patch: %s (capsule %s)\n", r.PatchID, p.CapsuleID)
+
+	sep := c(ui.OrcaBlue, strings.Repeat("═", 52))
+	fmt.Fprintf(&b, "\n%s %s\n%s\n\n", ui.IconCheck, c(ui.OrcaBlue+ui.Bold, "Merge Review"), sep)
+
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Patch:   "), c(ui.Black+ui.Bold, gateShortID(r.PatchID)))
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Capsule: "), c(ui.Black+ui.Bold, gateShortID(p.CapsuleID)))
 	if p.Summary != "" {
-		fmt.Fprintf(&b, "Summary: %s\n", p.Summary)
+		fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Summary: "), p.Summary)
 	}
 	if len(p.ChangedFiles) > 0 {
-		fmt.Fprintf(&b, "Changed files: %s\n", strings.Join(p.ChangedFiles, ", "))
+		fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Changed files:"))
+		for _, f := range p.ChangedFiles {
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Cyan, ui.IconStep), f)
+		}
 	}
 	if p.DiffPath != "" {
-		fmt.Fprintf(&b, "Diff: %s\n", p.DiffPath)
+		fmt.Fprintf(&b, "\n  %s  %s\n", c(ui.Bold, "Diff:"), c(ui.Black+ui.Bold, p.DiffPath))
 	}
-	if len(p.ObligationIDsClaimed) > 0 {
-		fmt.Fprintf(&b, "Claimed obligations: %s\n", strings.Join(p.ObligationIDsClaimed, ", "))
+
+	// Recommended action with color
+	actionColor := ui.Green
+	actionIcon := ui.IconCheck
+	switch r.RecommendedAction {
+	case schema.ActionReject:
+		actionColor = ui.Red + ui.Bold
+		actionIcon = ui.IconCross
+	case schema.ActionRetry, schema.ActionSplit:
+		actionColor = ui.Yellow
+		actionIcon = ui.IconWarning
 	}
-	if len(p.RiskNotes) > 0 {
-		fmt.Fprintf(&b, "Risk notes: %s\n", strings.Join(p.RiskNotes, "; "))
-	}
-	if len(p.ScopeViolations) > 0 {
-		fmt.Fprintf(&b, "Scope violations: %s\n", strings.Join(p.ScopeViolations, ", "))
-	}
-	fmt.Fprintf(&b, "Recommended action: %s\n", r.RecommendedAction)
+	fmt.Fprintf(&b, "\n  %s  %s %s\n", c(ui.Bold, "Action:  "), actionIcon, c(actionColor, string(r.RecommendedAction)))
 	if r.RecommendationRationale != "" {
-		fmt.Fprintf(&b, "Rationale: %s\n", r.RecommendationRationale)
+		fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Rationale:"), r.RecommendationRationale)
 	}
+
 	if len(r.BlockingFailures) > 0 {
-		fmt.Fprintf(&b, "\nBlocking failures:\n")
+		fmt.Fprintf(&b, "\n  %s %s\n", ui.IconCross, c(ui.Red+ui.Bold, "Blocking failures:"))
 		for _, f := range r.BlockingFailures {
-			fmt.Fprintf(&b, "- %s\n", f)
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Red, ui.IconStep), f)
 		}
 	}
 	if len(r.Warnings) > 0 {
-		fmt.Fprintf(&b, "\nWarnings:\n")
+		fmt.Fprintf(&b, "\n  %s %s\n", ui.IconWarning, c(ui.Yellow+ui.Bold, "Warnings:"))
 		for _, w := range r.Warnings {
-			fmt.Fprintf(&b, "- %s\n", w)
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Yellow, ui.IconStep), w)
 		}
 	}
-	if len(r.Invalidates) > 0 {
-		fmt.Fprintf(&b, "\nInvalidates: %s\n", strings.Join(r.Invalidates, ", "))
+
+	if len(p.ObligationIDsClaimed) > 0 {
+		fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Claimed obligations:"))
+		for _, id := range p.ObligationIDsClaimed {
+			fmt.Fprintf(&b, "  %s %s\n", c(ui.Cyan, ui.IconStep), c(ui.Black+ui.Bold, gateShortID(id)))
+		}
 	}
-	if len(r.FailureIDs) > 0 {
-		fmt.Fprintf(&b, "Failure records: %s\n", strings.Join(r.FailureIDs, ", "))
-	}
-	fmt.Fprintf(&b, "\nObligation results:\n")
+
+	fmt.Fprintf(&b, "\n  %s\n", c(ui.Bold, "Obligation results:"))
 	for _, result := range r.ObligationResults {
-		fmt.Fprintf(&b, "- %s: %s", result.ObligationID, result.Verdict)
+		verdictColor := ui.Green
+		verdictIcon := ui.IconCheck
+		if result.Verdict != schema.VerdictSatisfied && result.Verdict != schema.VerdictWaived {
+			verdictColor = ui.Red
+			verdictIcon = ui.IconCross
+		}
+		line := fmt.Sprintf("  %s %s  %s", verdictIcon, c(verdictColor, string(result.Verdict)), c(ui.Black+ui.Bold, gateShortID(result.ObligationID)))
 		if len(result.EvidenceIDs) > 0 {
-			fmt.Fprintf(&b, " [evidence: %s]", strings.Join(result.EvidenceIDs, ", "))
+			line += c(ui.Black+ui.Bold, fmt.Sprintf(" [evidence: %s]", strings.Join(result.EvidenceIDs, ", ")))
 		}
 		if result.WaivedBy != "" {
-			fmt.Fprintf(&b, " [waived by: %s]", result.WaivedBy)
+			line += c(ui.Yellow, fmt.Sprintf(" [waived by: %s]", result.WaivedBy))
 		}
 		if result.Notes != "" {
-			fmt.Fprintf(&b, " - %s", result.Notes)
+			line += "  " + result.Notes
 		}
-		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, line)
 	}
+
+	if len(p.RiskNotes) > 0 {
+		fmt.Fprintf(&b, "\n  %s %s\n", ui.IconWarning, c(ui.Yellow, "Risk notes: "+strings.Join(p.RiskNotes, "; ")))
+	}
+	if len(p.ScopeViolations) > 0 {
+		fmt.Fprintf(&b, "  %s %s\n", ui.IconCross, c(ui.Red, "Scope violations: "+strings.Join(p.ScopeViolations, ", ")))
+	}
+	if len(r.Invalidates) > 0 {
+		fmt.Fprintf(&b, "\n  Invalidates: %s\n", c(ui.Black+ui.Bold, strings.Join(r.Invalidates, ", ")))
+	}
+	fmt.Fprintln(&b)
 	return b.String()
 }
 
-func renderWaiver(o *schema.Obligation, reason string) string {
+func renderWaiver(o *schema.Obligation, reason string, w io.Writer) string {
+	c := func(code, s string) string { return ui.Colorize(w, code, s) }
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Waiver Review\n\n")
-	fmt.Fprintf(&b, "Obligation: %s\n", o.ObligationID)
-	fmt.Fprintf(&b, "Description: %s\n", o.Description)
-	fmt.Fprintf(&b, "Risk: %s\n", o.RiskLevel)
-	fmt.Fprintf(&b, "Waiver reason: %s\n", reason)
+
+	sep := c(ui.OrcaBlue, strings.Repeat("═", 52))
+	fmt.Fprintf(&b, "\n%s %s\n%s\n\n", ui.IconWarning, c(ui.Yellow+ui.Bold, "Waiver Review"), sep)
+
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Obligation: "), c(ui.Black+ui.Bold, gateShortID(string(o.ObligationID))))
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Description:"), o.Description)
+	_, riskColor := gateRiskStyle(o.RiskLevel)
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Risk:       "), c(riskColor, string(o.RiskLevel)))
+	fmt.Fprintf(&b, "  %s  %s\n", c(ui.Bold, "Reason:     "), reason)
+	fmt.Fprintln(&b)
 	return b.String()
 }
 
-func writeList(b *strings.Builder, label string, values []string) {
+func writeColorList(b *strings.Builder, w io.Writer, label string, values []string) {
+	c := func(code, s string) string { return ui.Colorize(w, code, s) }
 	if len(values) == 0 {
-		fmt.Fprintf(b, "- %s: none\n", label)
+		fmt.Fprintf(b, "  %s %s: none\n", c(ui.Black+ui.Bold, ui.IconStep), label)
 		return
 	}
-	fmt.Fprintf(b, "- %s: %s\n", label, strings.Join(values, ", "))
+	fmt.Fprintf(b, "  %s %s: %s\n", c(ui.Cyan, ui.IconStep), label, strings.Join(values, ", "))
+}
+
+func gateShortID(id string) string {
+	if len(id) <= 14 {
+		return id
+	}
+	return id[:14]
+}
+
+func gateRiskStyle(risk schema.RiskLevel) (icon, colorCode string) {
+	switch risk {
+	case schema.RiskHigh:
+		return ui.IconCross, ui.Red + ui.Bold
+	case schema.RiskMedium:
+		return ui.IconWarning, ui.Yellow
+	default:
+		return ui.IconCheck, ui.Green
+	}
 }
