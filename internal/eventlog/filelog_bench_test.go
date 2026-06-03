@@ -159,6 +159,45 @@ func BenchmarkReadAfter_LogGrowth(b *testing.B) {
 	}
 }
 
+// BenchmarkScanner_100K measures single-FD streaming read cost for 100 K events.
+// Compare against BenchmarkReadAfter_AfterSeq/scan-all to see the reduction in
+// file-descriptor open/close overhead (one open vs. one per 200-event batch).
+func BenchmarkScanner_100K(b *testing.B) {
+	const total = 100_000
+	path := filepath.Join(b.TempDir(), "events.log")
+	seedLog(b, path, total)
+
+	l, err := eventlog.Open(path)
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sc, err := l.NewScanner(0)
+		if err != nil {
+			b.Fatalf("NewScanner: %v", err)
+		}
+		n := 0
+		for {
+			_, ok, err := sc.Next(ctx)
+			if err != nil {
+				b.Fatalf("Next: %v", err)
+			}
+			if !ok {
+				break
+			}
+			n++
+		}
+		sc.Close()
+		if n != total {
+			b.Fatalf("got %d events, want %d", n, total)
+		}
+	}
+}
+
 // BenchmarkReadAfter_AfterSeq demonstrates the seek-index optimisation.
 // All three sub-benchmarks read a 100 K-event log but request progressively
 // smaller tail windows. Because ReadAfter now seeks to the first event after

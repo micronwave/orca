@@ -63,6 +63,11 @@ func TestReplay_Stress(t *testing.T) {
 	t.Log("running store.Replay …")
 	start := time.Now()
 
+	preEvents, err := l.ReadAfter(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ReadAfter before replay: %v", err)
+	}
+
 	if err := store.Replay(context.Background(), l, st, 0); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -74,6 +79,17 @@ func TestReplay_Stress(t *testing.T) {
 	runtime.ReadMemStats(&mAfter)
 
 	fileCount := countArtifactFiles(t, dir)
+	if fileCount != stressEventCount {
+		t.Fatalf("replay materialized %d artifact files, want %d", fileCount, stressEventCount)
+	}
+
+	postEvents, err := l.ReadAfter(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ReadAfter after replay: %v", err)
+	}
+	if len(postEvents) != len(preEvents) {
+		t.Fatalf("replay changed event count: before=%d after=%d", len(preEvents), len(postEvents))
+	}
 
 	evPerSec := float64(stressEventCount) / elapsed.Seconds()
 	heapBefore := float64(mBefore.HeapInuse) / 1e6
@@ -171,6 +187,112 @@ func seedStressLog(tb testing.TB, path string, n int) {
 			tb.Fatalf("marshal event i=%d: %v", i, err)
 		}
 
+		line = append(line, '\n')
+		if _, err := f.Write(line); err != nil {
+			tb.Fatalf("write event i=%d: %v", i, err)
+		}
+	}
+}
+
+// TestReplay_ZeroStartsFromBeginningEvenWithSnapshot verifies that Replay with
+// afterSeq=0 still replays the full log even when snapshot metadata exists on
+// disk. The caller must pass a non-zero afterSeq explicitly when replaying from
+// a restored snapshot baseline.
+//
+// Setup: seed events 1..20 (all goal_created with unique IDs). Place a snapshot
+// file with SequenceNum=10 in the store's snapshot directory. Call Replay with
+// afterSeq=0. All events 1..20 must still be materialized.
+func TestReplay_ZeroStartsFromBeginningEvenWithSnapshot(t *testing.T) {
+	const total = 20
+	const snapSeq = 10
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+
+	// Build a log of total goal_created events.
+	seedGoalLog(t, logPath, total)
+
+	// Write a snapshot file claiming SequenceNum=snapSeq.
+	snapDir := filepath.Join(dir, "state", "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatalf("mkdir snapshots: %v", err)
+	}
+	snapData, err := json.Marshal(schema.StateSnapshot{
+		SnapshotID:  "SNAP-test",
+		GoalID:      "G-stress",
+		SequenceNum: snapSeq,
+		CreatedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "SNAP-test.json"), snapData, 0o644); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+
+	l, err := eventlog.Open(logPath)
+	if err != nil {
+		t.Fatalf("Open log: %v", err)
+	}
+	defer l.Close()
+
+	st, err := store.New(dir, l)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	if err := store.Replay(context.Background(), l, st, 0); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	// Full replay from seq=0 must materialize every event, even if a snapshot
+	// artifact exists on disk.
+	goalsDir := filepath.Join(dir, "state", "goals")
+	for i := 1; i <= total; i++ {
+		goalID := fmt.Sprintf("G-%07d", i)
+		path := filepath.Join(goalsDir, goalID+".json")
+		_, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("goal %s missing after full replay with snapshot metadata present: %v", goalID, err)
+		}
+	}
+}
+
+// seedGoalLog writes n goal_created events (one per sequence number) to path
+// without per-line fsync. Each event has a unique GoalID to produce a distinct
+// artifact file.
+func seedGoalLog(tb testing.TB, path string, n int) {
+	tb.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		tb.Fatalf("seedGoalLog create: %v", err)
+	}
+	defer f.Close()
+
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("G-%07d", i)
+		payloadBytes, err := json.Marshal(&schema.GoalIR{
+			GoalID:         id,
+			OriginalIntent: "snapshot aware start test",
+			Status:         schema.GoalStatusActive,
+			RiskLevel:      schema.RiskLow,
+			CreatedAt:      ts,
+		})
+		if err != nil {
+			tb.Fatalf("marshal payload i=%d: %v", i, err)
+		}
+		line, err := json.Marshal(schema.Event{
+			EventID:     fmt.Sprintf("ev-%010d", i),
+			Type:        schema.EventGoalCreated,
+			GoalID:      id,
+			Payload:     json.RawMessage(payloadBytes),
+			CreatedAt:   ts,
+			SequenceNum: int64(i),
+		})
+		if err != nil {
+			tb.Fatalf("marshal event i=%d: %v", i, err)
+		}
 		line = append(line, '\n')
 		if _, err := f.Write(line); err != nil {
 			tb.Fatalf("write event i=%d: %v", i, err)

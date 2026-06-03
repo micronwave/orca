@@ -218,6 +218,27 @@ func (s *FileStore) writeFile(ctx context.Context, path string, v any) error {
 	}
 }
 
+// writeFileReplay writes v as JSON directly to path without a temp file,
+// rename, or explicit fsync. It is intended only for bulk replay where
+// artifact files are being rebuilt from the authoritative event log.
+//
+// Crash-restart semantics: if replay is interrupted mid-run, artifact
+// directories must be wiped and replay re-run from the latest snapshot
+// sequence, since partially-written files are not guaranteed to be valid JSON.
+func (s *FileStore) writeFileReplay(ctx context.Context, path string, v any) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("store: write %s: %w", path, err)
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("store: marshal: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("%w: write %s: %v", ErrStoreIO, path, err)
+	}
+	return nil
+}
+
 // readFile reads and JSON-unmarshals the file at path into a new T.
 // Returns ErrNotFound if the file does not exist.
 // The operation runs in a goroutine; if ctx is canceled before it completes,
