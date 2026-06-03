@@ -13,6 +13,7 @@ import (
 
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/orcapath"
+	"github.com/micronwave/orca/internal/runner/adapters/stub"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -677,6 +678,49 @@ func TestRunForbiddenToolDeniesExecution(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("error should mention permission denied, got: %v", err)
+	}
+}
+
+func TestRunCopilotStubReturnsNotImplementedError(t *testing.T) {
+	env := newRunnerEnv(t)
+	_ = saveRunnerScenario(t, env)
+
+	capsuleID := "CAP-copilot"
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:           capsuleID,
+		ObligationIDs:       []string{"OB-1"},
+		Agent:               schema.AgentCopilot,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-1",
+		AllowedPaths:        []string{"."},
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: 60,
+			MaxRetries:         1,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: env.worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule copilot: %v", err)
+	}
+
+	r := New(env.st, env.log, env.orcaDir, stub.New(schema.AgentCopilot))
+	result, err := r.Run(env.ctx, capsuleID)
+	if err == nil {
+		t.Fatal("Run error = nil, want not implemented error")
+	}
+	if !strings.Contains(err.Error(), `stub: agent "copilot": stub: agent type not implemented`) {
+		t.Fatalf("error = %q, want stub not implemented message", err.Error())
+	}
+	if strings.Contains(err.Error(), "no adapter registered") {
+		t.Fatalf("error = %q, want stub error instead of no-adapter error", err.Error())
+	}
+	if len(result.FailureIDs) == 0 {
+		t.Fatal("FailureIDs = empty, want persisted failure for stub execution error")
 	}
 }
 

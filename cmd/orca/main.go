@@ -40,6 +40,7 @@ import (
 	"github.com/micronwave/orca/internal/runner/adapters/claude"
 	"github.com/micronwave/orca/internal/runner/adapters/codex"
 	"github.com/micronwave/orca/internal/runner/adapters/remote"
+	"github.com/micronwave/orca/internal/runner/adapters/stub"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/ui"
@@ -2557,6 +2558,8 @@ func newCapsuleRunner(st *store.FileStore, log *eventlog.FileLog, orcaDir string
 	adapters := []runner.Adapter{
 		codex.New(orcaDir, cfg.CodexPath),
 		claude.New(orcaDir, cfg.ClaudePath),
+		stub.New(schema.AgentCopilot),
+		stub.New(schema.AgentTool),
 	}
 	if remoteCfg.Enabled {
 		// Remote adapters are appended last; the runner's registry takes the last

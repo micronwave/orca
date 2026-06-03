@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -54,13 +53,13 @@ func New(st *store.FileStore, log *eventlog.FileLog, orcaDir string, adapters ..
 }
 
 // NewWithConfig returns a Runner with runner-local options.
+// Callers must not pass typed-nil adapter pointers (e.g. var a *T = nil).
+// Only untyped nil is filtered; typed-nil pointers will panic when AgentType()
+// is called on them. Use stub.New for unimplemented agent types instead.
 func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, cfg Config, adapters ...Adapter) *Runner {
 	registry := make(map[schema.AgentType]Adapter, len(adapters))
 	for _, adapter := range adapters {
 		if adapter == nil {
-			continue
-		}
-		if v := reflect.ValueOf(adapter); v.Kind() == reflect.Pointer && v.IsNil() {
 			continue
 		}
 		registry[adapter.AgentType()] = adapter

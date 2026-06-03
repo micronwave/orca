@@ -100,6 +100,23 @@ type RunResult struct {
 // paths that must produce structurally equivalent AgentSidecarOutput values.
 // Downstream consumers (CapsuleRunner and beyond) must not be able to
 // distinguish which path was used. orca.md §8.
+//
+// Contract for new implementations:
+//
+//   - AgentType: return exactly one schema.AgentType constant; the runner uses
+//     this as the registry key. No two registered adapters may share a type.
+//   - Preflight: verify the CLI is available and authenticated, and that the
+//     capsule worktree is clean. Must be idempotent. Return a descriptive error
+//     on any failure; the runner records a FailureInfra fingerprint and aborts.
+//   - Execute: inject projection as the agent briefing and return sidecar output.
+//     Return ErrNoSidecar when the agent produces none; return ErrInvalidSidecar
+//     when output exists but fails schema validation. The runner falls back to
+//     ExtractFromTranscript on either sentinel. Never return nil output with nil error.
+//   - ExtractFromTranscript: parse the raw transcript and return output that is
+//     structurally identical to what Execute would produce. Must not produce
+//     lesser or differently-shaped artifacts.
+//
+// Use internal/runner/adapters/stub as a minimal starting template.
 type Adapter interface {
 	// AgentType returns the schema.AgentType this adapter handles.
 	AgentType() schema.AgentType
