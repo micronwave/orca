@@ -117,3 +117,24 @@ func TestEvidenceTypeUnmarshalAcceptsPhase4Types(t *testing.T) {
 		})
 	}
 }
+
+func TestObligationStatusUnmarshalAcceptsPartiallyMet(t *testing.T) {
+	var obligation Obligation
+	if err := json.Unmarshal([]byte(`{"obligation_id":"OB-1","status":"partially_met"}`), &obligation); err != nil {
+		t.Fatalf("Unmarshal Obligation: %v", err)
+	}
+	if obligation.Status != ObligationStatusPartiallyMet {
+		t.Fatalf("Status = %s, want %s", obligation.Status, ObligationStatusPartiallyMet)
+	}
+}
+
+func TestObligationStatusUnmarshalRejectsUnknownValue(t *testing.T) {
+	var obligation Obligation
+	err := json.Unmarshal([]byte(`{"obligation_id":"OB-1","status":"partially_met_typo"}`), &obligation)
+	if err == nil {
+		t.Fatal("expected unknown obligation_status error, got nil")
+	}
+	if !strings.Contains(err.Error(), `unknown obligation_status "partially_met_typo"`) {
+		t.Fatalf("error = %q, want unknown obligation_status error", err.Error())
+	}
+}
