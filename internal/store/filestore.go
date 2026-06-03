@@ -226,62 +226,47 @@ func validateArtifactID(kind, id string) error {
 // writeFile marshals v to JSON and atomically writes it to path via a
 // temp-file rename. The temp file is synced before the rename so that a
 // power loss between write and rename cannot leave a corrupt artifact.
-// The operation runs in a goroutine; if ctx is canceled before it completes,
-// writeFile returns immediately with a context error. The goroutine may still
-// finish in the background — this is acceptable since Go cannot cancel OS calls.
+// ctx is checked before the blocking I/O; true mid-write cancellation is not
+// achievable at the OS level on any platform, so no goroutine is used.
+// Once the rename succeeds the write is committed, so reporting a later context
+// error here would misclassify a successful materialization as a failure.
 func (s *FileStore) writeFile(ctx context.Context, path string, v any) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("store: write %s: %w", path, err)
 	}
 
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("store: marshal: %w", err)
 	}
 
-	type result struct{ err error }
-	ch := make(chan result, 1)
-	go func() {
-		tmp := path + ".tmp"
-		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-		if err != nil {
-			ch <- result{fmt.Errorf("%w: create tmp %s: %v", ErrStoreIO, path, err)}
-			return
-		}
-		n, werr := f.Write(data)
-		if werr == nil && n != len(data) {
-			werr = io.ErrShortWrite
-		}
-		serr := f.Sync()
-		cerr := f.Close()
-		if werr != nil {
-			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("%w: write tmp %s: %v", ErrStoreIO, path, werr)}
-			return
-		}
-		if serr != nil {
-			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("%w: sync tmp %s: %v", ErrStoreIO, path, serr)}
-			return
-		}
-		if cerr != nil {
-			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("%w: close tmp %s: %v", ErrStoreIO, path, cerr)}
-			return
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			ch <- result{errors.Join(fmt.Errorf("%w: rename to %s: %v", ErrStoreIO, path, err), os.Remove(tmp))}
-			return
-		}
-		ch <- result{}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("store: write %s: %w", path, ctx.Err())
-	case r := <-ch:
-		return r.err
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("%w: create tmp %s: %v", ErrStoreIO, path, err)
 	}
+	n, werr := f.Write(data)
+	if werr == nil && n != len(data) {
+		werr = io.ErrShortWrite
+	}
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%w: write tmp %s: %v", ErrStoreIO, path, werr)
+	}
+	if serr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%w: sync tmp %s: %v", ErrStoreIO, path, serr)
+	}
+	if cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%w: close tmp %s: %v", ErrStoreIO, path, cerr)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return errors.Join(fmt.Errorf("%w: rename to %s: %v", ErrStoreIO, path, err), os.Remove(tmp))
+	}
+	return nil
 }
 
 // writeFileReplay writes v as JSON directly to path without a temp file,
@@ -307,42 +292,27 @@ func (s *FileStore) writeFileReplay(ctx context.Context, path string, v any) err
 
 // readFile reads and JSON-unmarshals the file at path into a new T.
 // Returns ErrNotFound if the file does not exist.
-// The operation runs in a goroutine; if ctx is canceled before it completes,
-// readFile returns immediately with a context error.
+// ctx is checked before and after the blocking read; true mid-read cancellation
+// is not achievable at the OS level, so no goroutine is used.
 func readFile[T any](ctx context.Context, path string) (*T, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("store: read %s: %w", path, err)
 	}
-
-	type result struct {
-		v   *T
-		err error
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
 	}
-	ch := make(chan result, 1)
-	go func() {
-		data, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			ch <- result{nil, ErrNotFound}
-			return
-		}
-		if err != nil {
-			ch <- result{nil, fmt.Errorf("%w: read %s: %v", ErrStoreIO, path, err)}
-			return
-		}
-		var v T
-		if err := json.Unmarshal(data, &v); err != nil {
-			ch <- result{nil, fmt.Errorf("store: unmarshal %s: %w", path, err)}
-			return
-		}
-		ch <- result{&v, nil}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("store: read %s: %w", path, ctx.Err())
-	case r := <-ch:
-		return r.v, r.err
+	if err != nil {
+		return nil, fmt.Errorf("%w: read %s: %v", ErrStoreIO, path, err)
 	}
+	var v T
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf("store: unmarshal %s: %w", path, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("store: read %s: %w", path, err)
+	}
+	return &v, nil
 }
 
 // scanDir reads every .json file in the absolute directory dir and returns
