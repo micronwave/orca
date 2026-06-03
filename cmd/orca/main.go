@@ -667,7 +667,7 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 				return err
 			}
 			rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": running agent"})
-			runResult, runErr := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule)
+			runResult, runErr := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule, runner.RunOptions{})
 			if runErr != nil {
 				return runErr
 			}
@@ -729,16 +729,18 @@ func (rt *runtime) runPlanLoop(ctx context.Context, goalID string) error {
 	}
 }
 
-func (rt *runtime) runCapsuleWithRecovery(ctx context.Context, goalID string, capsule *schema.ExecutionCapsule) (runner.RunResult, error) {
+func (rt *runtime) runCapsuleWithRecovery(ctx context.Context, goalID string, capsule *schema.ExecutionCapsule, opts runner.RunOptions) (runner.RunResult, error) {
 	if capsule == nil {
 		return runner.RunResult{}, fmt.Errorf("orca: capsule is required")
 	}
 	maxRetries := capsule.Budget.MaxRetries
 	for {
-		runResult, runErr := rt.runner.Run(ctx, capsule.CapsuleID)
+		runResult, runErr := rt.runner.RunWithOptions(ctx, capsule.CapsuleID, opts)
 		if runErr == nil {
 			return runResult, nil
 		}
+		// After the first attempt, clear Resume so retry attempts run Preflight normally.
+		opts.Resume = false
 		rt.emit(ctx, UIEvent{
 			Kind:      EventKindCapsuleFailed,
 			GoalID:    goalID,

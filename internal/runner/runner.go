@@ -67,6 +67,16 @@ var ErrInvalidSidecar = errors.New("agent sidecar output failed schema validatio
 // the runner transitions the capsule to CapsuleStateFailed and ensures
 // a FailureFingerprint is persisted before returning.
 
+// RunOptions carries per-run options that modify runner behaviour without
+// changing the capsule artifact contract.
+type RunOptions struct {
+	// Resume, when true, allows the runner to skip adapter.Preflight if the
+	// capsule's worktree directory already exists on disk. Set this when
+	// resuming a capsule that reached ready_for_prompt before a crash; the
+	// worktree is intact and Preflight would recreate work that is already done.
+	Resume bool
+}
+
 // RunResult holds the artifact IDs produced by a capsule run.
 // Consumers load the actual artifacts from the store using these IDs.
 type RunResult struct {

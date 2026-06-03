@@ -80,7 +80,19 @@ func NewWithConfig(st *store.FileStore, log *eventlog.FileLog, orcaDir string, c
 // NoLearning reports whether this runner was constructed with learning disabled.
 func (s *Runner) NoLearning() bool { return s.noLearning }
 
+// RunWithOptions is like Run but accepts per-run options. When opts.Resume is
+// true and the capsule's worktree directory already exists on disk, the runner
+// skips adapter.Preflight and proceeds directly to adapter.Execute so that an
+// interrupted capsule can continue without recreating the worktree.
+func (s *Runner) RunWithOptions(ctx context.Context, capsuleID string, opts RunOptions) (RunResult, error) {
+	return s.run(ctx, capsuleID, opts)
+}
+
 func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, err error) {
+	return s.run(ctx, capsuleID, RunOptions{})
+}
+
+func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (result RunResult, err error) {
 	if s.store == nil {
 		return RunResult{}, fmt.Errorf("runner: store is required")
 	}
@@ -211,8 +223,6 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 		return result, fmt.Errorf("runner: capsule %s requires human approval (prompt mode) before execution: %s", capsule.CapsuleID, decision.AskPrompt)
 	}
 
-	emitRuntime(schema.RuntimeStatusReadyForPrompt, "", "")
-
 	// pre_capsule hook: fires after permission check, before adapter preflight.
 	if s.preCapsuleHook != nil {
 		hookInput := hooks.Input{
@@ -233,11 +243,19 @@ func (s *Runner) Run(ctx context.Context, capsuleID string) (result RunResult, e
 		}
 	}
 
-	if err = adapter.Preflight(runCtx, capsule); err != nil {
-		failClass := classifyPreflightError(err)
-		emitRuntime(schema.RuntimeStatusPreflightWarning, failClass, err.Error())
-		return result, fmt.Errorf("runner: adapter preflight for capsule %s: %w", capsule.CapsuleID, err)
+	skipPreflight := false
+	if opts.Resume {
+		clean, cleanErr := worktreeIsClean(runCtx, capsule.Sandbox.WorktreePath)
+		skipPreflight = cleanErr == nil && clean
 	}
+	if !skipPreflight {
+		if err = adapter.Preflight(runCtx, capsule); err != nil {
+			failClass := classifyPreflightError(err)
+			emitRuntime(schema.RuntimeStatusPreflightWarning, failClass, err.Error())
+			return result, fmt.Errorf("runner: adapter preflight for capsule %s: %w", capsule.CapsuleID, err)
+		}
+	}
+	emitRuntime(schema.RuntimeStatusReadyForPrompt, "", "")
 
 	agentEv, err := s.appendCapsuleTransition(ctx, goalID, capsule.CapsuleID, schema.EventCapsuleStateUpdated, schema.CapsuleStateAgentRunning)
 	if err != nil {
@@ -619,6 +637,37 @@ func (s *Runner) saveClaims(
 		}
 	}
 	return claimIDs, nil
+}
+
+// worktreeExists reports whether worktreePath is a git worktree (or repo) that
+// already has a .git entry. Used to gate Preflight skipping on resume.
+func worktreeExists(worktreePath string) bool {
+	path := strings.TrimSpace(worktreePath)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
+// worktreeIsClean returns true when worktreePath exists as a git worktree and
+// has no staged/unstaged changes. This gates resume preflight-skipping so dirty
+// worktrees still run adapter.Preflight.
+func worktreeIsClean(ctx context.Context, worktreePath string) (bool, error) {
+	path := strings.TrimSpace(worktreePath)
+	if path == "" {
+		return false, nil
+	}
+	if !worktreeExists(path) {
+		return false, nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = path
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git status --porcelain in %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)) == "", nil
 }
 
 func ensureWorktree(ctx context.Context, worktreePath string) error {

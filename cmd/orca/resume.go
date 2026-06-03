@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/micronwave/orca/internal/runner"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 )
@@ -55,8 +56,12 @@ type Checkpoint struct {
 	Kind   CheckpointKind
 	GoalID string
 
-	// CapsuleIDs: pending capsules that need to be run (CheckpointRunCapsules).
+	// CapsuleIDs: pending capsules that need to be run from scratch (CheckpointRunCapsules).
 	CapsuleIDs []string
+	// ReattachCapsuleIDs: capsules whose worktree already exists (runtime status
+	// was ready_for_prompt before crash). Resume runs these with Resume=true to
+	// skip adapter.Preflight and reuse the existing worktree.
+	ReattachCapsuleIDs []string
 	// AbandonedCapsuleIDs: capsules in an active state with no patch.
 	// The resume path marks these failed before re-running.
 	AbandonedCapsuleIDs []string
@@ -148,15 +153,59 @@ func (rt *runtime) deriveCheckpoint(ctx context.Context, goal *schema.GoalIR) (C
 		}
 	}
 
-	cp.AbandonedCapsuleIDs = abandonedCapsuleIDs
+	// Refine pending and abandoned capsules: those whose last runtime status was
+	// ready_for_prompt have an intact worktree and can be reattached (skipping
+	// adapter.Preflight) rather than restarted from scratch. agent_running is
+	// treated as a full restart because the agent may have already begun executing.
+	var reattachCapsuleIDs []string
+	var refinedPendingIDs []string
+	var refinedAbandonedIDs []string
+
+	for _, capsuleID := range pendingCapsuleIDs {
+		status, statusErr := rt.store.LoadLatestRuntimeStatus(ctx, capsuleID)
+		if statusErr == nil && status.Status == schema.RuntimeStatusReadyForPrompt {
+			reattachCapsuleIDs = append(reattachCapsuleIDs, capsuleID)
+		} else if statusErr == nil || errors.Is(statusErr, store.ErrNotFound) {
+			refinedPendingIDs = append(refinedPendingIDs, capsuleID)
+		} else {
+			return cp, fmt.Errorf("deriveCheckpoint: load runtime status for capsule %s: %w", capsuleID, statusErr)
+		}
+	}
+	for _, capsuleID := range abandonedCapsuleIDs {
+		status, statusErr := rt.store.LoadLatestRuntimeStatus(ctx, capsuleID)
+		if statusErr == nil && status.Status == schema.RuntimeStatusReadyForPrompt {
+			reattachCapsuleIDs = append(reattachCapsuleIDs, capsuleID)
+		} else if statusErr == nil || errors.Is(statusErr, store.ErrNotFound) {
+			refinedAbandonedIDs = append(refinedAbandonedIDs, capsuleID)
+		} else {
+			return cp, fmt.Errorf("deriveCheckpoint: load runtime status for capsule %s: %w", capsuleID, statusErr)
+		}
+	}
+
+	cp.AbandonedCapsuleIDs = refinedAbandonedIDs
+	cp.ReattachCapsuleIDs = reattachCapsuleIDs
 
 	// Case: capsules exist but none produced a patch yet.
 	if len(patchIDs) == 0 {
-		if len(pendingCapsuleIDs) > 0 || len(abandonedCapsuleIDs) > 0 {
+		if len(refinedPendingIDs) > 0 || len(refinedAbandonedIDs) > 0 || len(reattachCapsuleIDs) > 0 {
 			cp.Kind = CheckpointRunCapsules
-			cp.CapsuleIDs = pendingCapsuleIDs
-			cp.LastStep = "capsules created"
-			cp.NextStep = fmt.Sprintf("run %d capsule(s) (abandon %d)", len(pendingCapsuleIDs)+len(abandonedCapsuleIDs), len(abandonedCapsuleIDs))
+			cp.CapsuleIDs = refinedPendingIDs
+			if len(reattachCapsuleIDs) > 0 {
+				cp.LastStep = "worktree created, capsule ready for prompt"
+				cp.NextStep = fmt.Sprintf(
+					"reattaching to existing worktrees for capsule(s): %s",
+					strings.Join(reattachCapsuleIDs, ", "),
+				)
+				if len(refinedPendingIDs) > 0 || len(refinedAbandonedIDs) > 0 {
+					cp.NextStep += fmt.Sprintf(
+						"; also run %d pending/abandoned capsule(s)",
+						len(refinedPendingIDs)+len(refinedAbandonedIDs),
+					)
+				}
+			} else {
+				cp.LastStep = "capsules created"
+				cp.NextStep = fmt.Sprintf("run %d capsule(s) (abandon %d)", len(refinedPendingIDs)+len(refinedAbandonedIDs), len(refinedAbandonedIDs))
+			}
 			return cp, nil
 		}
 		// All capsules failed with no patches; re-plan.
@@ -342,15 +391,20 @@ func (rt *runtime) resumeFromCheckpoint(ctx context.Context, cp Checkpoint) erro
 		return rt.runPlanLoop(ctx, goal.GoalID)
 
 	case CheckpointRunCapsules:
-		// Mark abandoned capsules failed; run remaining pending capsules.
+		// Mark abandoned capsules failed; reattach or run remaining capsules.
 		if err := rt.markCapsulesAbandoned(ctx, cp.GoalID, cp.AbandonedCapsuleIDs); err != nil {
 			return err
 		}
-		if len(cp.CapsuleIDs) == 0 {
-			// All capsules were abandoned; fall back to full re-plan.
+		allIDs := append(append([]string(nil), cp.CapsuleIDs...), cp.ReattachCapsuleIDs...)
+		if len(allIDs) == 0 {
+			// All capsules were abandoned or failed; fall back to full re-plan.
 			return rt.runPlanLoop(ctx, goal.GoalID)
 		}
-		return rt.runExistingCapsules(ctx, goal, cp.CapsuleIDs)
+		reattachSet := make(map[string]bool, len(cp.ReattachCapsuleIDs))
+		for _, id := range cp.ReattachCapsuleIDs {
+			reattachSet[id] = true
+		}
+		return rt.runExistingCapsules(ctx, goal, allIDs, reattachSet)
 
 	case CheckpointVerifyPatches:
 		result, err := rt.runVerifyAndMerge(ctx, goal, cp.PatchIDs, nil, nil)
@@ -392,8 +446,10 @@ func (rt *runtime) resumeFromCheckpoint(ctx context.Context, cp Checkpoint) erro
 // runExistingCapsules runs a set of capsules that already exist in the store
 // (created by the planner in a prior interrupted run). It skips projection
 // compilation and gate review if those steps already completed. After running,
-// it delegates to runVerifyAndMerge.
-func (rt *runtime) runExistingCapsules(ctx context.Context, goal *schema.GoalIR, capsuleIDs []string) error {
+// it delegates to runVerifyAndMerge. reattachSet contains capsule IDs whose
+// worktrees already exist; those are run with runner.RunOptions{Resume: true}
+// so adapter.Preflight is skipped.
+func (rt *runtime) runExistingCapsules(ctx context.Context, goal *schema.GoalIR, capsuleIDs []string, reattachSet map[string]bool) error {
 	// Determine topology from the first capsule's topology decision.
 	var topology schema.Topology
 	var maxRisk schema.RiskLevel
@@ -487,7 +543,8 @@ func (rt *runtime) runExistingCapsules(ctx context.Context, goal *schema.GoalIR,
 		}
 
 		rt.emit(ctx, UIEvent{Kind: EventKindCapsuleRunning, CapsuleID: capsuleID, Summary: "capsule " + capsuleID + ": running agent"})
-		runResult, err := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule)
+		runOpts := runner.RunOptions{Resume: reattachSet[capsuleID]}
+		runResult, err := rt.runCapsuleWithRecovery(ctx, goal.GoalID, capsule, runOpts)
 		if err != nil {
 			return err
 		}

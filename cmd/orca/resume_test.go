@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -674,6 +675,176 @@ func loadResumeGoal(t *testing.T, rt *runtime) *schema.GoalIR {
 		t.Fatal("no active goal")
 	}
 	return goal
+}
+
+// ── deriveCheckpoint runtime-status (FN-7) tests ─────────────────────────────
+
+// TestDeriveCheckpoint_ReadyForPrompt_PendingCapsule_ReturnsReattach confirms
+// that a pending capsule whose latest runtime status is ready_for_prompt is
+// moved to ReattachCapsuleIDs instead of CapsuleIDs.
+func TestDeriveCheckpoint_ReadyForPrompt_PendingCapsule_ReturnsReattach(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{withCapsule: true})
+	seedRuntimeStatus(t, orcaDir, "CAP-R1", "G-R1", schema.RuntimeStatusReadyForPrompt)
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointRunCapsules {
+		t.Fatalf("Kind = %q, want %q", cp.Kind, CheckpointRunCapsules)
+	}
+	if len(cp.ReattachCapsuleIDs) != 1 || cp.ReattachCapsuleIDs[0] != "CAP-R1" {
+		t.Errorf("ReattachCapsuleIDs = %v, want [CAP-R1]", cp.ReattachCapsuleIDs)
+	}
+	if len(cp.CapsuleIDs) != 0 {
+		t.Errorf("CapsuleIDs = %v, want [] (ready_for_prompt capsule must not appear in CapsuleIDs)", cp.CapsuleIDs)
+	}
+	if cp.LastStep == "" || cp.NextStep == "" {
+		t.Error("LastStep or NextStep is empty")
+	}
+}
+
+// TestDeriveCheckpoint_ReadyForPrompt_AbandonedCapsule_ReturnsReattach confirms
+// that an active (abandoned) capsule at ready_for_prompt is moved to
+// ReattachCapsuleIDs and removed from AbandonedCapsuleIDs.
+func TestDeriveCheckpoint_ReadyForPrompt_AbandonedCapsule_ReturnsReattach(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{withCapsule: true, capsuleState: schema.CapsuleStateSetupRun})
+	seedRuntimeStatus(t, orcaDir, "CAP-R1", "G-R1", schema.RuntimeStatusReadyForPrompt)
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointRunCapsules {
+		t.Fatalf("Kind = %q, want %q", cp.Kind, CheckpointRunCapsules)
+	}
+	if len(cp.ReattachCapsuleIDs) != 1 || cp.ReattachCapsuleIDs[0] != "CAP-R1" {
+		t.Errorf("ReattachCapsuleIDs = %v, want [CAP-R1]", cp.ReattachCapsuleIDs)
+	}
+	if len(cp.AbandonedCapsuleIDs) != 0 {
+		t.Errorf("AbandonedCapsuleIDs = %v, want [] (ready_for_prompt capsule must not be abandoned)", cp.AbandonedCapsuleIDs)
+	}
+}
+
+// TestDeriveCheckpoint_AgentRunning_AbandonedCapsule_NotInReattach confirms
+// that a capsule at agent_running is treated as abandoned (full restart),
+// not as a reattach candidate, because the agent may have already begun executing.
+func TestDeriveCheckpoint_AgentRunning_AbandonedCapsule_NotInReattach(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{withCapsule: true, capsuleState: schema.CapsuleStateAgentRunning})
+	seedRuntimeStatus(t, orcaDir, "CAP-R1", "G-R1", schema.RuntimeStatusAgentRunning)
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointRunCapsules {
+		t.Fatalf("Kind = %q, want %q", cp.Kind, CheckpointRunCapsules)
+	}
+	if len(cp.ReattachCapsuleIDs) != 0 {
+		t.Errorf("ReattachCapsuleIDs = %v, want [] (agent_running must not reattach)", cp.ReattachCapsuleIDs)
+	}
+	if len(cp.AbandonedCapsuleIDs) != 1 {
+		t.Errorf("AbandonedCapsuleIDs = %v, want [CAP-R1]", cp.AbandonedCapsuleIDs)
+	}
+}
+
+// TestDeriveCheckpoint_MissingRuntimeStatus_PendingCapsule_StaysInCapsuleIDs confirms
+// that a pending capsule with no runtime status is left in CapsuleIDs (full restart).
+func TestDeriveCheckpoint_MissingRuntimeStatus_PendingCapsule_StaysInCapsuleIDs(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{withCapsule: true})
+	// No runtime event appended — LoadLatestRuntimeStatus returns ErrNotFound.
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	goal := loadResumeGoal(t, rt)
+	cp, err := rt.deriveCheckpoint(context.Background(), goal)
+	if err != nil {
+		t.Fatalf("deriveCheckpoint: %v", err)
+	}
+	if cp.Kind != CheckpointRunCapsules {
+		t.Fatalf("Kind = %q, want %q", cp.Kind, CheckpointRunCapsules)
+	}
+	if len(cp.CapsuleIDs) != 1 {
+		t.Errorf("CapsuleIDs = %v, want [CAP-R1]", cp.CapsuleIDs)
+	}
+	if len(cp.ReattachCapsuleIDs) != 0 {
+		t.Errorf("ReattachCapsuleIDs = %v, want [] (no runtime status → full restart)", cp.ReattachCapsuleIDs)
+	}
+}
+
+// TestDeriveCheckpoint_RuntimeStatusReadError_ReturnsError confirms that
+// non-ErrNotFound runtime status read failures are surfaced.
+func TestDeriveCheckpoint_RuntimeStatusReadError_ReturnsError(t *testing.T) {
+	orcaDir := seedResumeDir(t, seedResumeOpts{withCapsule: true})
+	runtimeFile := filepath.Join(orcaDir, "state", "capsule_runtime", "CAP-R1.json")
+	if err := os.MkdirAll(filepath.Dir(runtimeFile), 0o755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimeFile, []byte("{not-json"), 0o644); err != nil {
+		t.Fatalf("write corrupt runtime status: %v", err)
+	}
+
+	rt, closeFn, err := openRuntime(orcaDir, false)
+	if err != nil {
+		t.Fatalf("openRuntime: %v", err)
+	}
+	defer closeFn()
+
+	goal := loadResumeGoal(t, rt)
+	_, err = rt.deriveCheckpoint(context.Background(), goal)
+	if err == nil {
+		t.Fatal("deriveCheckpoint error = nil, want runtime status read error")
+	}
+	if !strings.Contains(err.Error(), "load runtime status") {
+		t.Fatalf("error = %q, want message to mention runtime status load", err.Error())
+	}
+}
+
+// seedRuntimeStatus appends a CapsuleRuntimeEvent for the given capsule in the
+// orcaDir event log and materialises the runtime status file. It is used by
+// FN-7 checkpoint tests to simulate a specific pre-crash runtime state.
+func seedRuntimeStatus(t *testing.T, orcaDir, capsuleID, goalID string, status schema.CapsuleRuntimeStatus) {
+	t.Helper()
+	log, st := openStoreForTest(t, orcaDir)
+	defer func() {
+		if err := log.Close(); err != nil {
+			t.Fatalf("close log after seedRuntimeStatus: %v", err)
+		}
+	}()
+	if err := st.AppendRuntimeEvent(context.Background(), &schema.CapsuleRuntimeEvent{
+		CapsuleID:  capsuleID,
+		GoalID:     goalID,
+		Source:     "test",
+		Status:     status,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendRuntimeEvent(%s): %v", status, err)
+	}
 }
 
 // ── hasMergeAppliedEvent tests ────────────────────────────────────────────────

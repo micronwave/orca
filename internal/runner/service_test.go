@@ -926,6 +926,185 @@ func TestRunRuntimeEventsReconstructedByReplay(t *testing.T) {
 	}
 }
 
+// ── RunWithOptions / Resume tests ────────────────────────────────────────────
+
+// TestRunWithOptions_Resume_SkipsPreflightWhenWorktreeExists verifies that when
+// Resume=true and the capsule's worktree directory already exists on disk,
+// adapter.Preflight is not called.
+func TestRunWithOptions_Resume_SkipsPreflightWhenWorktreeExists(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	// env.worktree is a real git repo, so worktreeExists will return true.
+
+	preflightCalled := false
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		preflightFn: func(_ context.Context, _ *schema.ExecutionCapsule) error {
+			preflightCalled = true
+			return nil
+		},
+		executeFn: func(_ context.Context, capsule *schema.ExecutionCapsule, _ *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "resume_skip.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "resume_skip.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"resume_skip.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "resume preflight-skip test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	result, err := r.RunWithOptions(env.ctx, capsuleID, RunOptions{Resume: true})
+	if err != nil {
+		t.Fatalf("RunWithOptions(Resume=true): %v", err)
+	}
+	if preflightCalled {
+		t.Error("Preflight was called; expected it to be skipped when Resume=true and worktree exists")
+	}
+	if result.PatchID == "" {
+		t.Errorf("expected non-empty PatchID, got empty (RunResult = %+v)", result)
+	}
+}
+
+// TestRunWithOptions_Resume_False_RunsPreflight verifies that Resume=false does
+// not skip Preflight even when the worktree already exists.
+func TestRunWithOptions_Resume_False_RunsPreflight(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+
+	preflightCalled := false
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		preflightFn: func(_ context.Context, _ *schema.ExecutionCapsule) error {
+			preflightCalled = true
+			return nil
+		},
+		executeFn: func(_ context.Context, capsule *schema.ExecutionCapsule, _ *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "resume_noskip.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "resume_noskip.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"resume_noskip.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "resume no-skip test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	if _, err := r.RunWithOptions(env.ctx, capsuleID, RunOptions{Resume: false}); err != nil {
+		t.Fatalf("RunWithOptions(Resume=false): %v", err)
+	}
+	if !preflightCalled {
+		t.Error("Preflight was not called; expected it to run when Resume=false")
+	}
+}
+
+// TestRunWithOptions_Resume_DirtyWorktree_RunsPreflight verifies that Resume=true
+// does not skip Preflight when the worktree has local changes.
+func TestRunWithOptions_Resume_DirtyWorktree_RunsPreflight(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	if err := os.WriteFile(filepath.Join(env.worktree, "dirty.txt"), []byte("dirty"), 0o644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	preflightCalled := false
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		preflightFn: func(_ context.Context, _ *schema.ExecutionCapsule) error {
+			preflightCalled = true
+			return nil
+		},
+		executeFn: func(_ context.Context, capsule *schema.ExecutionCapsule, _ *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "resume_dirty.txt"), []byte("ok"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			runGit(t, capsule.Sandbox.WorktreePath, "add", "resume_dirty.txt")
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"resume_dirty.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				EvidencePaths:        []string{orcapath.TranscriptPath(env.orcaDir, capsule.CapsuleID)},
+				Summary:              "resume dirty-worktree test",
+			}, nil
+		},
+	}
+	r := New(env.st, env.log, env.orcaDir, adapter)
+	if _, err := r.RunWithOptions(env.ctx, capsuleID, RunOptions{Resume: true}); err != nil {
+		t.Fatalf("RunWithOptions(Resume=true, dirty worktree): %v", err)
+	}
+	if !preflightCalled {
+		t.Error("Preflight was not called; expected it to run when Resume=true and worktree is dirty")
+	}
+}
+
+// TestWorktreeExists verifies the worktreeExists helper.
+func TestWorktreeExists(t *testing.T) {
+	t.Run("existing_git_dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git: %v", err)
+		}
+		if !worktreeExists(dir) {
+			t.Error("expected true for directory containing .git")
+		}
+	})
+	t.Run("nonexistent_path", func(t *testing.T) {
+		if worktreeExists(filepath.Join(t.TempDir(), "does-not-exist")) {
+			t.Error("expected false for non-existent path")
+		}
+	})
+	t.Run("empty_path", func(t *testing.T) {
+		if worktreeExists("") {
+			t.Error("expected false for empty path")
+		}
+	})
+}
+
+func TestWorktreeIsClean(t *testing.T) {
+	t.Run("clean_worktree", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepo(t, dir)
+		clean, err := worktreeIsClean(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("worktreeIsClean clean path: %v", err)
+		}
+		if !clean {
+			t.Fatal("expected clean worktree to return true")
+		}
+	})
+	t.Run("dirty_worktree", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepo(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "DIRTY.txt"), []byte("dirty"), 0o644); err != nil {
+			t.Fatalf("write dirty file: %v", err)
+		}
+		clean, err := worktreeIsClean(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("worktreeIsClean dirty path: %v", err)
+		}
+		if clean {
+			t.Fatal("expected dirty worktree to return false")
+		}
+	})
+	t.Run("missing_path", func(t *testing.T) {
+		clean, err := worktreeIsClean(context.Background(), filepath.Join(t.TempDir(), "missing"))
+		if err != nil {
+			t.Fatalf("worktreeIsClean missing path: %v", err)
+		}
+		if clean {
+			t.Fatal("expected missing path to return false")
+		}
+	})
+}
+
 // ── helpers for Phase A tests ─────────────────────────────────────────────────
 
 func saveRunnerScenarioWithPermission(t *testing.T, env *runnerEnv, mode schema.PermissionMode) string {
