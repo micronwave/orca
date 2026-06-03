@@ -79,6 +79,10 @@ func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status 
 	if err != nil {
 		return err
 	}
+	if _, err := s.appendEvent(ctx, schema.EventGoalStatusUpdated, goalID, goalID,
+		schema.GoalStatusPayload{GoalID: goalID, Status: status}); err != nil {
+		return fmt.Errorf("store: append goal_status_updated: %w", err)
+	}
 	g.Status = status
 	return s.writeFile(s.artifactPath(dirGoals, goalID), g)
 }

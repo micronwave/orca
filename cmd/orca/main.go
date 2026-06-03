@@ -2041,21 +2041,8 @@ func (rt *runtime) cancelActiveGoal(ctx context.Context, in io.Reader, out io.Wr
 }
 
 func (rt *runtime) updateGoalStatus(ctx context.Context, goalID string, status schema.GoalStatus) error {
-	payload, err := json.Marshal(schema.GoalStatusPayload{GoalID: goalID, Status: status})
-	if err != nil {
-		return fmt.Errorf("orca: marshal goal_status_updated payload: %w", err)
-	}
-	ev, err := rt.eventLog.Append(ctx, schema.Event{
-		Type:       schema.EventGoalStatusUpdated,
-		GoalID:     goalID,
-		ArtifactID: goalID,
-		Payload:    payload,
-	})
-	if err != nil {
-		return fmt.Errorf("orca: append goal_status_updated: %w", err)
-	}
 	if err := rt.store.UpdateGoalStatus(ctx, goalID, status); err != nil {
-		return &store.MaterializationError{Event: ev, Err: fmt.Errorf("orca: update goal status: %w", err)}
+		return fmt.Errorf("orca: update goal status: %w", err)
 	}
 	return nil
 }

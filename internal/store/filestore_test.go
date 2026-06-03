@@ -236,6 +236,20 @@ func TestGoal_UpdateStatus(t *testing.T) {
 	if got.Status != schema.GoalStatusComplete {
 		t.Errorf("status = %s, want complete", got.Status)
 	}
+	if n := e.countEvents(t, schema.EventGoalStatusUpdated); n != 1 {
+		t.Errorf("expected 1 goal_status_updated event, got %d", n)
+	}
+}
+
+func TestGoal_UpdateStatus_NotFoundDoesNotAppendEvent(t *testing.T) {
+	e := newEnv(t)
+	err := e.st.UpdateGoalStatus(e.ctx, "G-404", schema.GoalStatusComplete)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("UpdateGoalStatus missing goal error = %v, want ErrNotFound", err)
+	}
+	if n := e.countEvents(t, schema.EventGoalStatusUpdated); n != 0 {
+		t.Fatalf("expected no goal_status_updated events for missing goal, got %d", n)
+	}
 }
 
 func TestGoal_SaveMaterializationFailureReturnsCommittedEvent(t *testing.T) {
