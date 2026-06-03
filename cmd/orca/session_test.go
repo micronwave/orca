@@ -189,6 +189,46 @@ func TestSupervisor_CommandInputRemainsActiveDuringGate(t *testing.T) {
 	}
 }
 
+func TestSupervisor_ClearCommandRemainsActiveDuringGate(t *testing.T) {
+	if !isSupervisorCommand("clear") {
+		t.Fatal("clear must remain a supervisor command while a gate is waiting")
+	}
+	if !isSupervisorCommand("/clear") {
+		t.Fatal("/clear must remain a supervisor command while a gate is waiting")
+	}
+}
+
+func TestSupervisor_ClearCommandClearsTerminalAndDoesNotStartGoal(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	sup, cleanup := newTestSupervisor(t, orcaDir, strings.NewReader(""))
+	defer cleanup()
+
+	tmp, err := os.CreateTemp(t.TempDir(), "clear-screen")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer func() { _ = tmp.Close() }()
+
+	sup.out = tmp
+	if err := sup.handleLine(context.Background(), "/clear"); err != nil {
+		t.Fatalf("handleLine(/clear): %v", err)
+	}
+	if sup.goalActive.Load() {
+		t.Fatal("/clear started a goal")
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	got, err := io.ReadAll(tmp)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("non-terminal clear should not emit ANSI data, got %q", string(got))
+	}
+}
+
 func TestSupervisor_DoctorCommandDoesNotStartGoal(t *testing.T) {
 	orcaDir := t.TempDir()
 	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))

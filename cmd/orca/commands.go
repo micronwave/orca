@@ -146,6 +146,13 @@ var replCommands = []CommandSpec{
 		ActiveOK: true,
 	},
 	{
+		Name:     "/clear",
+		Kind:     "repl",
+		Aliases:  []string{"clear"},
+		Summary:  "clear the visible REPL session",
+		ActiveOK: true,
+	},
+	{
 		Name:     "/help",
 		Kind:     "repl",
 		Aliases:  []string{"help"},

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/micronwave/orca/internal/gate"
+	"golang.org/x/term"
 )
 
 // gateService is the consumer-side interface for gate operations.
@@ -178,7 +179,7 @@ func (s *Supervisor) readLines(lineCh chan<- string) {
 func isSupervisorCommand(line string) bool {
 	line = strings.TrimSpace(line)
 	switch line {
-	case "exit", "quit", "status", "cancel", "help", "doctor", "ui":
+	case "exit", "quit", "status", "cancel", "clear", "help", "doctor", "ui":
 		return true
 	}
 	return strings.HasPrefix(line, "/") || line == "orca doctor" || line == "orca ui"
@@ -228,6 +229,9 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 		return s.handleResume(ctx)
 	case line == "/config":
 		fmt.Fprintf(s.out, "Config: %s\n", filepath.Join(s.orcaDir, "config.yaml"))
+		return nil
+	case line == "/clear" || line == "clear":
+		clearInteractiveScreen(s.out)
 		return nil
 	case line == "/help" || line == "help":
 		printHelp()
@@ -408,4 +412,10 @@ func (s *Supervisor) handleSignal() {
 	}
 	fmt.Fprintln(s.errout, "\nExiting.")
 	s.stopOnce.Do(func() { close(s.stop) })
+}
+
+func clearInteractiveScreen(w io.Writer) {
+	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		fmt.Fprint(w, "\x1b[2J\x1b[H")
+	}
 }

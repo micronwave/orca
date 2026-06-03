@@ -123,7 +123,7 @@ func TestCommandRegistry_printHelpContainsAllREPLCommands(t *testing.T) {
 // is not (it requires no goal to be running).
 func TestCommandRegistry_activeOKCommandsCorrectlyTagged(t *testing.T) {
 	t.Parallel()
-	mustBeActive := []string{"/status", "/details", "/logs", "/approve", "/reject", "/cancel", "/help", "/config", "/commands", "/doctor"}
+	mustBeActive := []string{"/status", "/details", "/logs", "/approve", "/reject", "/cancel", "/clear", "/help", "/config", "/commands", "/doctor"}
 	mustNotBeActive := []string{"/resume"}
 
 	index := make(map[string]CommandSpec, len(replCommands))
@@ -159,7 +159,7 @@ func TestCommandRegistry_activeOKCommandsCorrectlyTagged(t *testing.T) {
 func TestCommandRegistry_reservedSlashCommandsNotShadowed(t *testing.T) {
 	t.Parallel()
 	reserved := []string{"/status", "/details", "/logs", "/approve", "/reject",
-		"/cancel", "/resume", "/config", "/help", "/commands", "/doctor", "/ui"}
+		"/cancel", "/resume", "/config", "/clear", "/help", "/commands", "/doctor", "/ui"}
 	for _, name := range reserved {
 		if !isReservedREPLCommand(name) {
 			t.Errorf("isReservedREPLCommand(%q) = false, want true", name)
