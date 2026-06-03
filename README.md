@@ -1,6 +1,8 @@
-# Orca 
+# Orca
 
-Orca is a local runtime that turns coding goals into verified patches. You give it a goal, it wires the right agents together, runs your test suite against the result, and hands you proof that implementation was accurate. Gone are the days of "trust me bro, it works"
+Orca closes the gap between what agents SAY and what they actually DID. It defines what "done" looks like *before* any agent runs, holds the work to that standard, and only recommends merge when the evidence is there.
+
+Give it a goal. Orca breaks it into checkable steps, delegates to the right agents, runs your gates, and hands you a merge recommendation attached to real artifacts. Not just "the agent said it passed."
 
 ```text
 $ orca goal "refactor the storage layer to use SQLite"
@@ -22,6 +24,18 @@ $ orca goal "refactor the storage layer to use SQLite"
 [RESULT]     Merge Recommended. 
              Evidence: 12 test results attached to PATCH-1.
 ```
+
+---
+
+## How it's different
+
+| Feature | The "Chat" Way | The Orca Way |
+| :--- | :--- | :--- |
+| **Workflow** | You chat, you check, you merge. | You set a goal. Orca proves it. |
+| **Context** | Replays entire transcripts (expensive). | Compiles minimal "projections" (cheap). |
+| **Verification** | "The agent said it passed." | "Here are the 12 signed test logs." |
+| **Multi-Agent** | You copy-paste between windows. | Wired together automatically. |
+| **Crash recovery** | Start over. | Resume from the last checkpoint. |
 
 ---
 
@@ -125,22 +139,22 @@ orca ui
 
 Orca treats agents like contractors: give it a goal and it handles the "how".
 
-*   **Multi-Provider Wiring:** It automatically delegates steps to the right model. Maybe Claude handles the implementation while Codex reviews the risk.
-*   **Obligations, Not Prompts:** Orca defines what "done" looks like (e.g., "Tests in `internal/reconciler` must pass") before any code is written.
-*   **Execution Capsules:** Each agent run happens in a cage. We give it the exact files it needs (and nothing else), a token budget, and a set of gates it must pass to exit.
-*   **Context Projections:** Instead of replaying 50kb of chat history, Orca compiles a fresh briefing for each step. It's faster, cheaper, and keeps the agent from wandering.
-*   **Crash Recovery:** Every step is saved to the event log. If your process dies mid-run, `orca resume` picks up from the last durable checkpoint with no loss.
+*   **Obligations, Not Prompts:** Before any agent runs, Orca defines what "done" looks like — specific, checkable conditions like "tests in `internal/reconciler` must pass." Agents work against a contract, not an open-ended instruction.
+*   **Execution Capsules:** Each agent run is isolated. It gets exactly the files it needs, a token budget, and a set of gates it must pass before its patch is accepted.
+*   **Context Projections:** Instead of replaying 50kb of chat history, Orca compiles a fresh, role-specific briefing for each step. Faster, cheaper, and it keeps agents on task.
+*   **Multi-Provider Wiring:** Orca routes work to the right model automatically. Claude handles the implementation, Codex reviews the risk — no copy-pasting between windows.
+*   **Crash Recovery:** Every step is saved to the event log. If your process dies mid-run, `orca resume` picks up from the last checkpoint with no loss.
 *   **Lifecycle Hooks:** Configure `pre_capsule` and `post_verify` hooks in `config.yaml` to inject your own checks at capsule boundaries. Hooks return a structured JSON result (`allow`, `deny`, `ask`, `attach_evidence`) that Orca stores as evidence or a gate decision.
 
 ---
 
 ## How it's built
 
-Orca isn't a wrapper, but a Go-based supervisor that manages a durable **Artifact Graph**.
+Orca is a Go-based supervisor that manages a durable artifact graph — not a wrapper around a chat API.
 
 1.  **The Event Log:** Everything that happens is saved to `events.log`. If your computer crashes or the API goes down, Orca picks up where it left off.
-2.  **The Store:** All patches, test results, and "claims" (things the agent discovered) are stored as JSON files in `.orca/`.
-3.  **The Reconciler:** This is the brain. It looks at the evidence (test logs, lint output) and matches it against the obligations. If the evidence doesn't match, the patch is rejected.
+2.  **The Store:** All patches, test results, and "claims" (things the agent discovered) are stored as typed JSON artifacts in `.orca/`. Claims stay unverified until evidence backs them up.
+3.  **The Reconciler:** It looks at the evidence (test logs, lint output) and checks it against the obligations. If the evidence doesn't match, the patch is rejected — not "flagged for review," rejected.
 
 ---
 
@@ -162,18 +176,6 @@ Set `pr.enabled: true` in `config.yaml`. After a human gate approves a merge, Or
 ### MCP Server
 
 Set `mcp.enabled: true` to start a read-only JSON-RPC MCP server (default `127.0.0.1:7070`). External clients can query goals, obligations, patches, evidence, and events through it.
-
----
-
-## Comparison
-
-| Feature | The "Chat" Way | The Orca Way |
-| :--- | :--- | :--- |
-| **Workflow** | You chat, you check, you merge. | You set a goal. Orca proves it. |
-| **Context** | Replays entire transcripts (expensive). | Compiles minimal "projections" (cheap). |
-| **Verification** | "The agent said it passed." | "Here are the 12 signed test logs." |
-| **Multi-Agent** | You copy-paste between windows. | Wired together automatically. |
-| **Crash recovery** | Start over. | Resume from the last checkpoint. |
 
 ---
 
