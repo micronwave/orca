@@ -234,6 +234,35 @@ func TestSupervisor_ClearCommandClearsTerminalAndDoesNotStartGoal(t *testing.T) 
 	}
 }
 
+// TestSupervisor_ClearPassesOutToScreenWriter verifies that handleLine("/clear")
+// passes s.out among the writers given to the clear function, guarding against
+// the s.out → s.errout routing regression.
+func TestSupervisor_ClearPassesOutToScreenWriter(t *testing.T) {
+	orcaDir := t.TempDir()
+	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))
+	sup, cleanup := newTestSupervisor(t, orcaDir, strings.NewReader(""))
+	defer cleanup()
+
+	var capturedWriters []io.Writer
+	sup.clearScreen = func(writers ...io.Writer) {
+		capturedWriters = writers
+	}
+
+	if err := sup.handleLine(context.Background(), "/clear"); err != nil {
+		t.Fatalf("handleLine(/clear): %v", err)
+	}
+
+	var foundOut bool
+	for _, w := range capturedWriters {
+		if w == sup.out {
+			foundOut = true
+		}
+	}
+	if !foundOut {
+		t.Fatalf("/clear did not pass s.out to clearScreen; writers = %v", capturedWriters)
+	}
+}
+
 func TestSupervisor_DoctorCommandDoesNotStartGoal(t *testing.T) {
 	orcaDir := t.TempDir()
 	writeTestConfig(t, filepath.Join(orcaDir, "config.yaml"))

@@ -85,6 +85,10 @@ type Supervisor struct {
 	// for the current goal. Reset when the goal finishes.
 	cancelRequested atomic.Bool
 
+	// clearScreen is called by the /clear command with the writers to clear.
+	// Defaults to clearInteractiveScreen; tests may inject a capturing stub.
+	clearScreen func(...io.Writer)
+
 	sigCh    chan os.Signal
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -99,15 +103,16 @@ func newSupervisor(orcaDir string, rt *runtime, in io.Reader, out, errout io.Wri
 
 	gateR, gateW := io.Pipe()
 	s := &Supervisor{
-		orcaDir: orcaDir,
-		rt:      rt,
-		in:      in,
-		out:     out,
-		errout:  errout,
-		gateR:   gateR,
-		gateW:   gateW,
-		sigCh:   make(chan os.Signal, 1),
-		stop:    make(chan struct{}),
+		orcaDir:     orcaDir,
+		rt:          rt,
+		in:          in,
+		out:         out,
+		errout:      errout,
+		gateR:       gateR,
+		gateW:       gateW,
+		clearScreen: clearInteractiveScreen,
+		sigCh:       make(chan os.Signal, 1),
+		stop:        make(chan struct{}),
 	}
 	// Replace the runtime's gatekeeper with the session-aware wrapper.
 	rt.gatekeeper = &sessionGate{
@@ -232,7 +237,7 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 		fmt.Fprintf(s.out, "Config: %s\n", filepath.Join(s.orcaDir, "config.yaml"))
 		return nil
 	case line == "/clear" || line == "clear":
-		clearInteractiveScreen(s.out, s.errout)
+		s.clearScreen(s.out, s.errout)
 		writeInteractiveSessionHeader(s.errout)
 		return nil
 	case line == "/help" || line == "help":
