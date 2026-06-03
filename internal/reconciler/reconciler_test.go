@@ -2362,8 +2362,8 @@ func TestReconcileWaiver_ErrorsOnUnknownDecisionID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown waiver decision ID, got nil")
 	}
-	if !strings.Contains(err.Error(), "unknown decision record") {
-		t.Fatalf("error = %q, want unknown decision record error", err.Error())
+	if !errors.Is(err, ErrInvalidWaiver) {
+		t.Fatalf("error = %q, want errors.Is(err, ErrInvalidWaiver)", err.Error())
 	}
 }
 
@@ -2392,8 +2392,8 @@ func TestReconcileWaiver_ErrorsOnWrongDecisionContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for wrong waiver context, got nil")
 	}
-	if !strings.Contains(err.Error(), `want "waiver_review"`) {
-		t.Fatalf("error = %q, want context mismatch error", err.Error())
+	if !errors.Is(err, ErrInvalidWaiver) {
+		t.Fatalf("error = %q, want errors.Is(err, ErrInvalidWaiver)", err.Error())
 	}
 }
 
@@ -2638,5 +2638,110 @@ func TestReconcile_partialEvidence_blocking_obligation(t *testing.T) {
 	}
 	if obl.Status != schema.ObligationFailed {
 		t.Fatalf("obligation status = %s, want failed", obl.Status)
+	}
+}
+
+// ── Structured error sentinel tests ───────────────────────────────────────────
+
+// TestErrInvalidWaiver_isCheckable verifies that a waiver referencing a
+// non-existent decision record returns an error that satisfies
+// errors.Is(err, ErrInvalidWaiver), allowing callers to distinguish bad input
+// from store I/O failures without string matching.
+func TestErrInvalidWaiver_isCheckable(t *testing.T) {
+	env := newTestEnv(t)
+	_, oblID, patchID := saveWaiverFailScenario(t, env, "SENTINEL-WAIVER")
+
+	_, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID, ReconcileInput{
+		Waivers: map[string]string{oblID: "DEC-DOES-NOT-EXIST"},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidWaiver) {
+		t.Fatalf("errors.Is(err, ErrInvalidWaiver) = false; err = %v", err)
+	}
+}
+
+// TestErrNoActiveGoal_isCheckable verifies that Reconcile returns an error
+// satisfying errors.Is(err, ErrNoActiveGoal) when no active goal exists in the
+// store. A verifier result and patch must exist to get past the earlier
+// LoadVerifierResultForPatch / LoadPatch checks. The goal is deactivated after
+// saving the artifacts so LoadActiveGoal returns nil during the Reconcile call.
+func TestErrNoActiveGoal_isCheckable(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Now().UTC()
+	const (
+		goalID  = "G-SENTINEL-NOGOAL"
+		condID  = "GC-SENTINEL-NOGOAL"
+		oblID   = "OB-SENTINEL-NOGOAL"
+		capsID  = "CAP-SENTINEL-NOGOAL"
+		patchID = "PATCH-SENTINEL-NOGOAL"
+		vrID    = "VR-SENTINEL-NOGOAL"
+	)
+	// Save an active goal so the store's goal-resolution chain works for
+	// SavePatch / SaveVerifierResult (they need capsule → obligation → goal).
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "sentinel nogoal test",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   condID,
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: now,
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+		ObligationID:     oblID,
+		GoalConditionID:  condID,
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsID,
+		ObligationIDs: []string{oblID},
+		Agent:         schema.AgentCodex,
+		Role:          schema.RoleExecutor,
+		State:         schema.CapsuleStateCompleted,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:   patchID,
+		CapsuleID: capsID,
+		Status:    schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveVerifierResult(env.ctx, &schema.VerifierResult{
+		VerifierResultID:  vrID,
+		PatchID:           patchID,
+		CapsuleID:         capsID,
+		ObligationResults: []schema.ObligationVerdict{},
+		RecommendedAction: schema.ActionAccept,
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveVerifierResult: %v", err)
+	}
+	// Deactivate the goal so LoadActiveGoal returns nil during Reconcile.
+	if err := env.st.UpdateGoalStatus(env.ctx, goalID, schema.GoalStatusComplete); err != nil {
+		t.Fatalf("UpdateGoalStatus: %v", err)
+	}
+
+	_, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, patchID)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrNoActiveGoal) {
+		t.Fatalf("errors.Is(err, ErrNoActiveGoal) = false; err = %v", err)
 	}
 }

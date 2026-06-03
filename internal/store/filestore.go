@@ -22,6 +22,12 @@ var ErrNotFound = errors.New("artifact not found")
 // transition violates the documented lifecycle order.
 var ErrInvalidCapsuleTransition = errors.New("invalid capsule state transition")
 
+// ErrStoreIO wraps OS-level file read/write errors from the store so callers
+// can distinguish them from logical errors (ErrNotFound, validation failures).
+// Context cancellation errors are NOT wrapped with ErrStoreIO — they remain
+// distinguishable as context.Canceled / context.DeadlineExceeded.
+var ErrStoreIO = errors.New("store: I/O error")
+
 var windowsReservedNames = map[string]bool{
 	"CON": true, "PRN": true, "AUX": true, "NUL": true,
 	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
@@ -161,7 +167,7 @@ func (s *FileStore) writeFile(ctx context.Context, path string, v any) error {
 		tmp := path + ".tmp"
 		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 		if err != nil {
-			ch <- result{fmt.Errorf("store: create tmp: %w", err)}
+			ch <- result{fmt.Errorf("%w: create tmp %s: %v", ErrStoreIO, path, err)}
 			return
 		}
 		n, werr := f.Write(data)
@@ -172,21 +178,21 @@ func (s *FileStore) writeFile(ctx context.Context, path string, v any) error {
 		cerr := f.Close()
 		if werr != nil {
 			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("store: write tmp: %w", werr)}
+			ch <- result{fmt.Errorf("%w: write tmp %s: %v", ErrStoreIO, path, werr)}
 			return
 		}
 		if serr != nil {
 			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("store: sync tmp: %w", serr)}
+			ch <- result{fmt.Errorf("%w: sync tmp %s: %v", ErrStoreIO, path, serr)}
 			return
 		}
 		if cerr != nil {
 			_ = os.Remove(tmp)
-			ch <- result{fmt.Errorf("store: close tmp: %w", cerr)}
+			ch <- result{fmt.Errorf("%w: close tmp %s: %v", ErrStoreIO, path, cerr)}
 			return
 		}
 		if err := os.Rename(tmp, path); err != nil {
-			ch <- result{errors.Join(fmt.Errorf("store: rename to %s: %w", path, err), os.Remove(tmp))}
+			ch <- result{errors.Join(fmt.Errorf("%w: rename to %s: %v", ErrStoreIO, path, err), os.Remove(tmp))}
 			return
 		}
 		ch <- result{}
@@ -221,7 +227,7 @@ func readFile[T any](ctx context.Context, path string) (*T, error) {
 			return
 		}
 		if err != nil {
-			ch <- result{nil, fmt.Errorf("store: read %s: %w", path, err)}
+			ch <- result{nil, fmt.Errorf("%w: read %s: %v", ErrStoreIO, path, err)}
 			return
 		}
 		var v T

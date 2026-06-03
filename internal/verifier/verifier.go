@@ -683,7 +683,7 @@ func (execGateRunner) Run(ctx context.Context, command, workingDir string) (int,
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode(), string(out), nil
 	}
-	return -1, string(out), fmt.Errorf("verifier: execute %q: %w", command, err)
+	return -1, string(out), fmt.Errorf("%w: execute %q: %v", ErrGateExec, command, err)
 }
 
 // shellCommand returns a Cmd that runs command through the platform shell so
@@ -707,7 +707,10 @@ func checkCommandPresent(command string) error {
 		shell = "cmd"
 	}
 	_, err := exec.LookPath(shell)
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrShellNotFound, err)
+	}
+	return nil
 }
 
 func isTestGate(gate config.VerifierGate) bool {
@@ -920,12 +923,7 @@ func (s *Engine) runOrReuseGate(
 		}
 	}
 	if err := s.commandChecker(command); err != nil {
-		warnSummary := fmt.Sprintf("command not found for gate %q: %v", gate.Name, err)
-		evidence, saveErr := s.saveEvidence(ctx, evidenceType, command, 1, warnSummary, obligationRefs, "", "", "")
-		if saveErr != nil {
-			return nil, 1, saveErr
-		}
-		return []*schema.EvidenceArtifact{evidence}, 1, nil
+		return nil, 0, fmt.Errorf("verifier: check gate %q goal %s: %w", gate.Name, goalID, err)
 	}
 	exitCode, output, runErr := s.runner.Run(ctx, command, workingDir)
 	if runErr != nil {

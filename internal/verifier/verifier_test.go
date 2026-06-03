@@ -3,6 +3,7 @@ package verifier
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -1634,4 +1635,101 @@ func currentPatchIDFromStore(t *testing.T, ctx context.Context, st *store.FileSt
 		t.Fatalf("obligations = %+v, want one", obligations)
 	}
 	return strings.TrimPrefix(obligations[0].ObligationID, "OB-")
+}
+
+// ── Structured error sentinel tests ───────────────────────────────────────────
+
+// TestErrShellNotFound_isCheckable verifies that checkCommandPresent wraps
+// exec.LookPath failures with ErrShellNotFound so callers can use errors.Is
+// to distinguish "platform shell not on PATH" from other verifier errors.
+// The test temporarily replaces PATH with an empty directory to force the
+// shell lookup to fail. If the shell is found regardless (e.g. Windows locates
+// cmd.exe through internal mechanisms), the test is skipped.
+func TestErrShellNotFound_isCheckable(t *testing.T) {
+	// Replace PATH with an empty temp dir so the platform shell cannot be found.
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATHEXT", "") // suppress Windows .COM/.EXE extension search
+
+	err := checkCommandPresent("go test ./...")
+	if err == nil {
+		t.Skip("shell found with minimal PATH; cannot exercise ErrShellNotFound on this system")
+	}
+	if !errors.Is(err, ErrShellNotFound) {
+		t.Fatalf("errors.Is(err, ErrShellNotFound) = false; err = %v", err)
+	}
+}
+
+func TestVerify_ReturnsErrShellNotFoundAtBoundary(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	log, err := eventlog.Open(root + `\events.log`)
+	if err != nil {
+		t.Fatalf("eventlog.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	st, err := store.New(root, log)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := st.SaveGoal(ctx, &schema.GoalIR{
+		GoalID:         "G-shell-missing",
+		OriginalIntent: "verify typed shell error",
+		GoalConditions: []schema.GoalCondition{{
+			ID:                   "GC-shell-missing",
+			Description:          "condition",
+			EffectiveDescription: "condition",
+			Status:               schema.GoalConditionUnmet,
+		}},
+		Status:    schema.GoalStatusActive,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-shell-missing",
+		GoalConditionID:  "GC-shell-missing",
+		Description:      "run tests",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := st.SaveCapsule(ctx, &schema.ExecutionCapsule{
+		CapsuleID:     "CAP-shell-missing",
+		ObligationIDs: []string{"OB-shell-missing"},
+		State:         schema.CapsuleStateCompleted,
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: root,
+		},
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := st.SavePatch(ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-shell-missing",
+		CapsuleID:            "CAP-shell-missing",
+		ChangedFiles:         []string{"internal/verifier/verifier.go"},
+		ObligationIDsClaimed: []string{"OB-shell-missing"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+
+	engine := New(st, config.VerifierConfig{
+		Gates: []config.VerifierGate{
+			{Name: "go_test", Command: "go test ./...", Blocking: true},
+		},
+		WorkingDir: root,
+	}, fakeGateRunner{})
+	engine.commandChecker = func(string) error { return ErrShellNotFound }
+
+	_, err = engine.Verify(ctx, "PATCH-shell-missing", VerifyInput{})
+	if err == nil {
+		t.Fatal("Verify: expected error, got nil")
+	}
+	if !errors.Is(err, ErrShellNotFound) {
+		t.Fatalf("errors.Is(err, ErrShellNotFound) = false; err = %v", err)
+	}
 }

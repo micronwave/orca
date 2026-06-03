@@ -157,6 +157,9 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 
 	vr, err := s.store.LoadVerifierResultForPatch(ctx, patchID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ReconcileResult{}, fmt.Errorf("%w: patch %s", ErrMissingVerifierResult, patchID)
+		}
 		return ReconcileResult{}, fmt.Errorf("reconciler: load verifier result for patch %s: %w", patchID, err)
 	}
 
@@ -182,7 +185,7 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		return ReconcileResult{}, fmt.Errorf("reconciler: load active goal: %w", err)
 	}
 	if goal == nil {
-		return ReconcileResult{}, fmt.Errorf("reconciler: active goal: %w", store.ErrNotFound)
+		return ReconcileResult{}, fmt.Errorf("%w", ErrNoActiveGoal)
 	}
 
 	now := time.Now().UTC()
@@ -612,13 +615,13 @@ func (s *Reconciler) validateWaivers(ctx context.Context, waivers map[string]str
 		dec, err := s.store.LoadDecision(ctx, trimmed)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("reconciler: waiver for obligation %s references unknown decision record %s", obligationID, trimmed)
+				return fmt.Errorf("%w: obligation %s token %q: decision record not found", ErrInvalidWaiver, obligationID, trimmed)
 			}
 			return fmt.Errorf("reconciler: load waiver decision %s for obligation %s: %w", trimmed, obligationID, err)
 		}
 		if dec.Context != "waiver_review" {
-			return fmt.Errorf("reconciler: waiver for obligation %s references decision %s with context %q, want %q",
-				obligationID, trimmed, dec.Context, "waiver_review")
+			return fmt.Errorf("%w: obligation %s token %q: decision context is %q, want %q",
+				ErrInvalidWaiver, obligationID, trimmed, dec.Context, "waiver_review")
 		}
 	}
 	return nil
