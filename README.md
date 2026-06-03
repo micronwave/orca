@@ -12,7 +12,7 @@ $ orca goal "refactor the storage layer to use SQLite"
              - Gate: 'go test ./internal/store/...'
 [RUNNING]    Agent is modifying 3 files...
 [SUCCESS]    CAP-1 finished. Patch created.
-[CAPSULE]    Starting CAP-2 (reviewer: gpt-5.3-codex)
+[CAPSULE]    Starting CAP-2 (reviewer: codex)
              - Task: Review PATCH-1 for migration risks.
 [SUCCESS]    CAP-2 finished. No risks found.
 [VERIFYING]  Running final gates...
@@ -55,6 +55,8 @@ orca init
 ```
 This creates a `.orca/config.yaml` pre-populated for your project type (`go.mod`, `package.json`, `pom.xml`, etc.). Open it and adjust the verifier gates if needed.
 
+After initializing, run `orca doctor` to confirm your environment is ready.
+
 ### 3. Delegate a Goal
 
 You can provide a goal directly, pull from a GitHub issue, or use the interactive REPL.
@@ -64,6 +66,11 @@ orca goal "add a new endpoint to the API that returns the current system load"
 
 # From a GitHub issue (requires GITHUB_TOKEN and intake.repo config)
 orca goal --from-issue 42
+
+# Output modes (auto-detected on TTY; override with a flag)
+orca goal --plain "..."    # plain text, no ANSI
+orca goal --verbose "..."  # plain text with extra detail
+orca goal --json "..."     # newline-delimited JSON on stderr
 ```
 
 > [!NOTE]
@@ -76,9 +83,16 @@ Working directory: /my-project
 > add a new endpoint to the API that returns the current system load
 [COMPILING] ...
 
-> /status
-> /cancel
-> /help
+> /status         show active goal status
+> /details        show full status dump
+> /logs           show agent or verifier logs
+> /approve        approve the current waiting gate
+> /reject         reject the current waiting gate
+> /cancel         cancel the active goal
+> /resume         resume a paused goal
+> /doctor         run environment diagnostics
+> /clear          clear the visible session
+> /help           show all commands
 > exit
 ```
 
@@ -89,8 +103,17 @@ Orca runs in a loop. You can check the state at any time from another terminal.
 # See what's running, what's blocked, and current budget spend
 orca status
 
-# Stop everything and cleanup worktrees
+# Full operational dump (artifact IDs, budget, CI state)
+orca status --raw
+
+# Resume a goal after a crash or cancellation
+orca resume
+
+# Cancel the active goal and clean up worktrees
 orca cancel
+
+# Check environment health (adapters, config, gates)
+orca doctor
 
 # Open the desktop UI (requires orca-desktop to be installed)
 orca ui
@@ -106,6 +129,8 @@ Orca treats agents like contractors: give it a goal and it handles the "how".
 *   **Obligations, Not Prompts:** Orca defines what "done" looks like (e.g., "Tests in `internal/reconciler` must pass") before any code is written.
 *   **Execution Capsules:** Each agent run happens in a cage. We give it the exact files it needs (and nothing else), a token budget, and a set of gates it must pass to exit.
 *   **Context Projections:** Instead of replaying 50kb of chat history, Orca compiles a fresh briefing for each step. It's faster, cheaper, and keeps the agent from wandering.
+*   **Crash Recovery:** Every step is saved to the event log. If your process dies mid-run, `orca resume` picks up from the last durable checkpoint with no loss.
+*   **Lifecycle Hooks:** Configure `pre_capsule` and `post_verify` hooks in `config.yaml` to inject your own checks at capsule boundaries. Hooks return a structured JSON result (`allow`, `deny`, `ask`, `attach_evidence`) that Orca stores as evidence or a gate decision.
 
 ---
 
@@ -119,6 +144,27 @@ Orca isn't a wrapper, but a Go-based supervisor that manages a durable **Artifac
 
 ---
 
+## Integrations
+
+### CI (GitHub Actions)
+
+Set `ci.provider: github_actions` in `config.yaml`. After each patch, Orca polls the Actions run on the capsule's branch and treats a failed run as a blocking gate. Requires `GITHUB_TOKEN` and `intake.repo`.
+
+```bash
+# Wait for CI manually (also used internally by the verifier)
+orca ci wait --timeout 600
+```
+
+### Pull Requests
+
+Set `pr.enabled: true` in `config.yaml`. After a human gate approves a merge, Orca opens a GitHub PR with the goal, obligations addressed, and evidence summary pre-filled in the body. Requires `GITHUB_TOKEN` and `intake.repo`.
+
+### MCP Server
+
+Set `mcp.enabled: true` to start a read-only JSON-RPC MCP server (default `127.0.0.1:7070`). External clients can query goals, obligations, patches, evidence, and events through it.
+
+---
+
 ## Comparison
 
 | Feature | The "Chat" Way | The Orca Way |
@@ -127,6 +173,7 @@ Orca isn't a wrapper, but a Go-based supervisor that manages a durable **Artifac
 | **Context** | Replays entire transcripts (expensive). | Compiles minimal "projections" (cheap). |
 | **Verification** | "The agent said it passed." | "Here are the 12 signed test logs." |
 | **Multi-Agent** | You copy-paste between windows. | Wired together automatically. |
+| **Crash recovery** | Start over. | Resume from the last checkpoint. |
 
 ---
 
