@@ -214,8 +214,27 @@ func (s *FileStore) LoadRepoScopedClaims(ctx context.Context) ([]*schema.ClaimAr
 	return out, nil
 }
 
-// UpdateClaimSupersession sets the SupersededBy field on a claim artifact.
-// The caller must append a claim_superseded event to the event log before calling this.
+// claimGoalIDNoLock resolves the goalID for a loaded claim. Returns "" for
+// repo-scoped claims (both GoalID and SourceCapsuleID empty). Caller must hold s.mu.
+func (s *FileStore) claimGoalIDNoLock(ctx context.Context, c *schema.ClaimArtifact) (string, error) {
+	if strings.TrimSpace(c.GoalID) != "" {
+		return c.GoalID, nil
+	}
+	if strings.TrimSpace(c.SourceCapsuleID) != "" {
+		goalID, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
+		if err == nil {
+			return goalID, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
+// UpdateClaimSupersession sets the SupersededBy field on a claim artifact and
+// emits a claim_superseded event before writing, keeping the event log and
+// materialized state in sync.
 func (s *FileStore) UpdateClaimSupersession(ctx context.Context, claimID, supersededBy string) error {
 	if err := validateArtifactID("claim", claimID); err != nil {
 		return err
@@ -226,10 +245,21 @@ func (s *FileStore) UpdateClaimSupersession(ctx context.Context, claimID, supers
 	if err != nil {
 		return err
 	}
+	goalID, err := s.claimGoalIDNoLock(ctx, c)
+	if err != nil {
+		return fmt.Errorf("store: UpdateClaimSupersession: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventClaimSuperseded, goalID, claimID,
+		schema.ClaimSupersededPayload{ClaimID: claimID, SupersededBy: supersededBy})
+	if err != nil {
+		return fmt.Errorf("store: append claim_superseded: %w", err)
+	}
 	c.SupersededBy = supersededBy
-	return s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c)
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c))
 }
 
+// UpdateClaimStatus updates the status field on a claim artifact and emits a
+// claim_status_updated event before writing.
 func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, status schema.ClaimStatus) error {
 	if err := validateArtifactID("claim", claimID); err != nil {
 		return err
@@ -240,26 +270,83 @@ func (s *FileStore) UpdateClaimStatus(ctx context.Context, claimID string, statu
 	if err != nil {
 		return err
 	}
+	goalID, err := s.claimGoalIDNoLock(ctx, c)
+	if err != nil {
+		return fmt.Errorf("store: UpdateClaimStatus: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claimID,
+		schema.ClaimStatusPayload{
+			ClaimID:              claimID,
+			Status:               status,
+			LastValidatedAgainst: c.LastValidatedAgainst,
+			ContradictedBy:       c.ContradictedBy,
+			InvalidatedBy:        c.InvalidatedBy,
+		})
+	if err != nil {
+		return fmt.Errorf("store: append claim_status_updated: %w", err)
+	}
 	c.Status = status
-	return s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c)
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirClaims, claimID), c))
 }
 
+// UpdateClaimDispute updates status, ContradictedBy, and InvalidatedBy on a
+// claim artifact and emits a claim_status_updated event before writing.
 func (s *FileStore) UpdateClaimDispute(ctx context.Context, claimID string, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
 	if err := validateArtifactID("claim", claimID); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateClaimStatusNoLock(ctx, claimID, status, "", contradictedBy, invalidatedBy)
+	c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, claimID))
+	if err != nil {
+		return err
+	}
+	goalID, err := s.claimGoalIDNoLock(ctx, c)
+	if err != nil {
+		return fmt.Errorf("store: UpdateClaimDispute: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claimID,
+		schema.ClaimStatusPayload{
+			ClaimID:              claimID,
+			Status:               status,
+			LastValidatedAgainst: c.LastValidatedAgainst,
+			ContradictedBy:       contradictedBy,
+			InvalidatedBy:        invalidatedBy,
+		})
+	if err != nil {
+		return fmt.Errorf("store: append claim_status_updated: %w", err)
+	}
+	return materializationError(ev, s.updateClaimStatusNoLock(ctx, claimID, status, "", contradictedBy, invalidatedBy))
 }
 
+// UpdateClaimValidation updates status and LastValidatedAgainst on a claim
+// artifact and emits a claim_status_updated event before writing.
 func (s *FileStore) UpdateClaimValidation(ctx context.Context, claimID string, status schema.ClaimStatus, snapshotID string) error {
 	if err := validateArtifactID("claim", claimID); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateClaimStatusNoLock(ctx, claimID, status, snapshotID, nil, nil)
+	c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, claimID))
+	if err != nil {
+		return err
+	}
+	goalID, err := s.claimGoalIDNoLock(ctx, c)
+	if err != nil {
+		return fmt.Errorf("store: UpdateClaimValidation: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claimID,
+		schema.ClaimStatusPayload{
+			ClaimID:              claimID,
+			Status:               status,
+			LastValidatedAgainst: snapshotID,
+			ContradictedBy:       c.ContradictedBy,
+			InvalidatedBy:        c.InvalidatedBy,
+		})
+	if err != nil {
+		return fmt.Errorf("store: append claim_status_updated: %w", err)
+	}
+	return materializationError(ev, s.updateClaimStatusNoLock(ctx, claimID, status, snapshotID, nil, nil))
 }
 
 // ── Failure Fingerprints ─────────────────────────────────────────────────────

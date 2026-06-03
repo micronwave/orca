@@ -30,12 +30,14 @@
 //	                    already exists); the reconciler must check
 //	                    LoadBudgetForGoal before deciding which to call,
 //	                  StateSnapshot via SaveSnapshot
-//	Writes (log):     EventObligationStatusUpdated before UpdateObligationStatus,
-//	                  EventPatchAccepted or EventPatchRejected before UpdatePatchStatus,
-//	                  EventClaimStatusUpdated before UpdateClaimStatus,
-//	                  EventMergeApplied. Follow-up obligations, decisions,
-//	                  budgets, and snapshots are saved through the store, which
-//	                  emits their creation/update events.
+//	Writes (log):     EventMergeApplied. All obligation, patch, and claim status
+//	                  events (obligation_status_updated, patch_accepted/rejected,
+//	                  claim_status_updated, claim_superseded) are now emitted
+//	                  internally by FileStore.Update* methods, keeping the event
+//	                  append and file write coupled inside the store layer.
+//	                  Follow-up obligations, decisions, budgets, and snapshots
+//	                  are saved through the store, which emits their
+//	                  creation/update events.
 //
 //	Must NOT import:  internal/runner, internal/verifier, internal/projector,
 //	                  internal/budget, internal/gate
@@ -263,34 +265,17 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		if status == schema.ObligationSatisfied {
 			satisfiedByPtr = &ids
 		}
-		var ev schema.Event
-		ev, err = s.appendEvent(ctx, schema.EventObligationStatusUpdated, goal.GoalID, obl.ObligationID, schema.ObligationStatusPayload{
-			ObligationID: obl.ObligationID,
-			Status:       status,
-			SatisfiedBy:  satisfiedByPtr,
-		})
-		if err != nil {
-			return ReconcileResult{}, err
-		}
 		if err := s.store.UpdateObligationStatus(ctx, obl.ObligationID, status, satisfiedByPtr); err != nil {
-			return ReconcileResult{}, &store.MaterializationError{Event: ev, Err: fmt.Errorf("reconciler: update obligation %s: %w", obl.ObligationID, err)}
+			return ReconcileResult{}, fmt.Errorf("reconciler: update obligation %s: %w", obl.ObligationID, err)
 		}
 	}
 
 	patchStatus := schema.PatchAccepted
-	patchEventType := schema.EventPatchAccepted
 	if !result.PatchAccepted {
 		patchStatus = schema.PatchRejected
-		patchEventType = schema.EventPatchRejected
-	}
-	patchEv, err := s.appendEvent(ctx, patchEventType, goal.GoalID, patch.PatchID, schema.PatchStatusPayload{
-		PatchID: patch.PatchID,
-	})
-	if err != nil {
-		return ReconcileResult{}, err
 	}
 	if err := s.store.UpdatePatchStatus(ctx, patch.PatchID, patchStatus); err != nil {
-		return ReconcileResult{}, &store.MaterializationError{Event: patchEv, Err: fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)}
+		return ReconcileResult{}, fmt.Errorf("reconciler: update patch %s: %w", patch.PatchID, err)
 	}
 
 	// verifyClaims must only run for accepted patches. Promoting proposed claims
@@ -300,7 +285,7 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		if err := s.verifyClaims(ctx, goal.GoalID, patch.CapsuleID); err != nil {
 			return ReconcileResult{}, err
 		}
-		if err := s.processSupersededClaims(ctx, goal.GoalID, patch); err != nil {
+		if err := s.processSupersededClaims(ctx, patch); err != nil {
 			return ReconcileResult{}, err
 		}
 	}

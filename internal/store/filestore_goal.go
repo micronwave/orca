@@ -79,12 +79,13 @@ func (s *FileStore) UpdateGoalStatus(ctx context.Context, goalID string, status 
 	if err != nil {
 		return err
 	}
-	if _, err := s.appendEvent(ctx, schema.EventGoalStatusUpdated, goalID, goalID,
-		schema.GoalStatusPayload{GoalID: goalID, Status: status}); err != nil {
+	ev, err := s.appendEvent(ctx, schema.EventGoalStatusUpdated, goalID, goalID,
+		schema.GoalStatusPayload{GoalID: goalID, Status: status})
+	if err != nil {
 		return fmt.Errorf("store: append goal_status_updated: %w", err)
 	}
 	g.Status = status
-	return s.writeFile(ctx, s.artifactPath(dirGoals, goalID), g)
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirGoals, goalID), g))
 }
 
 func (s *FileStore) LoadGoalCondition(ctx context.Context, conditionID string) (*schema.GoalCondition, error) {
@@ -193,11 +194,20 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	if err != nil {
 		return err
 	}
+	goalID, err := s.findGoalIDForCondition(ctx, o.GoalConditionID)
+	if err != nil {
+		return fmt.Errorf("store: UpdateObligationStatus: %w", err)
+	}
+	ev, err := s.appendEvent(ctx, schema.EventObligationStatusUpdated, goalID, obligationID,
+		schema.ObligationStatusPayload{ObligationID: obligationID, Status: status, SatisfiedBy: satisfiedBy})
+	if err != nil {
+		return fmt.Errorf("store: append obligation_status_updated: %w", err)
+	}
 	o.Status = status
 	if satisfiedBy != nil {
 		o.SatisfiedBy = *satisfiedBy
 	}
-	return s.writeFile(ctx, s.artifactPath(dirObligations, obligationID), o)
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirObligations, obligationID), o))
 }
 
 // ── Execution Capsules ───────────────────────────────────────────────────────

@@ -83,12 +83,24 @@ const (
 // FileStore is the file-backed JSON implementation of ArtifactStore.
 //
 // Each artifact is stored as an individual JSON file named {id}.json inside
-// the appropriate subdirectory under root. Save methods append the
-// corresponding event to the EventLog before writing the artifact file,
-// ensuring the log is the authoritative history from which state can be
-// replayed. Lifecycle/status update methods write mutated artifacts in place;
-// callers (reconciler, capsule_runner) are responsible for appending any
-// status-change events directly to the EventLog before calling them.
+// the appropriate subdirectory under root. Save methods and status mutation
+// methods all append the corresponding event to the EventLog before writing
+// the artifact file, ensuring the log is the authoritative history from which
+// state can be replayed.
+//
+// Status mutation methods that are store-owned (emit the event internally):
+//   - UpdateGoalStatus       → goal_status_updated
+//   - UpdateObligationStatus → obligation_status_updated
+//   - UpdatePatchStatus      → patch_accepted / patch_rejected
+//   - UpdateClaimStatus      → claim_status_updated
+//   - UpdateClaimDispute     → claim_status_updated
+//   - UpdateClaimValidation  → claim_status_updated
+//   - UpdateClaimSupersession → claim_superseded
+//   - UpdateCapsuleProjectionID → capsule_projection_linked
+//
+// Capsule lifecycle transitions (UpdateCapsuleState) remain caller-owned:
+// the runner appends capsule_started / capsule_state_updated / capsule_completed
+// before calling UpdateCapsuleState, as the runner owns the lifecycle semantics.
 //
 // All exported methods are safe for concurrent use.
 type FileStore struct {

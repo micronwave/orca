@@ -149,14 +149,29 @@ func (s *FileStore) UpdatePatchStatus(ctx context.Context, patchID string, statu
 	if err := validateArtifactID("patch", patchID); err != nil {
 		return err
 	}
+	if status != schema.PatchAccepted && status != schema.PatchRejected {
+		return fmt.Errorf("store: UpdatePatchStatus: unsupported status %q", status)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, err := readFile[schema.PatchArtifact](ctx, s.artifactPath(dirPatches, patchID))
 	if err != nil {
 		return err
 	}
+	goalID, err := s.goalIDForCapsule(ctx, p.CapsuleID)
+	if err != nil {
+		return fmt.Errorf("store: UpdatePatchStatus: %w", err)
+	}
+	eventType := schema.EventPatchAccepted
+	if status == schema.PatchRejected {
+		eventType = schema.EventPatchRejected
+	}
+	ev, err := s.appendEvent(ctx, eventType, goalID, patchID, schema.PatchStatusPayload{PatchID: patchID})
+	if err != nil {
+		return fmt.Errorf("store: append %s: %w", eventType, err)
+	}
 	p.Status = status
-	return s.writeFile(ctx, s.artifactPath(dirPatches, patchID), p)
+	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirPatches, patchID), p))
 }
 
 func (s *FileStore) LoadPatchesForCapsule(ctx context.Context, capsuleID string) ([]*schema.PatchArtifact, error) {

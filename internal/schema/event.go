@@ -48,8 +48,8 @@ const (
 	EventPRCreated                 EventType = "pr_created"
 	EventCIStatusReceived          EventType = "ci_status_received"
 	EventIntakeIssueIngested       EventType = "intake_issue_ingested"
-	// EventClaimSuperseded is emitted by the reconciler when a claim's SupersededBy
-	// field is set, indicating it has been replaced by a newer artifact.
+	// EventClaimSuperseded is emitted by FileStore.UpdateClaimSupersession before
+	// a claim's SupersededBy field is written, indicating it was replaced by a newer artifact.
 	EventClaimSuperseded EventType = "claim_superseded"
 	// EventCapsuleRuntimeStatus is emitted by the runner whenever the capsule
 	// runtime diagnostic status changes. Payload is CapsuleRuntimeEvent. The
@@ -86,8 +86,8 @@ type Event struct {
 }
 
 // GoalStatusPayload is the event payload for goal_status_updated.
-// Callers that update GoalIR status directly must append this event before
-// calling ArtifactStore.UpdateGoalStatus so replay can reconstruct the change.
+// FileStore.UpdateGoalStatus appends this event before mutating GoalIR so
+// replay can reconstruct the change after a crash.
 type GoalStatusPayload struct {
 	GoalID string     `json:"goal_id"`
 	Status GoalStatus `json:"status"`

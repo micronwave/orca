@@ -85,9 +85,20 @@ planner's `SaveDecision` call emits `decision_record_created`; the orchestrator
 then emits `topology_selected` pointing to that decision record's ID. This keeps
 planner's event log dependency clean without losing the dedicated event type.
 
-Components that need more granular event control (capsule lifecycle state
-transitions, patch accepted/rejected, merge applied) write to the event log
-directly alongside their store writes.
+The store also emits events for status mutations (not just artifact creation):
+
+- `UpdateGoalStatus` → appends `goal_status_updated`
+- `UpdateObligationStatus` → appends `obligation_status_updated`
+- `UpdatePatchStatus` → appends `patch_accepted` or `patch_rejected`
+- `UpdateClaimStatus` / `UpdateClaimDispute` / `UpdateClaimValidation` → append `claim_status_updated`
+- `UpdateClaimSupersession` → appends `claim_superseded`
+- `UpdateCapsuleProjectionID` → appends `capsule_projection_linked`
+
+Capsule lifecycle transitions remain caller-owned: the runner appends
+`capsule_started` / `capsule_state_updated` / `capsule_completed` before each
+`UpdateCapsuleState` call, as the runner owns the lifecycle semantics.
+The reconciler appends `merge_applied` directly since there is no store method
+for merge state.
 
 ---
 
@@ -211,7 +222,7 @@ tiebreaker) before rendering.
 |---|---|
 | **Reads (store)** | `ExecutionCapsule`, `ContextProjection` |
 | **Writes (store)** | `PatchArtifact`, `EvidenceArtifacts`, `ClaimArtifacts`, `FailureFingerprints`, capsule state transitions |
-| **Writes (log)** | `capsule_started` / `capsule_completed` before matching capsule state updates; `patch_artifact_created`, `evidence_artifact_created`, `claim_created`, `failure_fingerprint_created` via store saves |
+| **Writes (log)** | `capsule_started` / `capsule_state_updated` / `capsule_completed` before matching `UpdateCapsuleState` calls (runner owns capsule lifecycle semantics); `patch_artifact_created`, `evidence_artifact_created`, `claim_created`, `failure_fingerprint_created` via store saves |
 | **Must NOT import** | `internal/planner`, `internal/verifier`, `internal/reconciler`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT call** | `store.SaveGoal`, `store.SaveObligation`, `store.SaveCapsule`, `store.SaveVerifierResult`, `store.SaveBudgetRecord` |
 | **Must NOT advance** | Obligation status — that belongs to the Reconciler |
@@ -265,8 +276,8 @@ but it does not create new evidence by running agents.
 |---|---|
 | **Reads (store)** | `VerifierResult` via `LoadVerifierResultForPatch`, `PatchArtifact` via `LoadPatch`, `Obligations` via `LoadObligation` (one per `ObligationVerdict`), `EvidenceArtifacts` via `LoadEvidence` including `ReusedFromID` for budget accounting, `FailureFingerprints` via `LoadFailuresForCapsule`, `ClaimArtifacts` via `LoadClaimsForCapsule` / `LoadClaimsForGoal` / `LoadClaimsByStatus`, `StateSnapshot` via `LoadLatestSnapshot` / `LoadSnapshot`, `BudgetRecords` via `LoadBudgetForGoal` |
 | **Reads (log)** | goal events via `ReadForGoal` during `FreshnessCheck` and explicit decision invalidation processing |
-| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, and `UpdateClaimValidation`, `ClaimArtifacts` via `SaveClaim` only for verifier advanced-check test-gap findings, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; `TopologyOutcomeRecord` via `SaveTopologyOutcome` (skipped when `NoLearning` is true) |
-| **Writes (log)** | `obligation_status_updated` before obligation updates; `patch_accepted` / `patch_rejected` before patch updates; `claim_status_updated` before claim status, dispute, or validation updates; `obligation_created` (follow-ups), `decision_record_created`, `topology_outcome_recorded`, `merge_applied` |
+| **Writes (store)** | Obligation status via `UpdateObligationStatus`, Patch status via `UpdatePatchStatus`, Claim status/dispute/validation/stale transitions via `UpdateClaimStatus`, `UpdateClaimDispute`, `UpdateClaimValidation`, and `UpdateClaimSupersession`, `ClaimArtifacts` via `SaveClaim` only for verifier advanced-check test-gap findings, new follow-up `Obligations` via `SaveObligation`, `DecisionRecords` via `SaveDecision`, `BudgetRecords` via `UpdateBudgetRecord`, `StateSnapshot` via `SaveSnapshot`; `TopologyOutcomeRecord` via `SaveTopologyOutcome` (skipped when `NoLearning` is true) |
+| **Writes (log)** | `merge_applied` only. All obligation, patch, and claim status events (`obligation_status_updated`, `patch_accepted` / `patch_rejected`, `claim_status_updated`, `claim_superseded`) are now emitted internally by `FileStore.Update*` methods, keeping the event append and file write coupled inside the store layer. Follow-up obligations, decisions, budgets, snapshots, and topology outcomes are persisted through the store, which emits their creation/update events. |
 | **Must NOT import** | `internal/runner`, `internal/verifier`, `internal/projector`, `internal/budget`, `internal/gate` |
 | **Must NOT create** | new evidence artifacts or run subprocess checks (verifier's job) |
 | **Must NOT accept** | a patch without mapping evidence to every blocking obligation |

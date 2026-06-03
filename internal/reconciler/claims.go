@@ -12,9 +12,9 @@ import (
 )
 
 // processSupersededClaims marks each claim listed in patch.SupersededClaimIDs as
-// superseded by the patch, emitting a claim_superseded event for each one.
-// Only called for accepted patches; skips claims that are already superseded or missing.
-func (s *Reconciler) processSupersededClaims(ctx context.Context, goalID string, patch *schema.PatchArtifact) error {
+// superseded by the patch. Only called for accepted patches; skips claims that
+// are already superseded or missing. The store emits claim_superseded internally.
+func (s *Reconciler) processSupersededClaims(ctx context.Context, patch *schema.PatchArtifact) error {
 	if patch == nil || len(patch.SupersededClaimIDs) == 0 {
 		return nil
 	}
@@ -32,15 +32,8 @@ func (s *Reconciler) processSupersededClaims(ctx context.Context, goalID string,
 		if strings.TrimSpace(claim.SupersededBy) != "" {
 			continue // already superseded by a prior patch
 		}
-		supEv, err := s.appendEvent(ctx, schema.EventClaimSuperseded, goalID, claimID, schema.ClaimSupersededPayload{
-			ClaimID:      claimID,
-			SupersededBy: patch.PatchID,
-		})
-		if err != nil {
-			return err
-		}
 		if err := s.store.UpdateClaimSupersession(ctx, claimID, patch.PatchID); err != nil {
-			return &store.MaterializationError{Event: supEv, Err: fmt.Errorf("reconciler: update claim supersession %s: %w", claimID, err)}
+			return fmt.Errorf("reconciler: update claim supersession %s: %w", claimID, err)
 		}
 	}
 	return nil
@@ -75,17 +68,8 @@ func (s *Reconciler) verifyClaims(ctx context.Context, goalID, capsuleID string)
 		if !allPresent {
 			continue
 		}
-		var claimEv schema.Event
-		claimEv, err = s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
-			ClaimID:              claim.ClaimID,
-			Status:               schema.ClaimVerified,
-			LastValidatedAgainst: snapshotID,
-		})
-		if err != nil {
-			return err
-		}
 		if err := s.store.UpdateClaimValidation(ctx, claim.ClaimID, schema.ClaimVerified, snapshotID); err != nil {
-			return &store.MaterializationError{Event: claimEv, Err: fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)}
+			return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
 		}
 	}
 	return nil
@@ -109,10 +93,10 @@ func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr 
 			if target == nil || target.Status != schema.ClaimVerified {
 				continue
 			}
-			if err := s.markClaimDisputed(ctx, goalID, claim, schema.ClaimContested, []string{target.ClaimID}, nil); err != nil {
+			if err := s.markClaimDisputed(ctx, claim, schema.ClaimContested, []string{target.ClaimID}, nil); err != nil {
 				return err
 			}
-			if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimContested, []string{claim.ClaimID}, nil); err != nil {
+			if err := s.markClaimDisputed(ctx, target, schema.ClaimContested, []string{claim.ClaimID}, nil); err != nil {
 				return err
 			}
 			claim.Status = schema.ClaimContested
@@ -126,7 +110,7 @@ func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr 
 				if target == nil || target.Status != schema.ClaimVerified {
 					continue
 				}
-				if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, []string{claim.ClaimID}); err != nil {
+				if err := s.markClaimDisputed(ctx, target, schema.ClaimInvalidated, nil, []string{claim.ClaimID}); err != nil {
 					return err
 				}
 				target.Status = schema.ClaimInvalidated
@@ -138,7 +122,7 @@ func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr 
 		if target == nil || target.Status != schema.ClaimVerified {
 			continue
 		}
-		if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, []string{vr.VerifierResultID}); err != nil {
+		if err := s.markClaimDisputed(ctx, target, schema.ClaimInvalidated, nil, []string{vr.VerifierResultID}); err != nil {
 			return err
 		}
 		target.Status = schema.ClaimInvalidated
@@ -152,7 +136,7 @@ func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, vr 
 		if target == nil || target.Status != schema.ClaimVerified {
 			continue
 		}
-		if err := s.markClaimDisputed(ctx, goalID, target, schema.ClaimInvalidated, nil, invalidators); err != nil {
+		if err := s.markClaimDisputed(ctx, target, schema.ClaimInvalidated, nil, invalidators); err != nil {
 			return err
 		}
 		target.Status = schema.ClaimInvalidated
@@ -181,7 +165,7 @@ func (s *Reconciler) decisionInvalidations(ctx context.Context, goalID string) (
 	return out, nil
 }
 
-func (s *Reconciler) markClaimDisputed(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
+func (s *Reconciler) markClaimDisputed(ctx context.Context, claim *schema.ClaimArtifact, status schema.ClaimStatus, contradictedBy, invalidatedBy []string) error {
 	if claim == nil {
 		return nil
 	}
@@ -190,18 +174,8 @@ func (s *Reconciler) markClaimDisputed(ctx context.Context, goalID string, claim
 	if claim.Status == status && sameStrings(claim.ContradictedBy, contradicted) && sameStrings(claim.InvalidatedBy, invalidated) {
 		return nil
 	}
-	disputeEv, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
-		ClaimID:              claim.ClaimID,
-		Status:               status,
-		LastValidatedAgainst: claim.LastValidatedAgainst,
-		ContradictedBy:       contradicted,
-		InvalidatedBy:        invalidated,
-	})
-	if err != nil {
-		return err
-	}
 	if err := s.store.UpdateClaimDispute(ctx, claim.ClaimID, status, contradicted, invalidated); err != nil {
-		return &store.MaterializationError{Event: disputeEv, Err: fmt.Errorf("reconciler: update claim dispute %s: %w", claim.ClaimID, err)}
+		return fmt.Errorf("reconciler: update claim dispute %s: %w", claim.ClaimID, err)
 	}
 	claim.Status = status
 	claim.ContradictedBy = contradicted
@@ -237,7 +211,7 @@ func (s *Reconciler) FreshnessCheck(ctx context.Context, goalID string) error {
 			repoVerified = append(repoVerified, c)
 		}
 	}
-	checkFreshness := func(claimsToCheck []*schema.ClaimArtifact, evGoalID string) error {
+	checkFreshness := func(claimsToCheck []*schema.ClaimArtifact) error {
 		for _, claim := range claimsToCheck {
 			if claim.LastValidatedAgainst == "" || claim.LastValidatedAgainst == current.SnapshotID {
 				continue
@@ -256,16 +230,16 @@ func (s *Reconciler) FreshnessCheck(ctx context.Context, goalID string) error {
 			if !stale {
 				continue
 			}
-			if err := s.markClaimStatus(ctx, evGoalID, claim, schema.ClaimStale); err != nil {
+			if err := s.markClaimStatus(ctx, claim, schema.ClaimStale); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := checkFreshness(claims, goalID); err != nil {
+	if err := checkFreshness(claims); err != nil {
 		return err
 	}
-	return checkFreshness(repoVerified, "")
+	return checkFreshness(repoVerified)
 }
 
 func (s *Reconciler) claimTouchedSince(ctx context.Context, goalID string, claim *schema.ClaimArtifact, afterSeq, throughSeq int64) (bool, error) {
@@ -306,22 +280,12 @@ func (s *Reconciler) claimTouchedSince(ctx context.Context, goalID string, claim
 	return false, nil
 }
 
-func (s *Reconciler) markClaimStatus(ctx context.Context, goalID string, claim *schema.ClaimArtifact, status schema.ClaimStatus) error {
+func (s *Reconciler) markClaimStatus(ctx context.Context, claim *schema.ClaimArtifact, status schema.ClaimStatus) error {
 	if claim.Status == status {
 		return nil
 	}
-	statusEv, err := s.appendEvent(ctx, schema.EventClaimStatusUpdated, goalID, claim.ClaimID, schema.ClaimStatusPayload{
-		ClaimID:              claim.ClaimID,
-		Status:               status,
-		LastValidatedAgainst: claim.LastValidatedAgainst,
-		ContradictedBy:       claim.ContradictedBy,
-		InvalidatedBy:        claim.InvalidatedBy,
-	})
-	if err != nil {
-		return err
-	}
 	if err := s.store.UpdateClaimStatus(ctx, claim.ClaimID, status); err != nil {
-		return &store.MaterializationError{Event: statusEv, Err: fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)}
+		return fmt.Errorf("reconciler: update claim %s: %w", claim.ClaimID, err)
 	}
 	claim.Status = status
 	return nil
@@ -371,7 +335,7 @@ func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, p
 			}
 		}
 	}
-	checkClaims := func(claims []*schema.ClaimArtifact, evGoalID string) error {
+	checkClaims := func(claims []*schema.ClaimArtifact) error {
 		for _, claim := range claims {
 			if claim.Status != schema.ClaimVerified || claim.SourceCapsuleID == patch.CapsuleID {
 				continue
@@ -381,14 +345,14 @@ func (s *Reconciler) invalidateStaleClaims(ctx context.Context, goalID string, p
 			if !fileOverlap && !symbolOverlap {
 				continue
 			}
-			if err := s.markClaimStatus(ctx, evGoalID, claim, schema.ClaimStale); err != nil {
+			if err := s.markClaimStatus(ctx, claim, schema.ClaimStale); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := checkClaims(goalClaims, goalID); err != nil {
+	if err := checkClaims(goalClaims); err != nil {
 		return err
 	}
-	return checkClaims(repoClaims, "")
+	return checkClaims(repoClaims)
 }
