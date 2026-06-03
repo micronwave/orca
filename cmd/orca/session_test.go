@@ -211,6 +211,7 @@ func TestSupervisor_ClearCommandClearsTerminalAndDoesNotStartGoal(t *testing.T) 
 	defer func() { _ = tmp.Close() }()
 
 	sup.out = tmp
+	sup.errout = tmp
 	if err := sup.handleLine(context.Background(), "/clear"); err != nil {
 		t.Fatalf("handleLine(/clear): %v", err)
 	}
@@ -224,8 +225,12 @@ func TestSupervisor_ClearCommandClearsTerminalAndDoesNotStartGoal(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if len(got) != 0 {
+	if strings.Contains(string(got), "\x1b[2J") || strings.Contains(string(got), "\x1b[3J") {
 		t.Fatalf("non-terminal clear should not emit ANSI data, got %q", string(got))
+	}
+	want := "Orca  local proof runtime\nWorking directory: " + mustAbs(".") + "\n\n"
+	if string(got) != want {
+		t.Fatalf("clear output = %q, want %q", string(got), want)
 	}
 }
 

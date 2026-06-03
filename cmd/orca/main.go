@@ -1518,7 +1518,7 @@ func runInteractive(orcaDir string) error {
 	if err := rt.cfg.Verifier.ValidateGates(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
+	writeInteractiveSessionHeader(os.Stderr)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sup := newSupervisor(orcaDir, rt, os.Stdin, os.Stdout, os.Stderr)

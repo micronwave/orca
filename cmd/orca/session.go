@@ -231,7 +231,8 @@ func (s *Supervisor) handleLine(ctx context.Context, line string) error {
 		fmt.Fprintf(s.out, "Config: %s\n", filepath.Join(s.orcaDir, "config.yaml"))
 		return nil
 	case line == "/clear" || line == "clear":
-		clearInteractiveScreen(s.out)
+		clearInteractiveScreen(s.out, s.errout)
+		writeInteractiveSessionHeader(s.errout)
 		return nil
 	case line == "/help" || line == "help":
 		printHelp()
@@ -414,8 +415,29 @@ func (s *Supervisor) handleSignal() {
 	s.stopOnce.Do(func() { close(s.stop) })
 }
 
-func clearInteractiveScreen(w io.Writer) {
-	if f, ok := w.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
-		fmt.Fprint(w, "\x1b[2J\x1b[H")
+func clearInteractiveScreen(writers ...io.Writer) {
+	seen := make(map[uintptr]struct{}, len(writers))
+	for _, w := range writers {
+		f, ok := w.(*os.File)
+		if !ok || !term.IsTerminal(int(f.Fd())) {
+			continue
+		}
+
+		fd := f.Fd()
+		if _, dup := seen[fd]; dup {
+			continue
+		}
+		seen[fd] = struct{}{}
+
+		// Clear screen + scrollback and move cursor to home so the REPL prompt
+		// remains in-place instead of visually "pushing" prior lines.
+		fmt.Fprint(f, "\x1b[3J\x1b[2J\x1b[H")
 	}
+}
+
+func writeInteractiveSessionHeader(w io.Writer) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "Orca  local proof runtime\nWorking directory: %s\n\n", mustAbs("."))
 }
