@@ -19,29 +19,31 @@ import (
 // frontend and must not import internal/ packages. State is read directly from
 // the .orca/ JSON artifact files.
 type App struct {
-	mu      sync.RWMutex
-	ctx     context.Context
-	orcaDir string
-	stop    chan struct{}
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancelTail context.CancelFunc
+	orcaDir    string
 }
 
 // NewApp creates the App with the given .orca directory path.
 func NewApp(orcaDir string) *App {
-	return &App{
-		orcaDir: orcaDir,
-		stop:    make(chan struct{}, 1), // buffered so shutdown() never drops the signal
-	}
+	return &App{orcaDir: orcaDir}
 }
 
 func (a *App) startup(ctx context.Context) {
+	if a.cancelTail != nil {
+		a.cancelTail()
+	}
 	a.ctx = ctx
-	go a.tailEventLog()
+	tailCtx, cancel := context.WithCancel(ctx)
+	a.cancelTail = cancel
+	go a.tailEventLog(tailCtx)
 }
 
 func (a *App) shutdown(_ context.Context) {
-	select {
-	case a.stop <- struct{}{}:
-	default:
+	if a.cancelTail != nil {
+		a.cancelTail()
+		a.cancelTail = nil
 	}
 }
 

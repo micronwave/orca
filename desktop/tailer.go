@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"time"
@@ -9,9 +10,8 @@ import (
 )
 
 // tailEventLog polls the events.log file for new content and emits a
-// "state:refresh" Wails event whenever the file grows. Runs until the stop
-// channel receives.
-func (a *App) tailEventLog() {
+// "state:refresh" Wails event whenever the file grows. Runs until ctx is cancelled.
+func (a *App) tailEventLog(ctx context.Context) {
 	var lastSize int64
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -19,7 +19,7 @@ func (a *App) tailEventLog() {
 
 	for {
 		select {
-		case <-a.stop:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			// Re-read dir() each tick so SetOrcaDir changes take effect.
