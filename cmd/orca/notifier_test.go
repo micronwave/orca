@@ -271,13 +271,13 @@ func TestRunStatus_Raw_ShowsDetailedDump(t *testing.T) {
 	got := out.String()
 	// Raw/detailed fields must be present.
 	for _, want := range []string{
-		"Active goal: G-1",
-		"Open obligations: 1",
-		"Active capsules: 1",
+		"G-1",
+		"Open Obligations (1)",
+		"Active Capsules (1)",
 		"runtime_status=agent_running",
-		"Budget totals:",
+		"Totals:",
 		"MCP server:",
-		"Remote execution:",
+		"Remote:",
 		"Latest PR:",
 		"CI:",
 	} {

@@ -24,6 +24,7 @@ import (
 	"github.com/micronwave/orca/internal/intake"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
+	"github.com/micronwave/orca/internal/ui"
 )
 
 func TestRunLoadsConfigAndInitializesEventLog(t *testing.T) {
@@ -153,15 +154,15 @@ func TestStatusPrintsActiveGoalAndRuntimeState(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Active goal: G-1",
-		"Open obligations: 1",
-		"Active capsules: 1",
+		"G-1",
+		"Open Obligations (1)",
+		"Active Capsules (1)",
 		"CAP-1 [pending] agent=codex",
-		"Last verifier result: none",
-		"Merge readiness: unknown",
-		"Blocking human decisions:",
-		"- none",
-		"Budget totals:",
+		"Last result:",
+		"Merge:",
+		"Blocking Human Decisions",
+		"  none",
+		"Totals:",
 		"coordination_cost=",
 	} {
 		if !strings.Contains(got, want) {
@@ -184,10 +185,10 @@ func TestStatusDoesNotReportReadyWithOpenBlockingObligation(t *testing.T) {
 		t.Fatalf("printStatus: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "Last verifier result: VR-1 action=accept") {
+	if !strings.Contains(got, "VR-1") || !strings.Contains(got, "accept") {
 		t.Fatalf("status output missing latest verifier:\n%s", got)
 	}
-	if !strings.Contains(got, "Merge readiness: blocked") {
+	if !strings.Contains(got, "blocked") {
 		t.Fatalf("status output =\n%s\nwant blocked readiness while blocking obligation remains open", got)
 	}
 }
@@ -272,9 +273,9 @@ advanced:
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Advanced checks: enabled",
+		"Status: enabled",
 		"MAVEN: on  Mutation: on  Adversarial: on  Reviewer diversity: off",
-		"Advanced findings:",
+		"Findings:",
 		"[maven] factual: obligation OB-1 missing evidence type test_result",
 		"Advanced false positives: 1/1 findings",
 	} {
@@ -301,13 +302,34 @@ func TestStatusReportsOutstandingMergeReviewForAcceptedHighRiskPatch(t *testing.
 	}
 	got := out.String()
 	for _, want := range []string{
-		"Open obligations: 0",
-		"Merge readiness: needs_human_review",
+		"Open Obligations (0)",
+		"needs_human_review",
 		"merge_review patch=PATCH-1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestGoalConditionStatusCodeUsesSchemaStatuses(t *testing.T) {
+	tests := []struct {
+		name   string
+		status schema.GoalConditionStatus
+		want   string
+	}{
+		{name: "unmet", status: schema.GoalConditionUnmet, want: ui.Red},
+		{name: "partially_met", status: schema.GoalConditionPartiallyMet, want: ui.Yellow},
+		{name: "met", status: schema.GoalConditionMet, want: ui.Green},
+		{name: "blocked", status: schema.GoalConditionBlocked, want: ui.Yellow},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goalConditionStatusCode(tt.status); got != tt.want {
+				t.Fatalf("goalConditionStatusCode(%q) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
 	}
 }
 

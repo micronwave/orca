@@ -164,14 +164,15 @@ func splitDetail(detail string) []string {
 // ─── Live renderer ────────────────────────────────────────────────────────────
 
 type liveRenderer struct {
-	mu            sync.Mutex
-	out           io.Writer
-	state         DashboardState
-	currentStep   int
-	totalSteps    int
-	lastLine      string
-	hasHeader     bool
-	isInteractive bool
+	mu             sync.Mutex
+	out            io.Writer
+	state          DashboardState
+	currentStep    int
+	totalSteps     int
+	lastLine       string
+	lastLineStep   int // step number of lastLine, used for in-place replacement
+	hasHeader      bool
+	isInteractive  bool
 }
 
 // newLiveRenderer returns a Notifier that writes ANSI-colored lifecycle lines
@@ -217,11 +218,12 @@ func (r *liveRenderer) Step(_ context.Context, ev UIEvent) {
 
 	line := fmt.Sprintf("%s %s", icon, msg)
 	if step > 0 {
-		line = fmt.Sprintf("[%d/%d] %s %-30s %s", r.currentStep, r.totalSteps, icon, msg, status)
+		counter := r.color(ui.Black+ui.Bold, fmt.Sprintf("[%d/%d]", r.currentStep, r.totalSteps))
+		line = fmt.Sprintf("%s %s %-30s %s", counter, icon, msg, status)
 	}
 
 	if r.isInteractive {
-		if step > 0 && r.lastLine != "" && r.currentStep == r.lastStep(r.lastLine) {
+		if step > 0 && r.lastLine != "" && r.currentStep == r.lastLineStep {
 			ui.ReplaceLine(r.out, line)
 		} else {
 			if r.lastLine != "" {
@@ -234,8 +236,10 @@ func (r *liveRenderer) Step(_ context.Context, ev UIEvent) {
 	}
 	if step > 0 {
 		r.lastLine = line
+		r.lastLineStep = r.currentStep
 	} else {
 		r.lastLine = ""
+		r.lastLineStep = 0
 	}
 
 	// Expand verifier failures so the user sees each one immediately.
@@ -268,17 +272,18 @@ func (r *liveRenderer) Step(_ context.Context, ev UIEvent) {
 	}
 
 	if ev.Kind == EventKindCapsuleWaitingForGate {
-		fmt.Fprintf(r.out, "\n  %s ENTER to approve · 'reject' to reject · 'cancel' to abort\n", r.color(ui.Yellow, ui.IconStep))
+		prompt := r.color(ui.Yellow, "ENTER to approve · 'reject' to reject · 'cancel' to abort")
+		fmt.Fprintf(r.out, "\n  %s %s\n", r.color(ui.Yellow, ui.IconStep), prompt)
 		r.lastLine = ""
 	}
 
 	if ev.Kind == EventKindMergeReady {
-		fmt.Fprintf(r.out, "\n  %s\n", r.color(ui.Green, "✓ Patch verified and ready to merge."))
+		fmt.Fprintf(r.out, "\n  %s\n", r.color(ui.Green, ui.IconCheck+" Patch verified and ready to merge."))
 		r.lastLine = ""
 	}
 
 	if ev.Kind == EventKindMergeApplied {
-		fmt.Fprintf(r.out, "\n%s\n", ui.Success("Changes applied to working directory."))
+		fmt.Fprintf(r.out, "\n%s %s\n", r.color(ui.Green, ui.IconCheck), r.color(ui.Green, "Changes applied to working directory."))
 		r.lastLine = ""
 	}
 }
@@ -337,16 +342,6 @@ func (r *liveRenderer) color(code, s string) string {
 		return s
 	}
 	return code + s + ui.Reset
-}
-
-func (r *liveRenderer) lastStep(line string) int {
-	if len(line) < 2 {
-		return 0
-	}
-	if line[0] == '[' {
-		return int(line[1] - '0')
-	}
-	return 0
 }
 
 // liveRendererState returns the current DashboardState from a liveRenderer.

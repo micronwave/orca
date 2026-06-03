@@ -134,14 +134,14 @@ func runInit(args []string) (err error) {
 		return fmt.Errorf("orca init: write config.yaml: %w", err)
 	}
 
-	fmt.Printf("\n%s\n\n", ui.Success("Orca initialized successfully!"))
-	fmt.Println("Created project structure:")
+	fmt.Printf("\n%s %s\n\n", ui.Colorize(os.Stdout, ui.Green, ui.IconCheck), ui.Colorize(os.Stdout, ui.Green, "Orca initialized successfully!"))
+	fmt.Printf("%s\n", ui.Colorize(os.Stdout, ui.Bold, "Created project structure:"))
 	fmt.Printf("%s/\n", ui.Colorize(os.Stdout, ui.OrcaBlue, ui.IconFolder+" "+filepath.Base(*orcaDir)))
 	fmt.Printf("  %s %s config.yaml  %s\n", ui.TreePrefix(false), ui.IconFile, ui.Colorize(os.Stdout, ui.Black+ui.Bold, "(Edit this to add verifiers)"))
 	fmt.Printf("  %s %s events.log\n", ui.TreePrefix(false), ui.IconFile)
 	fmt.Printf("  %s %s capsules/\n", ui.TreePrefix(true), ui.IconFolder)
 
-	fmt.Printf("\n%s Next steps:\n", ui.IconStep)
+	fmt.Printf("\n%s %s\n", ui.IconStep, ui.Colorize(os.Stdout, ui.Bold, "Next steps:"))
 	fmt.Printf("  1. Review and edit %s\n", ui.Colorize(os.Stdout, ui.Bold, configPath))
 	fmt.Printf("  2. Run %s to verify your environment\n", ui.Colorize(os.Stdout, ui.Cyan, "orca doctor"))
 
@@ -1685,21 +1685,87 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("orca status: compute budget ROI: %w", err)
 	}
 
-	fmt.Fprintf(out, "Active goal: %s\n", goal.GoalID)
-	fmt.Fprintf(out, "Intent: %s\n", goal.OriginalIntent)
-	fmt.Fprintf(out, "Status: %s\n", goal.Status)
-	fmt.Fprintln(out, "Conditions:")
+	prURL, err := rt.latestPRURLForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	ciRecord, err := rt.latestCIStatusForGoal(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+	falsePositives, totalFindings, err := rt.computeAdvancedFalsePositiveRate(ctx, goal.GoalID)
+	if err != nil {
+		return err
+	}
+
+	section := func(name string) {
+		fmt.Fprintln(out, ui.Colorize(out, ui.Bold, name))
+	}
+	lf := func(label string) string {
+		return ui.Colorize(out, ui.Black+ui.Bold, fmt.Sprintf("  %-16s", label))
+	}
+
+	fmt.Fprintf(out, "%s %s\n", ui.IconOrca, ui.Colorize(out, ui.OrcaBlue+ui.Bold, "Orca  status  --raw"))
+	fmt.Fprintln(out, ui.Colorize(out, ui.OrcaBlue, "==================="))
+	fmt.Fprintln(out)
+
+	section("Goal")
+	fmt.Fprintf(out, "%s%s\n", lf("ID:"), ui.Colorize(out, ui.Cyan, goal.GoalID))
+	fmt.Fprintf(out, "%s%s\n", lf("Intent:"), goal.OriginalIntent)
+	fmt.Fprintf(out, "%s%s\n", lf("Status:"), goalStatusColor(out, string(goal.Status)))
+	fmt.Fprintf(out, "%s%s\n", lf("Merge:"), mergeReadinessColor(out, readiness))
+	fmt.Fprintln(out)
+
+	section(fmt.Sprintf("Conditions (%d)", len(goal.GoalConditions)))
+	if len(goal.GoalConditions) == 0 {
+		fmt.Fprintln(out, "  (none)")
+	}
 	for _, condition := range goal.GoalConditions {
-		fmt.Fprintf(out, "- %s [%s]: %s\n", condition.ID, condition.Status, condition.Description)
+		fmt.Fprintf(out, "  %s [%s]: %s\n",
+			ui.Colorize(out, ui.Cyan, condition.ID),
+			ui.Colorize(out, goalConditionStatusCode(condition.Status), string(condition.Status)),
+			condition.Description,
+		)
 	}
-	fmt.Fprintf(out, "Open obligations: %d\n", len(obligations))
+	fmt.Fprintln(out)
+
 	sort.Slice(obligations, func(i, j int) bool { return obligations[i].ObligationID < obligations[j].ObligationID })
-	for _, obligation := range obligations {
-		fmt.Fprintf(out, "- %s [%s]\n", obligation.ObligationID, obligation.RiskLevel)
+	section(fmt.Sprintf("Open Obligations (%d)", len(obligations)))
+	if len(obligations) == 0 {
+		fmt.Fprintln(out, "  (none)")
 	}
-	fmt.Fprintf(out, "Active capsules: %d\n", len(capsules))
+	for _, obligation := range obligations {
+		riskColor := ui.Cyan
+		switch strings.ToLower(string(obligation.RiskLevel)) {
+		case "high":
+			riskColor = ui.Red
+		case "medium":
+			riskColor = ui.Yellow
+		}
+		fmt.Fprintf(out, "  %s [%s]\n",
+			ui.Colorize(out, ui.Cyan, obligation.ObligationID),
+			ui.Colorize(out, riskColor, string(obligation.RiskLevel)),
+		)
+	}
+	fmt.Fprintln(out)
+
+	section(fmt.Sprintf("Active Capsules (%d)", len(capsules)))
+	if len(capsules) == 0 {
+		fmt.Fprintln(out, "  (none)")
+	}
 	for _, capsule := range capsules {
-		fmt.Fprintf(out, "- %s [%s] agent=%s", capsule.CapsuleID, capsule.State, capsule.Agent)
+		stateColor := ui.Cyan
+		switch capsule.State {
+		case "completed":
+			stateColor = ui.Green
+		case "failed":
+			stateColor = ui.Red
+		}
+		fmt.Fprintf(out, "  %s [%s] agent=%s",
+			ui.Colorize(out, ui.Cyan, capsule.CapsuleID),
+			ui.Colorize(out, stateColor, string(capsule.State)),
+			capsule.Agent,
+		)
 		runtimeStatus, err := rt.store.LoadLatestRuntimeStatus(ctx, capsule.CapsuleID)
 		if err == nil && runtimeStatus != nil {
 			fmt.Fprintf(out, " runtime_status=%s", runtimeStatus.Status)
@@ -1709,90 +1775,104 @@ func (rt *runtime) printStatus(ctx context.Context, out io.Writer) error {
 		}
 		fmt.Fprintln(out)
 	}
+	fmt.Fprintln(out)
+
+	section("Verifier")
 	if latestVerifier == nil {
-		fmt.Fprintln(out, "Last verifier result: none")
+		fmt.Fprintln(out, "  Last result:      none")
 	} else {
-		fmt.Fprintf(out, "Last verifier result: %s action=%s", latestVerifier.VerifierResultID, latestVerifier.RecommendedAction)
-		if latestVerifier.RecommendationRationale != "" {
-			fmt.Fprintf(out, " summary=%q", latestVerifier.RecommendationRationale)
+		actionColor := ui.Cyan
+		if latestVerifier.RecommendedAction == "accept" {
+			actionColor = ui.Green
+		} else if latestVerifier.RecommendedAction == "human_review" || latestVerifier.RecommendedAction == "reject" {
+			actionColor = ui.Yellow
 		}
-		fmt.Fprintln(out)
+		fmt.Fprintf(out, "%s%s\n", lf("Result:"), ui.Colorize(out, ui.Cyan, latestVerifier.VerifierResultID))
+		fmt.Fprintf(out, "%s%s\n", lf("Action:"), ui.Colorize(out, actionColor, string(latestVerifier.RecommendedAction)))
+		if latestVerifier.RecommendationRationale != "" {
+			fmt.Fprintf(out, "%s%q\n", lf("Summary:"), latestVerifier.RecommendationRationale)
+		}
 		if latestVerifier.GreenContract != nil && latestVerifier.GreenContract.ObservedGreenLevel != "" {
-			fmt.Fprintf(out, "Green level: %s", latestVerifier.GreenContract.ObservedGreenLevel)
+			fmt.Fprintf(out, "%s%s", lf("Green level:"), ui.Colorize(out, ui.Green, string(latestVerifier.GreenContract.ObservedGreenLevel)))
 			if latestVerifier.GreenContract.MergeReadyBlocker != "" {
-				fmt.Fprintf(out, " (blocked: %s)", latestVerifier.GreenContract.MergeReadyBlocker)
+				fmt.Fprintf(out, " %s", ui.Colorize(out, ui.Yellow, "(blocked: "+latestVerifier.GreenContract.MergeReadyBlocker+")"))
 			}
 			fmt.Fprintln(out)
 		}
 	}
+	fmt.Fprintln(out)
+
 	writeAdvancedStatus(out, rt.cfg.Advanced, latestVerifier)
-	falsePositives, totalFindings, err := rt.computeAdvancedFalsePositiveRate(ctx, goal.GoalID)
-	if err != nil {
-		return err
-	}
 	if totalFindings > 0 {
-		fmt.Fprintf(out, "Advanced false positives: %d/%d findings\n", falsePositives, totalFindings)
+		fmt.Fprintf(out, "  Advanced false positives: %d/%d findings\n", falsePositives, totalFindings)
 	}
-	fmt.Fprintf(out, "Merge readiness: %s\n", readiness)
-	fmt.Fprintln(out, "Blocking human decisions:")
+	fmt.Fprintln(out)
+
+	section("Blocking Human Decisions")
 	if len(humanDecisions) == 0 {
-		fmt.Fprintln(out, "- none")
+		fmt.Fprintln(out, "  none")
 	} else {
 		for _, decision := range humanDecisions {
-			fmt.Fprintf(out, "- %s\n", decision)
+			fmt.Fprintf(out, "  %s %s\n", ui.Colorize(out, ui.Yellow, ui.IconWarning), decision)
 		}
 	}
-	fmt.Fprintln(out, "Budget spent per obligation:")
+	fmt.Fprintln(out)
+
+	section("Budget")
 	writeBudgetByObligation(out, budgetRecords)
-	fmt.Fprintf(out, "Budget totals: tokens=%d wall_time_seconds=%.2f coordination_cost=%d value_per_1k_tokens=%.2f\n",
+	fmt.Fprintf(out, "  Totals: tokens=%d wall_time_seconds=%.2f coordination_cost=%d value_per_1k_tokens=%.2f\n",
 		roi.TotalTokensSpent,
 		roi.TotalWallTimeSeconds,
 		roi.TotalCoordinationCost,
 		roi.VerifiedValuePer1KTokens,
 	)
+	fmt.Fprintln(out)
 
-	// Phase 5 indicators
+	section("Infrastructure")
 	mcpAddr := rt.cfg.MCP.Listen
 	if mcpAddr == "" {
 		mcpAddr = "127.0.0.1:7070"
 	}
 	if rt.cfg.MCP.Enabled {
-		fmt.Fprintf(out, "MCP server: running on %s\n", mcpAddr)
+		fmt.Fprintf(out, "%s%s\n", lf("MCP server:"), ui.Colorize(out, ui.Green, "running on "+mcpAddr))
 	} else {
-		fmt.Fprintln(out, "MCP server: disabled")
+		fmt.Fprintf(out, "%s%s\n", lf("MCP server:"), ui.Colorize(out, ui.Black+ui.Bold, "disabled"))
 	}
 	if rt.cfg.Remote.Enabled {
-		fmt.Fprintf(out, "Remote execution: enabled (host=%s)\n", rt.cfg.Remote.Host)
+		fmt.Fprintf(out, "%s%s\n", lf("Remote:"), ui.Colorize(out, ui.Green, "enabled (host="+rt.cfg.Remote.Host+")"))
 	} else {
-		fmt.Fprintln(out, "Remote execution: disabled")
-	}
-	prURL, err := rt.latestPRURLForGoal(ctx, goal.GoalID)
-	if err != nil {
-		return err
+		fmt.Fprintf(out, "%s%s\n", lf("Remote:"), ui.Colorize(out, ui.Black+ui.Bold, "disabled"))
 	}
 	if prURL != "" {
-		fmt.Fprintf(out, "Latest PR: %s\n", prURL)
+		fmt.Fprintf(out, "%s%s\n", lf("Latest PR:"), ui.Colorize(out, ui.Cyan, prURL))
 	} else {
-		fmt.Fprintln(out, "Latest PR: none")
-	}
-	ciRecord, err := rt.latestCIStatusForGoal(ctx, goal.GoalID)
-	if err != nil {
-		return err
+		fmt.Fprintf(out, "%s%s\n", lf("Latest PR:"), ui.Colorize(out, ui.Black+ui.Bold, "none"))
 	}
 	if ciRecord != nil {
-		fmt.Fprintf(out, "CI: provider=%s branch=%s status=%s\n", ciRecord.Provider, ciRecord.Branch, ciRecord.Status)
+		ciColor := ui.Green
+		switch ciRecord.Status {
+		case "failed", "failure":
+			ciColor = ui.Red
+		case "pending", "running":
+			ciColor = ui.Yellow
+		}
+		fmt.Fprintf(out, "%s provider=%s branch=%s status=%s\n",
+			lf("CI:"), ciRecord.Provider, ciRecord.Branch,
+			ui.Colorize(out, ciColor, ciRecord.Status),
+		)
 	} else {
-		fmt.Fprintln(out, "CI: no runs recorded")
+		fmt.Fprintf(out, "%s%s\n", lf("CI:"), ui.Colorize(out, ui.Black+ui.Bold, "no runs recorded"))
 	}
+	fmt.Fprintln(out)
 
-	// Projection token deltas — Phase C §7.
 	reuseRecords, reuseErr := rt.store.LoadProjectionReuseRecordsForGoal(ctx, goal.GoalID)
 	if reuseErr == nil && len(reuseRecords) > 0 {
-		fmt.Fprintf(out, "Projection reuse: %d reuse(s) recorded for goal %s\n", len(reuseRecords), goal.GoalID)
+		section("Projection Reuse")
 		for _, r := range reuseRecords {
 			fmt.Fprintf(out, "  reuse=%s role=%s original=%s tokens_saved=%d\n",
 				r.ReuseID, r.Role, r.OriginalProjectionID, r.TokensSaved)
 		}
+		fmt.Fprintln(out)
 	}
 	rt.writeProjectionTokenDeltas(ctx, out, capsules)
 
@@ -1843,6 +1923,35 @@ func mergeReadinessColor(w io.Writer, readiness string) string {
 		return ui.Colorize(w, ui.Red, readiness)
 	default:
 		return readiness
+	}
+}
+
+// goalStatusColor returns the goal status string colorized by lifecycle phase.
+func goalStatusColor(w io.Writer, status string) string {
+	switch status {
+	case "active", "running", "in_progress":
+		return ui.Colorize(w, ui.Cyan, status)
+	case "blocked":
+		return ui.Colorize(w, ui.Yellow, status)
+	case "complete", "completed":
+		return ui.Colorize(w, ui.Green, status)
+	case "failed", "cancelled":
+		return ui.Colorize(w, ui.Red, status)
+	default:
+		return status
+	}
+}
+
+func goalConditionStatusCode(status schema.GoalConditionStatus) string {
+	switch status {
+	case schema.GoalConditionMet:
+		return ui.Green
+	case schema.GoalConditionPartiallyMet, schema.GoalConditionBlocked:
+		return ui.Yellow
+	case schema.GoalConditionUnmet:
+		return ui.Red
+	default:
+		return ui.Cyan
 	}
 }
 
@@ -1904,24 +2013,31 @@ func (rt *runtime) printStatusConcise(ctx context.Context, out io.Writer) error 
 }
 
 func writeAdvancedStatus(out io.Writer, adv config.AdvancedConfig, latest *schema.VerifierResult) {
-	status := "disabled"
+	fmt.Fprintln(out, ui.Colorize(out, ui.Bold, "Advanced Checks"))
+	statusStr := ui.Colorize(out, ui.Black+ui.Bold, "disabled")
 	if adv.Enabled {
-		status = "enabled"
+		statusStr = ui.Colorize(out, ui.Green, "enabled")
 	}
-	fmt.Fprintf(out, "Advanced checks: %s\n", status)
+	colorOnOff := func(on bool) string {
+		if on {
+			return ui.Colorize(out, ui.Green, "on")
+		}
+		return ui.Colorize(out, ui.Black+ui.Bold, "off")
+	}
+	fmt.Fprintf(out, "  Status: %s\n", statusStr)
 	fmt.Fprintf(out, "  MAVEN: %s  Mutation: %s  Adversarial: %s  Reviewer diversity: %s\n",
-		onOff(adv.Enabled && adv.Maven),
-		onOff(adv.Enabled && adv.Mutation),
-		onOff(adv.Enabled && adv.AdversarialTests),
-		onOff(adv.Enabled && adv.ReviewerDiversity),
+		colorOnOff(adv.Enabled && adv.Maven),
+		colorOnOff(adv.Enabled && adv.Mutation),
+		colorOnOff(adv.Enabled && adv.AdversarialTests),
+		colorOnOff(adv.Enabled && adv.ReviewerDiversity),
 	)
 	findings := advancedWarnings(latest)
 	if len(findings) == 0 {
 		return
 	}
-	fmt.Fprintln(out, "Advanced findings:")
+	fmt.Fprintln(out, "  Findings:")
 	for _, warning := range findings {
-		fmt.Fprintf(out, "  %s\n", warning)
+		fmt.Fprintf(out, "    %s %s\n", ui.Colorize(out, ui.Yellow, ui.IconWarning), warning)
 	}
 }
 
@@ -1942,13 +2058,6 @@ func hasAdvancedPrefix(s string) bool {
 	return strings.HasPrefix(s, "[maven]") ||
 		strings.HasPrefix(s, "[mutation]") ||
 		strings.HasPrefix(s, "[adversarial]")
-}
-
-func onOff(enabled bool) string {
-	if enabled {
-		return "on"
-	}
-	return "off"
 }
 
 func (rt *runtime) computeAdvancedFalsePositiveRate(ctx context.Context, goalID string) (int, int, error) {

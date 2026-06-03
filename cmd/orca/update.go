@@ -49,7 +49,8 @@ func runUpdate(args []string) error {
 		}
 	}()
 
-	fmt.Fprintf(os.Stdout, "%s Rebuilding from %s\n", ui.IconStep, srcRoot)
+	fmt.Fprintf(os.Stdout, "%s %s\n", ui.IconOrca, ui.Colorize(os.Stdout, ui.OrcaBlue+ui.Bold, "Orca  update"))
+	fmt.Fprintf(os.Stdout, "%s Rebuilding from %s\n", ui.IconHammer, ui.Colorize(os.Stdout, ui.Cyan, srcRoot))
 	if err := buildUpdatedBinary(goExe, srcRoot, tmpBinary); err != nil {
 		return fmt.Errorf("orca update: %w", err)
 	}
@@ -60,15 +61,14 @@ func runUpdate(args []string) error {
 	cleanupTmp = false
 
 	if goruntime.GOOS == "windows" {
-		fmt.Fprintf(
-			os.Stdout,
-			"%s\n",
-			ui.Success("orca update staged successfully; the binary will be replaced after this process exits"),
+		fmt.Fprintf(os.Stdout, "%s %s\n",
+			ui.Colorize(os.Stdout, ui.Green, ui.IconCheck),
+			ui.Colorize(os.Stdout, ui.Green, "orca update staged successfully; the binary will be replaced after this process exits"),
 		)
 		return nil
 	}
 
-	fmt.Fprintf(os.Stdout, "%s\n", ui.Success("orca updated successfully"))
+	fmt.Fprintf(os.Stdout, "%s %s\n", ui.Colorize(os.Stdout, ui.Green, ui.IconCheck), ui.Colorize(os.Stdout, ui.Green, "orca updated successfully"))
 	return nil
 }
 

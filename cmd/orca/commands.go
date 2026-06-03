@@ -226,7 +226,7 @@ func printHelp() {
 	fmt.Println(ui.Colorize(os.Stdout, ui.Bold, "Interactive Commands:"))
 	fmt.Printf("  %s%s%s\n",
 		ui.Colorize(os.Stdout, ui.Cyan, "<goal text>"),
-		strings.Repeat(" ", max(0, 22-len("<goal text>"))),
+		strings.Repeat(" ", max(0, 32-len("<goal text>"))),
 		"start a new goal")
 	for _, cmd := range replCommands {
 		nameStr := cmd.Name
