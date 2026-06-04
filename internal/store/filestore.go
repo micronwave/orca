@@ -148,9 +148,19 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 		dirCapsuleRuntime, dirStartupBundles,
 		dirRecoveryLedger, dirRepoStatus,
 	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
-			return nil, fmt.Errorf("store: create dir %s: %w", d, err)
+	var mkWg sync.WaitGroup
+	mkErrs := make([]error, len(dirs))
+	for i, d := range dirs {
+		mkWg.Add(1)
+		go func() {
+			defer mkWg.Done()
+			mkErrs[i] = os.MkdirAll(filepath.Join(root, d), 0o755)
+		}()
+	}
+	mkWg.Wait()
+	for i, err := range mkErrs {
+		if err != nil {
+			return nil, fmt.Errorf("store: create dir %s: %w", dirs[i], err)
 		}
 	}
 	ctx := context.Background()
@@ -179,19 +189,31 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 // startup and populates openOblIdx, condToGoal, and knownGoals.
 // Caller must NOT hold s.mu (called from New before the store is published).
 func (s *FileStore) initOpenObligationsIndex(ctx context.Context) error {
-	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
-	if err != nil {
-		return err
+	var goals []*schema.GoalIR
+	var obligations []*schema.Obligation
+	var errGoals, errObl error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		goals, errGoals = scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
+	}()
+	go func() {
+		defer wg.Done()
+		obligations, errObl = scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
+	}()
+	wg.Wait()
+	if errGoals != nil {
+		return errGoals
+	}
+	if errObl != nil {
+		return errObl
 	}
 	for _, g := range goals {
 		s.knownGoals[g.GoalID] = true
 		for _, c := range g.GoalConditions {
 			s.condToGoal[c.ID] = g.GoalID
 		}
-	}
-	obligations, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
-	if err != nil {
-		return err
 	}
 	for _, o := range obligations {
 		if o.Status == schema.ObligationOpen {
@@ -350,6 +372,8 @@ func readFile[T any](ctx context.Context, path string) (*T, error) {
 
 // scanDir reads every .json file in the absolute directory dir and returns
 // the unmarshaled values. Returns nil slice (not error) if dir is missing.
+// Reads are issued concurrently via a bounded semaphore (16 max in-flight).
+// Result order is unspecified; callers must not rely on directory-listing order.
 func scanDir[T any](ctx context.Context, dir string) ([]*T, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -361,19 +385,31 @@ func scanDir[T any](ctx context.Context, dir string) ([]*T, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: readdir %s: %w", dir, err)
 	}
-	var out []*T
+	paths := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			paths = append(paths, filepath.Join(dir, e.Name()))
 		}
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		v, err := readFile[T](ctx, filepath.Join(dir, e.Name()))
+	}
+	out := make([]*T, len(paths))
+	errs := make([]error, len(paths))
+	const maxConcurrent = 16
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	for i, p := range paths {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i], errs[i] = readFile[T](ctx, p)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, v)
 	}
 	return out, nil
 }

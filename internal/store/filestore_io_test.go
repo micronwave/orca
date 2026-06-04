@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -83,6 +84,34 @@ func TestWriteFile_CompactJSONAndReplayIndented(t *testing.T) {
 	}
 	if string(replay) != "{\n  \"id\": \"A-1\",\n  \"name\": \"artifact\"\n}" {
 		t.Fatalf("replay JSON = %q, want indented JSON", string(replay))
+	}
+}
+
+// TestScanDir_BoundedSemaphoreNoDeadlock verifies that scanDir correctly handles
+// directories with more than the semaphore bound (16) of files without deadlocking,
+// and returns all files.
+func TestScanDir_BoundedSemaphoreNoDeadlock(t *testing.T) {
+	const fileCount = 30
+	dir := t.TempDir()
+	type item struct {
+		ID    string `json:"id"`
+		Value int    `json:"value"`
+	}
+	for i := range fileCount {
+		data, err := json.Marshal(item{ID: fmt.Sprintf("item-%02d", i), Value: i})
+		if err != nil {
+			t.Fatalf("marshal item %d: %v", i, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("item-%02d.json", i)), data, 0o644); err != nil {
+			t.Fatalf("WriteFile item %d: %v", i, err)
+		}
+	}
+	got, err := scanDir[item](context.Background(), dir)
+	if err != nil {
+		t.Fatalf("scanDir: %v", err)
+	}
+	if len(got) != fileCount {
+		t.Fatalf("got %d items, want %d", len(got), fileCount)
 	}
 }
 
