@@ -22,14 +22,40 @@ func TestSerializeExecutorProjection(t *testing.T) {
 	}
 	for _, want := range []string{
 		"# Orca Executor Briefing",
-		"Context Projection ID: `CTX-1`",
+		"Freshness Base: `SNAP-1`",
 		"goal_conditions",
+		"obligations",
 		"obligations_addressed",
 		"evidence_paths",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("serialized markdown missing %q\n%s", want, md)
 		}
+	}
+	for _, absent := range []string{
+		"Context Projection ID",
+		"Token Budget",
+		"Included Sections",
+		"Omitted Sections",
+		"Source Artifact IDs",
+	} {
+		if strings.Contains(md, absent) {
+			t.Fatalf("serialized markdown should not contain %q\n%s", absent, md)
+		}
+	}
+}
+
+func TestSerializeExecutorProjectionNoFreshnessBase(t *testing.T) {
+	md, err := SerializeExecutorProjection(&schema.ContextProjection{
+		ContextProjectionID: "CTX-2",
+		Role:                schema.ProjectionRoleExecutor,
+		FreshnessBase:       "",
+	})
+	if err != nil {
+		t.Fatalf("SerializeExecutorProjection: %v", err)
+	}
+	if strings.Contains(md, "## Projection") {
+		t.Fatalf("## Projection section should be omitted when FreshnessBase is empty\n%s", md)
 	}
 }
 
@@ -47,14 +73,15 @@ func TestSerializeExecutorProjectionAcceptsReviewerRole(t *testing.T) {
 	md, err := SerializeExecutorProjection(&schema.ContextProjection{
 		ContextProjectionID: "CTX-reviewer",
 		Role:                schema.ProjectionRoleReviewer,
-		IncludedSections:    []string{"role contract: review the implementer output"},
+		FreshnessBase:       "SNAP-r1",
 	})
 	if err != nil {
 		t.Fatalf("SerializeExecutorProjection reviewer: %v", err)
 	}
 	for _, want := range []string{
 		"# Orca Reviewer Briefing",
-		"review the implementer output",
+		"Freshness Base: `SNAP-r1`",
+		"obligations_addressed",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("serialized reviewer markdown missing %q\n%s", want, md)

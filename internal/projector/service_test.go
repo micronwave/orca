@@ -33,7 +33,7 @@ func TestCompileExecutor_handlesNoSnapshotAndBudgetOmissions(t *testing.T) {
 		ObligationIDs:      []string{obligation},
 		AllowedPaths:       []string{`internal\projector`},
 		RequiredOutputs:    []string{"patch.diff", "evidence.json"},
-		Budget:             schema.CapsuleBudget{MaxTokens: 4, MaxWallTimeSeconds: 120, MaxRetries: 2},
+		Budget:             schema.CapsuleBudget{MaxTokens: 10, MaxWallTimeSeconds: 120, MaxRetries: 2},
 		State:              schema.CapsuleStatePending,
 		TopologyDecisionID: "DEC-unused",
 	}); err != nil {
@@ -81,8 +81,8 @@ func TestCompileExecutor_handlesNoSnapshotAndBudgetOmissions(t *testing.T) {
 	if projection.FreshnessBase != "" {
 		t.Fatalf("FreshnessBase = %q, want empty for no-snapshot case", projection.FreshnessBase)
 	}
-	if projection.TokenBudget != 2 {
-		t.Fatalf("TokenBudget = %d, want 2", projection.TokenBudget)
+	if projection.TokenBudget != 7 {
+		t.Fatalf("TokenBudget = %d, want 7 (int(10 * 0.70))", projection.TokenBudget)
 	}
 	if len(projection.OmittedSections) == 0 {
 		t.Fatal("OmittedSections is empty, want least-important sections omitted under tight budget")
@@ -905,6 +905,58 @@ func TestCompileExecutor_equalScoreHigherConfidenceFirst(t *testing.T) {
 	lowIdx := strings.Index(claimsSection, "CL-a-low-confidence")
 	if highIdx >= lowIdx {
 		t.Fatalf("higher-confidence claim (pos %d) must appear before lower-confidence claim (pos %d)", highIdx, lowIdx)
+	}
+}
+
+// TestBudgetMath_seventyPercentFraction verifies that TokenBudget is 70% of
+// MaxTokens, not 50%.
+func TestBudgetMath_seventyPercentFraction(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-budgetfrac"
+		conditionID = "GC-budgetfrac"
+		obligation  = "OB-budgetfrac"
+		capsuleID   = "CAP-budgetfrac"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		Budget:        schema.CapsuleBudget{MaxTokens: 100},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	projection, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if projection.TokenBudget != 70 {
+		t.Fatalf("TokenBudget = %d, want 70 (70%% of 100)", projection.TokenBudget)
+	}
+}
+
+// TestEnforceProjectionBudget_bytesPerTokenIsThree verifies that the byte limit
+// is tokenBudget*3. Content of 34 bytes exceeds limit=30 (tokenBudget=10 * 3)
+// but would fit within the old limit=40 (tokenBudget * 4), so an omission must
+// occur.
+func TestEnforceProjectionBudget_bytesPerTokenIsThree(t *testing.T) {
+	t.Parallel()
+
+	const tokenBudget = 10
+	// projectionBytes = len(text)+1 (separator). text=34 → bytes=35 > limit=30.
+	// With the old multiplier of 4: limit=40 → no omission.
+	sections := []projectionSection{{key: "required", text: strings.Repeat("x", 34)}}
+	_, omitted := enforceProjectionBudget(sections, tokenBudget)
+	if len(omitted) == 0 {
+		t.Fatal("expected content_truncated when bytes exceed tokenBudget*3; got no omissions")
+	}
+	if omitted[0].key != "content_truncated" {
+		t.Fatalf("omission key = %q, want content_truncated", omitted[0].key)
 	}
 }
 
