@@ -939,6 +939,132 @@ func TestReadAfter_SeekIndex_SeekMatchesFullScan(t *testing.T) {
 	}
 }
 
+// TestFileLog_LastEventForGoal covers the backward-scan O(1) path.
+func TestFileLog_LastEventForGoal(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty log returns false", func(t *testing.T) {
+		l := openLog(t)
+		_, ok, err := l.LastEventForGoal(ctx, "G-1")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ok {
+			t.Fatal("ok = true, want false for empty log")
+		}
+	})
+
+	t.Run("single event matches", func(t *testing.T) {
+		l := openLog(t)
+		appended := append1(t, l, schema.EventGoalCreated, "G-1")
+		got, ok, err := l.LastEventForGoal(ctx, "G-1")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if got.SequenceNum != appended.SequenceNum {
+			t.Fatalf("SequenceNum = %d, want %d", got.SequenceNum, appended.SequenceNum)
+		}
+	})
+
+	t.Run("single event wrong goal returns false", func(t *testing.T) {
+		l := openLog(t)
+		append1(t, l, schema.EventGoalCreated, "G-1")
+		_, ok, err := l.LastEventForGoal(ctx, "G-2")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ok {
+			t.Fatal("ok = true, want false for non-matching goal")
+		}
+	})
+
+	t.Run("interleaved goals returns last event for queried goal", func(t *testing.T) {
+		l := openLog(t)
+		// seq 1: G-A, seq 2: G-B, seq 3: G-A, seq 4: G-B, seq 5: G-A
+		append1(t, l, schema.EventGoalCreated, "G-A")
+		append1(t, l, schema.EventGoalCreated, "G-B")
+		append1(t, l, schema.EventObligationCreated, "G-A")
+		append1(t, l, schema.EventObligationCreated, "G-B")
+		last := append1(t, l, schema.EventCapsuleCreated, "G-A")
+
+		got, ok, err := l.LastEventForGoal(ctx, "G-A")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if got.SequenceNum != last.SequenceNum {
+			t.Fatalf("SequenceNum = %d, want %d (last G-A event)", got.SequenceNum, last.SequenceNum)
+		}
+		if got.GoalID != "G-A" {
+			t.Fatalf("GoalID = %q, want %q", got.GoalID, "G-A")
+		}
+	})
+
+	t.Run("rejects malformed indexed line", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.log")
+		l := openLogAt(t, path)
+		append1(t, l, schema.EventGoalCreated, "G-1")
+		append1(t, l, schema.EventObligationCreated, "G-1")
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		lines := strings.Split(string(data), "\n")
+		if len(lines) < 3 || lines[1] == "" {
+			t.Fatalf("seeded log has unexpected shape: %q", string(data))
+		}
+		lines[1] = "!" + lines[1][1:]
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+			t.Fatalf("WriteFile corrupt line: %v", err)
+		}
+
+		if _, ok, err := l.LastEventForGoal(ctx, "G-1"); err == nil || ok {
+			t.Fatalf("LastEventForGoal malformed line = (%v, %v), want error", ok, err)
+		}
+	})
+
+	t.Run("rejects out-of-order indexed sequence", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.log")
+		l := openLogAt(t, path)
+		append1(t, l, schema.EventGoalCreated, "G-1")
+		append1(t, l, schema.EventObligationCreated, "G-1")
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		lines := strings.Split(string(data), "\n")
+		if len(lines) < 3 || lines[1] == "" {
+			t.Fatalf("seeded log has unexpected shape: %q", string(data))
+		}
+		var bad schema.Event
+		if err := json.Unmarshal([]byte(lines[1]), &bad); err != nil {
+			t.Fatalf("Unmarshal line: %v", err)
+		}
+		bad.SequenceNum = 99
+		encoded, err := json.Marshal(bad)
+		if err != nil {
+			t.Fatalf("Marshal line: %v", err)
+		}
+		lines[1] = string(encoded)
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+			t.Fatalf("WriteFile out-of-order line: %v", err)
+		}
+
+		if _, ok, err := l.LastEventForGoal(ctx, "G-1"); err == nil || ok {
+			t.Fatalf("LastEventForGoal out-of-order line = (%v, %v), want error", ok, err)
+		}
+	})
+}
+
 // TestReadAfter_SeekIndex_ReadByType verifies that ReadByType also benefits
 // from the offset index when afterSeq > 0.
 func TestReadAfter_SeekIndex_ReadByType(t *testing.T) {

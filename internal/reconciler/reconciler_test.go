@@ -2734,3 +2734,212 @@ func TestErrNoActiveGoal_isCheckable(t *testing.T) {
 		t.Fatalf("errors.Is(err, ErrNoActiveGoal) = false; err = %v", err)
 	}
 }
+
+// TestDecisionInvalidations_AfterSeqCursor verifies that decision events
+// appended after the snapshot cursor are not missed and that prior decisions
+// (already processed before the snapshot) are skipped.
+func TestDecisionInvalidations_AfterSeqCursor(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "DECINVALSEQ",
+		evidenceIDs:  []string{"EV-DECINVALSEQ"},
+		saveEvidence: true,
+	})
+
+	// A verified claim that a pre-snapshot decision has already invalidated —
+	// it is already marked invalidated in the store. We simulate the
+	// "pre-snapshot decision already processed" state by saving the claim as
+	// invalidated so we can confirm the post-snapshot decision is still applied.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVALSEQ-OLD",
+		Text:            "old claim already invalidated",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimInvalidated,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+
+	// A verified claim that a NEW (post-snapshot) decision should invalidate.
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVALSEQ-NEW",
+		Text:            "new claim to be invalidated by post-snapshot decision",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+
+	// Snapshot capturing events up to the current log position. The decision
+	// event below will be appended after this snapshot, so afterSeq should
+	// include it on the next reconcile.
+	snapEvents, err := env.log.ReadAfter(env.ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadAfter for snap position: %v", err)
+	}
+	snapSeq := int64(len(snapEvents))
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-DECINVALSEQ",
+		GoalID:      ids.goalID,
+		EventID:     "EVT-DECINVALSEQ",
+		SequenceNum: snapSeq,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	// Decision appended AFTER the snapshot — must be picked up by decisionInvalidations.
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID:  "DEC-DECINVALSEQ-POST",
+		Context:     "claim_invalidation",
+		Decision:    "invalidate post-snapshot claim",
+		Rationale:   "refactor removed the invariant",
+		MadeBy:      "human",
+		RelatedIDs:  []string{ids.goalID},
+		Invalidates: []string{"CL-DECINVALSEQ-NEW"},
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision post-snapshot: %v", err)
+	}
+
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// The new claim must be invalidated by the post-snapshot decision.
+	newClaim, err := env.st.LoadClaim(env.ctx, "CL-DECINVALSEQ-NEW")
+	if err != nil {
+		t.Fatalf("LoadClaim new: %v", err)
+	}
+	if newClaim.Status != schema.ClaimInvalidated {
+		t.Fatalf("new claim status = %s, want invalidated", newClaim.Status)
+	}
+}
+
+// TestDecisionInvalidations_NoSnapshotScansFromStart verifies that when no
+// snapshot exists (first reconcile), afterSeq=0 and all decisions are scanned.
+func TestDecisionInvalidations_NoSnapshotScansFromStart(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "DECINVALNOSNA",
+		evidenceIDs:  []string{"EV-DECINVALNOSNA"},
+		saveEvidence: true,
+	})
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVALNOSNA",
+		Text:            "claim to invalidate on first reconcile",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID:  "DEC-DECINVALNOSNA",
+		Context:     "claim_invalidation",
+		Decision:    "invalidate",
+		Rationale:   "first reconcile, no snapshot yet",
+		MadeBy:      "human",
+		RelatedIDs:  []string{ids.goalID},
+		Invalidates: []string{"CL-DECINVALNOSNA"},
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision: %v", err)
+	}
+
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	claim, err := env.st.LoadClaim(env.ctx, "CL-DECINVALNOSNA")
+	if err != nil {
+		t.Fatalf("LoadClaim: %v", err)
+	}
+	if claim.Status != schema.ClaimInvalidated {
+		t.Fatalf("claim status = %s, want invalidated", claim.Status)
+	}
+}
+
+// TestDecisionInvalidations_CursorAdvancesAcrossRounds verifies that the
+// snapshot sequence saved by one reconcile round becomes the durable cursor
+// for the next round, so prior decision invalidations are not re-scanned.
+func TestDecisionInvalidations_CursorAdvancesAcrossRounds(t *testing.T) {
+	env := newTestEnv(t)
+	ids := saveReconcileScenario(t, env, scenarioOptions{
+		suffix:       "DECINVALROUND",
+		evidenceIDs:  []string{"EV-DECINVALROUND"},
+		saveEvidence: true,
+	})
+
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVALROUND-OLD",
+		Text:            "claim invalidated in the first round",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim old: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID:  "DEC-DECINVALROUND-OLD",
+		Context:     "claim_invalidation",
+		Decision:    "invalidate old claim",
+		Rationale:   "first round",
+		MadeBy:      "human",
+		RelatedIDs:  []string{ids.goalID},
+		Invalidates: []string{"CL-DECINVALROUND-OLD"},
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision old: %v", err)
+	}
+
+	if _, err := New(env.st, env.log, Config{}).Reconcile(env.ctx, ids.patchID); err != nil {
+		t.Fatalf("Reconcile first round: %v", err)
+	}
+
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-DECINVALROUND-NEW",
+		Text:            "claim invalidated in the second round",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: ids.capsuleID,
+		AffectedFiles:   []string{"internal/schema/common.go"},
+		Status:          schema.ClaimVerified,
+		EvidenceIDs:     []string{ids.evidenceID},
+	}); err != nil {
+		t.Fatalf("SaveClaim new: %v", err)
+	}
+	if err := env.st.SaveDecision(env.ctx, &schema.DecisionRecord{
+		DecisionID:  "DEC-DECINVALROUND-NEW",
+		Context:     "claim_invalidation",
+		Decision:    "invalidate new claim",
+		Rationale:   "second round",
+		MadeBy:      "human",
+		RelatedIDs:  []string{ids.goalID},
+		Invalidates: []string{"CL-DECINVALROUND-NEW"},
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveDecision new: %v", err)
+	}
+
+	got, err := New(env.st, env.log, Config{}).decisionInvalidations(env.ctx, ids.goalID)
+	if err != nil {
+		t.Fatalf("decisionInvalidations second round: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("decisionInvalidations second round = %v, want only one new invalidation", got)
+	}
+	if invalidators := got["CL-DECINVALROUND-NEW"]; len(invalidators) != 1 || invalidators[0] != "DEC-DECINVALROUND-NEW" {
+		t.Fatalf("new invalidators = %v, want [DEC-DECINVALROUND-NEW]", invalidators)
+	}
+	if _, exists := got["CL-DECINVALROUND-OLD"]; exists {
+		t.Fatalf("old invalidation reappeared in second round: %v", got)
+	}
+}

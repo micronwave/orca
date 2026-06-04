@@ -407,6 +407,31 @@ func TestObligation_LoadObligationsForCondition(t *testing.T) {
 	}
 }
 
+func TestObligation_LoadAllObligations(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1", "GC-2")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedObligation(t, "OB-2", "GC-1", schema.ObligationSatisfied)
+	e.seedObligation(t, "OB-3", "GC-2", schema.ObligationOpen)
+
+	all, err := e.st.LoadAllObligations(e.ctx)
+	if err != nil {
+		t.Fatalf("LoadAllObligations: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("expected 3 obligations, got %d", len(all))
+	}
+	ids := make(map[string]bool, len(all))
+	for _, o := range all {
+		ids[o.ObligationID] = true
+	}
+	for _, want := range []string{"OB-1", "OB-2", "OB-3"} {
+		if !ids[want] {
+			t.Errorf("missing obligation %s in LoadAllObligations result", want)
+		}
+	}
+}
+
 // ── Execution Capsules ────────────────────────────────────────────────────────
 
 func TestCapsule_SaveLoad(t *testing.T) {
