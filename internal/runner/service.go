@@ -307,6 +307,7 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 			TokensUsed:           output.TokensUsed,
 			WallTimeSeconds:      output.WallTimeSeconds,
 			SupersededClaimIDs:   append([]string(nil), output.ContradictedClaimIDs...),
+			CreatedAt:            time.Now().UTC(),
 		}
 		if patch.Summary == "" {
 			patch.Summary = "capsule output recorded by runner"

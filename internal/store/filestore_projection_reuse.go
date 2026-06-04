@@ -44,6 +44,37 @@ func (s *FileStore) LoadProjectionReuseRecordsForGoal(ctx context.Context, goalI
 	return out, nil
 }
 
+// LoadProjectionByEvidenceHashAndRole returns the most recently created
+// projection of the given role whose EvidenceHash matches the given value,
+// or ErrNotFound when none exist. Human summary projections are excluded.
+// Used by T10 to reuse the evidence section text when the evidence set is unchanged.
+func (s *FileStore) LoadProjectionByEvidenceHashAndRole(ctx context.Context, role schema.ProjectionRole, evidenceHash string) (*schema.ContextProjection, error) {
+	dir, err := projectionDir(role)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	all, err := scanDir[schema.ContextProjection](ctx, filepath.Join(s.root, dir))
+	if err != nil {
+		return nil, fmt.Errorf("store: load projection by evidence hash: %w", err)
+	}
+	var best *schema.ContextProjection
+	for _, p := range all {
+		if p.EvidenceHash == "" || p.EvidenceHash != evidenceHash {
+			continue
+		}
+		if best == nil || p.CreatedAt.After(best.CreatedAt) ||
+			(p.CreatedAt.Equal(best.CreatedAt) && p.ContextProjectionID < best.ContextProjectionID) {
+			best = p
+		}
+	}
+	if best == nil {
+		return nil, ErrNotFound
+	}
+	return best, nil
+}
+
 // LoadProjectionBySourceHashAndRole returns the most recently created
 // executor/reviewer/tester projection whose SourceHash matches the given value,
 // or ErrNotFound when none exist. Human summary projections are excluded.

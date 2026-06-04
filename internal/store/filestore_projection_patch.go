@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/micronwave/orca/internal/schema"
 )
@@ -119,6 +120,9 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 	}
 	if err := validateArtifactID("patch", p.PatchID); err != nil {
 		return err
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

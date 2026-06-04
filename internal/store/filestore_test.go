@@ -701,6 +701,28 @@ func TestPatch_SaveLoad(t *testing.T) {
 	}
 }
 
+func TestPatch_SaveSetsCreatedAtWhenZero(t *testing.T) {
+	e := newEnv(t)
+	e.seedGoal(t, "G-1", "GC-1")
+	e.seedObligation(t, "OB-1", "GC-1", schema.ObligationOpen)
+	e.seedCapsule(t, "CAP-1", "OB-1")
+	if err := e.st.SavePatch(e.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-created-at",
+		CapsuleID:            "CAP-1",
+		ObligationIDsClaimed: []string{"OB-1"},
+		Status:               schema.PatchCandidate,
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	got, err := e.st.LoadPatch(e.ctx, "PATCH-created-at")
+	if err != nil {
+		t.Fatalf("LoadPatch: %v", err)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt is zero; SavePatch must populate it when omitted")
+	}
+}
+
 func TestPatch_SaveEmitsEvent(t *testing.T) {
 	e := newEnv(t)
 	e.seedGoal(t, "G-1", "GC-1")

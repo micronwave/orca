@@ -1,5 +1,7 @@
 package schema
 
+import "time"
+
 // PatchStatus is the lifecycle state of a patch artifact. orca.md §5.5.
 type PatchStatus string
 
@@ -37,6 +39,9 @@ type PatchArtifact struct {
 	// by the runner. The reconciler uses this to mark each listed claim as superseded
 	// (setting SupersededBy) and emit claim_superseded events.
 	SupersededClaimIDs []string `json:"superseded_claim_ids,omitempty"`
+	// CreatedAt is the wall time when the runner saved this patch. Used by the
+	// projector (T12) to select the most recent candidate per obligation.
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // RetryContract describes why a patch cannot merge and what the next capsule

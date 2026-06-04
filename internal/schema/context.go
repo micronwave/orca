@@ -51,6 +51,10 @@ type ContextProjection struct {
 	// ReuseKey is a stable cache key: "{role}|{sourceHash}".
 	// Identical ReuseKey means the projection content is reproducible from cache.
 	ReuseKey string `json:"reuse_key,omitempty"`
+	// EvidenceHash is SHA-256 of sorted(evidenceArtifactIDs) + "|" + FreshnessBase.
+	// Stable when the evidence set is unchanged even if claims change, enabling
+	// evidence sub-section reuse on iterative goals (T10).
+	EvidenceHash string `json:"evidence_hash,omitempty"`
 }
 
 // ProjectionReuseRecord is saved when a previously compiled projection is
