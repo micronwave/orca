@@ -108,7 +108,8 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 
 	sourceHash := computeSourceHash(sourceArtifactIDs, freshnessBase, sectionTexts(filterNonEmpty(sections)))
 	reuseKey := string(role) + "|" + sourceHash
-	tokenBudget := capsule.Budget.MaxTokens / 2
+	const briefingBudgetFraction = 0.70
+	tokenBudget := int(float64(capsule.Budget.MaxTokens) * briefingBudgetFraction)
 	included, omittedRaw := enforceProjectionBudget(sections, tokenBudget)
 	contentHash := computeContentHash(included)
 
@@ -383,7 +384,8 @@ func enforceProjectionBudget(sections []projectionSection, tokenBudget int) ([]s
 	if tokenBudget <= 0 {
 		return sectionTexts(included), nil
 	}
-	limit := tokenBudget * 4
+	const bytesPerToken = 3
+	limit := tokenBudget * bytesPerToken
 	omitted := make([]omittedSectionResult, 0, 3)
 	for projectionBytes(included) > limit {
 		removed := false

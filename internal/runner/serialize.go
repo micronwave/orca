@@ -20,17 +20,19 @@ func SerializeExecutorProjection(p *schema.ContextProjection) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Orca %s Briefing\n\n", projectionRoleTitle(p.Role))
 
-	b.WriteString("## Projection\n")
-	fmt.Fprintf(&b, "- Context Projection ID: `%s`\n", p.ContextProjectionID)
-	fmt.Fprintf(&b, "- Token Budget: `%d`\n", p.TokenBudget)
 	if strings.TrimSpace(p.FreshnessBase) != "" {
+		b.WriteString("## Projection\n")
 		fmt.Fprintf(&b, "- Freshness Base: `%s`\n", p.FreshnessBase)
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 
-	writeSectionList(&b, "Included Sections", p.IncludedSections, "None")
-	writeSectionList(&b, "Omitted Sections", p.OmittedSections, "None")
-	writeSectionList(&b, "Source Artifact IDs", p.SourceArtifactIDs, "None")
+	for _, section := range p.IncludedSections {
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+		b.WriteString(section)
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString("## Required Output Contract\n")
 	b.WriteString("- Return sidecar-equivalent output with these keys:\n")
@@ -65,17 +67,3 @@ func projectionRoleTitle(role schema.ProjectionRole) string {
 	}
 }
 
-func writeSectionList(b *strings.Builder, title string, values []string, empty string) {
-	b.WriteString("## " + title + "\n")
-	if len(values) == 0 {
-		b.WriteString("- " + empty + "\n\n")
-		return
-	}
-	for _, value := range values {
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		b.WriteString("- " + value + "\n")
-	}
-	b.WriteString("\n")
-}
