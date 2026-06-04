@@ -1788,3 +1788,803 @@ func TestSummarizeEvidence_collisionFallsBackToFullID(t *testing.T) {
 		t.Errorf("colliding ID %q must fall back to full form: %q", id2, got)
 	}
 }
+
+// ── T10: Evidence sub-section reuse ─────────────────────────────────────────
+
+// TestT10_evidenceHashSetOnProjection verifies EvidenceHash is non-empty on a
+// compiled projection and is stable across identical evidence + freshness.
+func TestT10_evidenceHashSetOnProjection(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t10-hash"
+		conditionID = "GC-t10-hash"
+		obligation  = "OB-t10-hash"
+		capsuleID   = "CAP-t10-hash"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t10-hash",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	p, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	if p.EvidenceHash == "" {
+		t.Fatal("EvidenceHash must be non-empty on compiled projection")
+	}
+}
+
+// TestT10_evidenceHashStableWhenEvidenceUnchanged verifies that two compilations
+// with identical evidence but different claims produce the same EvidenceHash.
+func TestT10_evidenceHashStableWhenEvidenceUnchanged(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t10-stable"
+		conditionID = "GC-t10-stable"
+		obligation  = "OB-t10-stable"
+		capsuleID   = "CAP-t10-stable"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t10-stable",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./...",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	compiler := New(env.st, config.VerifierConfig{})
+	p1, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("first CompileExecutor: %v", err)
+	}
+
+	// Add a new claim (changes sourceHash but not evidenceHash).
+	if err := env.st.SaveClaim(env.ctx, &schema.ClaimArtifact{
+		ClaimID:         "CL-t10-stable-new",
+		Text:            "new claim after first projection",
+		ClaimType:       schema.ClaimInvariant,
+		SourceCapsuleID: capsuleID,
+		AffectedFiles:   []string{"internal/projector"},
+		Status:          schema.ClaimProposed,
+	}); err != nil {
+		t.Fatalf("SaveClaim: %v", err)
+	}
+
+	p2, err := compiler.CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("second CompileExecutor: %v", err)
+	}
+	if p2.ContextProjectionID == p1.ContextProjectionID {
+		t.Fatal("new claim must cause a new projection (different ID)")
+	}
+	if p1.EvidenceHash == "" || p2.EvidenceHash == "" {
+		t.Fatalf("EvidenceHash must be set on both projections: p1=%q p2=%q", p1.EvidenceHash, p2.EvidenceHash)
+	}
+	if p1.EvidenceHash != p2.EvidenceHash {
+		t.Fatalf("EvidenceHash must be stable when evidence is unchanged: p1=%q p2=%q", p1.EvidenceHash, p2.EvidenceHash)
+	}
+}
+
+// ── T11: Role-based evidence freshness filtering ─────────────────────────────
+
+// TestT11_executorCaps3Evidence verifies that an executor projection retains
+// at most 3 evidence items per obligation, keeping the 3 most recent.
+func TestT11_executorCaps3Evidence(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-exec"
+		conditionID = "GC-t11-exec"
+		obligation  = "OB-t11-exec"
+		capsuleID   = "CAP-t11-exec"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     capsuleID,
+		ObligationIDs: []string{obligation},
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	base := time.Now().UTC()
+	for i, id := range []string{"EV-t11-e1", "EV-t11-e2", "EV-t11-e3", "EV-t11-e4-oldest"} {
+		if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+			EvidenceID: id,
+			Type:       schema.EvidenceTestResult,
+			Source:     "verifier",
+			Command:    "go test ./...",
+			ExitCode:   0,
+			Summary:    id,
+			Supports:   []string{obligation},
+			// e1 is newest, e4-oldest is oldest
+			CreatedAt: base.Add(-time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("SaveEvidence %s: %v", id, err)
+		}
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileExecutor(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("CompileExecutor: %v", err)
+	}
+	// 3 most recent: e1, e2, e3. Oldest (e4-oldest) must be absent.
+	for _, want := range []string{"t11-e1", "t11-e2", "t11-e3"} {
+		if !projectionIncludes(proj, want) {
+			t.Errorf("executor projection missing recent evidence %q: %+v", want, proj.IncludedSections)
+		}
+	}
+	if projectionIncludes(proj, "t11-e4-oldest") {
+		t.Fatal("executor projection must not include 4th evidence item (oldest)")
+	}
+}
+
+// TestT11_reviewerDropsStaleEvidence verifies that reviewer projections exclude
+// evidence validated against a different (older) snapshot than the current one.
+func TestT11_reviewerDropsStaleEvidence(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-rev-stale"
+		conditionID = "GC-t11-rev-stale"
+		obligation  = "OB-t11-rev-stale"
+		implID      = "CAP-t11-rev-impl"
+		reviewerID  = "CAP-t11-rev-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-t11-current",
+		GoalID:      goalID,
+		EventID:     "EVT-t11-current",
+		SequenceNum: 5,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	for _, c := range []schema.ExecutionCapsule{
+		{
+			CapsuleID:     implID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleExecutor,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     reviewerID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleReviewer,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t11-rev",
+		CapsuleID:            implID,
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	// Fresh evidence: validated against the current snapshot.
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID:       "EV-t11-rev-fresh",
+		Type:             schema.EvidenceTestResult,
+		Source:           "verifier",
+		Command:          "go test ./fresh",
+		ExitCode:         0,
+		Supports:         []string{obligation},
+		ValidatedAgainst: "SNAP-t11-current",
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence fresh: %v", err)
+	}
+	// Stale evidence: validated against an old snapshot.
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID:       "EV-t11-rev-stale",
+		Type:             schema.EvidenceTestResult,
+		Source:           "verifier",
+		Command:          "go test ./stale",
+		ExitCode:         0,
+		Supports:         []string{obligation},
+		ValidatedAgainst: "SNAP-t11-old",
+		CreatedAt:        time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("SaveEvidence stale: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "cmd=go test ./fresh") {
+		t.Fatalf("reviewer projection missing fresh evidence: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "cmd=go test ./stale") {
+		t.Fatal("reviewer projection must not include stale evidence (validated against old snapshot)")
+	}
+}
+
+func TestT11_reviewerDropsUnvalidatedEvidenceWhenFreshnessSet(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-rev-unvalidated"
+		conditionID = "GC-t11-rev-unvalidated"
+		obligation  = "OB-t11-rev-unvalidated"
+		implID      = "CAP-t11-rev-unvalidated-impl"
+		reviewerID  = "CAP-t11-rev-unvalidated-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-t11-unvalidated-current",
+		GoalID:      goalID,
+		EventID:     "EVT-t11-unvalidated-current",
+		SequenceNum: 5,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	for _, c := range []schema.ExecutionCapsule{
+		{
+			CapsuleID:     implID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleExecutor,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     reviewerID,
+			ObligationIDs: []string{obligation},
+			Role:          schema.RoleReviewer,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t11-rev-unvalidated",
+		CapsuleID:            implID,
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID:       "EV-t11-rev-unvalidated-fresh",
+		Type:             schema.EvidenceTestResult,
+		Source:           "verifier",
+		Command:          "go test ./fresh",
+		ExitCode:         0,
+		Supports:         []string{obligation},
+		ValidatedAgainst: "SNAP-t11-unvalidated-current",
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence fresh: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-rev-unvalidated-none",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./unvalidated",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence unvalidated: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "cmd=go test ./fresh") {
+		t.Fatalf("reviewer projection missing fresh validated evidence: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "cmd=go test ./unvalidated") {
+		t.Fatal("reviewer projection must not include unvalidated evidence when freshness_base is set")
+	}
+}
+
+func TestT11_reviewerNoCandidatePatchDropsEvidence(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-rev-nopatch"
+		conditionID = "GC-t11-rev-nopatch"
+		obligation  = "OB-t11-rev-nopatch"
+		reviewerID  = "CAP-t11-rev-nopatch-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	if err := env.st.SaveSnapshot(env.ctx, &schema.StateSnapshot{
+		SnapshotID:  "SNAP-t11-nopatch-current",
+		GoalID:      goalID,
+		EventID:     "EVT-t11-nopatch-current",
+		SequenceNum: 5,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := env.st.SaveCapsule(env.ctx, &schema.ExecutionCapsule{
+		CapsuleID:     reviewerID,
+		ObligationIDs: []string{obligation},
+		Role:          schema.RoleReviewer,
+		AllowedPaths:  []string{"internal/projector"},
+		Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+		State:         schema.CapsuleStatePending,
+	}); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID:       "EV-t11-rev-nopatch",
+		Type:             schema.EvidenceTestResult,
+		Source:           "verifier",
+		Command:          "go test ./withoutpatch",
+		ExitCode:         0,
+		Supports:         []string{obligation},
+		ValidatedAgainst: "SNAP-t11-nopatch-current",
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if projectionIncludes(proj, "cmd=go test ./withoutpatch") {
+		t.Fatal("reviewer projection must not include evidence when there is no candidate patch coverage")
+	}
+}
+
+// TestT11_reviewerDropsEvidenceForUncoveredObligation verifies that reviewer
+// projections omit evidence for obligations that have no candidate patch.
+func TestT11_reviewerDropsEvidenceForUncoveredObligation(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-rev-cov"
+		conditionID = "GC-t11-rev-cov"
+		obligation1 = "OB-t11-rv-cov1"
+		obligation2 = "OB-t11-rv-cov2"
+		implID      = "CAP-t11-rv-impl"
+		reviewerID  = "CAP-t11-rv-reviewer"
+	)
+	// Two obligations under one goal.
+	if err := env.st.SaveGoal(env.ctx, &schema.GoalIR{
+		GoalID:         goalID,
+		OriginalIntent: "test reviewer evidence filtering",
+		GoalConditions: []schema.GoalCondition{{
+			ID: conditionID, Description: "filter evidence",
+			EffectiveDescription: "filter evidence", Status: schema.GoalConditionUnmet,
+		}},
+		RiskLevel: schema.RiskLow,
+		CreatedAt: time.Now().UTC(),
+		Status:    schema.GoalStatusActive,
+	}); err != nil {
+		t.Fatalf("SaveGoal: %v", err)
+	}
+	for _, id := range []string{obligation1, obligation2} {
+		if err := env.st.SaveObligation(env.ctx, &schema.Obligation{
+			ObligationID:    id,
+			GoalConditionID: conditionID,
+			Description:     "obligation " + id,
+			RiskLevel:       schema.RiskLow,
+			Status:          schema.ObligationOpen,
+		}); err != nil {
+			t.Fatalf("SaveObligation %s: %v", id, err)
+		}
+	}
+	for _, c := range []schema.ExecutionCapsule{
+		{
+			CapsuleID:     implID,
+			ObligationIDs: []string{obligation1, obligation2},
+			Role:          schema.RoleExecutor,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+		{
+			CapsuleID:     reviewerID,
+			ObligationIDs: []string{obligation1, obligation2},
+			Role:          schema.RoleReviewer,
+			AllowedPaths:  []string{"internal/projector"},
+			Budget:        schema.CapsuleBudget{MaxTokens: 32000},
+			State:         schema.CapsuleStatePending,
+		},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	// Candidate patch only covers obligation1; obligation2 has no patch.
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t11-rv-cov",
+		CapsuleID:            implID,
+		ObligationIDsClaimed: []string{obligation1},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-rv-ob1",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./covered",
+		ExitCode:   0,
+		Supports:   []string{obligation1},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence ob1: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-rv-ob2",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./uncovered",
+		ExitCode:   0,
+		Supports:   []string{obligation2},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence ob2: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "cmd=go test ./covered") {
+		t.Fatalf("reviewer projection missing evidence for covered obligation: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "cmd=go test ./uncovered") {
+		t.Fatal("reviewer projection must not include evidence for obligation with no candidate patch")
+	}
+}
+
+// TestT11_testerDropsLintWhenTestExists verifies that tester projections exclude
+// lint_result evidence when test_result evidence is also present.
+func TestT11_testerDropsLintWhenTestExists(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-tester-lint"
+		conditionID = "GC-t11-tester-lint"
+		obligation  = "OB-t11-tester-lint"
+		implID      = "CAP-t11-tester-impl"
+		testerID    = "CAP-t11-tester"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, c := range []schema.ExecutionCapsule{
+		{CapsuleID: implID, ObligationIDs: []string{obligation}, Role: schema.RoleExecutor, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+		{CapsuleID: testerID, ObligationIDs: []string{obligation}, Role: schema.RoleTester, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t11-tester",
+		CapsuleID:            implID,
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-tester-test",
+		Type:       schema.EvidenceTestResult,
+		Source:     "verifier",
+		Command:    "go test ./testpkg",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence test: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-tester-lint",
+		Type:       schema.EvidenceLintResult,
+		Source:     "verifier",
+		Command:    "go vet ./lintpkg",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence lint: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileTester(env.ctx, testerID)
+	if err != nil {
+		t.Fatalf("CompileTester: %v", err)
+	}
+	if !projectionIncludes(proj, "cmd=go test ./testpkg") {
+		t.Fatalf("tester projection missing test_result evidence: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "cmd=go vet ./lintpkg") {
+		t.Fatal("tester projection must not include lint_result when test_result exists")
+	}
+}
+
+// TestT11_testerKeepsLintWhenNoTestExists verifies that tester projections retain
+// lint_result evidence when no test_result evidence is present.
+func TestT11_testerKeepsLintWhenNoTestExists(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t11-tester-keeplint"
+		conditionID = "GC-t11-tester-keeplint"
+		obligation  = "OB-t11-tester-keeplint"
+		implID      = "CAP-t11-tester-kl-impl"
+		testerID    = "CAP-t11-tester-kl"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, c := range []schema.ExecutionCapsule{
+		{CapsuleID: implID, ObligationIDs: []string{obligation}, Role: schema.RoleExecutor, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+		{CapsuleID: testerID, ObligationIDs: []string{obligation}, Role: schema.RoleTester, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t11-tester-kl",
+		CapsuleID:            implID,
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch: %v", err)
+	}
+	if err := env.st.SaveEvidence(env.ctx, &schema.EvidenceArtifact{
+		EvidenceID: "EV-t11-tester-kl-lint",
+		Type:       schema.EvidenceLintResult,
+		Source:     "verifier",
+		Command:    "go vet ./lintonly",
+		ExitCode:   0,
+		Supports:   []string{obligation},
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveEvidence lint: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileTester(env.ctx, testerID)
+	if err != nil {
+		t.Fatalf("CompileTester: %v", err)
+	}
+	if !projectionIncludes(proj, "cmd=go vet ./lintonly") {
+		t.Fatalf("tester projection must retain lint_result when no test_result exists: %+v", proj.IncludedSections)
+	}
+}
+
+// ── T12: Candidate patch fan-out filtering ───────────────────────────────────
+
+// TestT12_onlyCandidatePatchesIncluded verifies that accepted/rejected patches
+// are excluded from reviewer projections; only candidate patches appear.
+func TestT12_onlyCandidatePatchesIncluded(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t12-status"
+		conditionID = "GC-t12-status"
+		obligation  = "OB-t12-status"
+		implID      = "CAP-t12-status-impl"
+		reviewerID  = "CAP-t12-status-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, c := range []schema.ExecutionCapsule{
+		{CapsuleID: implID, ObligationIDs: []string{obligation}, Role: schema.RoleExecutor, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+		{CapsuleID: reviewerID, ObligationIDs: []string{obligation}, Role: schema.RoleReviewer, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-candidate",
+		CapsuleID:            implID,
+		Summary:              "current candidate patch",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SavePatch candidate: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-accepted",
+		CapsuleID:            implID,
+		Summary:              "previously accepted patch",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchAccepted,
+		CreatedAt:            time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("SavePatch accepted: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "PATCH-t12-candidate") {
+		t.Fatalf("reviewer projection missing candidate patch: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "PATCH-t12-accepted") {
+		t.Fatal("reviewer projection must not include accepted patch (T12: candidate-only)")
+	}
+}
+
+// TestT12_latestCandidatePerObligation verifies that when multiple candidate
+// patches exist for an obligation, only the most recent (by CreatedAt) appears.
+func TestT12_latestCandidatePerObligation(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t12-latest"
+		conditionID = "GC-t12-latest"
+		obligation  = "OB-t12-latest"
+		implID      = "CAP-t12-latest-impl"
+		reviewerID  = "CAP-t12-latest-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, c := range []schema.ExecutionCapsule{
+		{CapsuleID: implID, ObligationIDs: []string{obligation}, Role: schema.RoleExecutor, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+		{CapsuleID: reviewerID, ObligationIDs: []string{obligation}, Role: schema.RoleReviewer, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	base := time.Now().UTC()
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-older",
+		CapsuleID:            implID,
+		Summary:              "older candidate patch",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            base.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("SavePatch older: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-newer",
+		CapsuleID:            implID,
+		Summary:              "newer candidate patch",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            base,
+	}); err != nil {
+		t.Fatalf("SavePatch newer: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "PATCH-t12-newer") {
+		t.Fatalf("reviewer projection missing newer candidate patch: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "PATCH-t12-older") {
+		t.Fatal("reviewer projection must not include older candidate when a newer one exists (T12)")
+	}
+}
+
+func TestT12_latestCandidateTieBreaksByPatchID(t *testing.T) {
+	t.Parallel()
+
+	env := newProjectorEnv(t)
+	const (
+		goalID      = "G-t12-tie"
+		conditionID = "GC-t12-tie"
+		obligation  = "OB-t12-tie"
+		implID      = "CAP-t12-tie-impl"
+		reviewerID  = "CAP-t12-tie-reviewer"
+	)
+	seedGoalScenario(t, env, goalID, conditionID, obligation)
+	for _, c := range []schema.ExecutionCapsule{
+		{CapsuleID: implID, ObligationIDs: []string{obligation}, Role: schema.RoleExecutor, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+		{CapsuleID: reviewerID, ObligationIDs: []string{obligation}, Role: schema.RoleReviewer, AllowedPaths: []string{"internal/projector"}, Budget: schema.CapsuleBudget{MaxTokens: 32000}, State: schema.CapsuleStatePending},
+	} {
+		c := c
+		if err := env.st.SaveCapsule(env.ctx, &c); err != nil {
+			t.Fatalf("SaveCapsule %s: %v", c.CapsuleID, err)
+		}
+	}
+	created := time.Now().UTC()
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-tie-a",
+		CapsuleID:            implID,
+		Summary:              "candidate A",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            created,
+	}); err != nil {
+		t.Fatalf("SavePatch A: %v", err)
+	}
+	if err := env.st.SavePatch(env.ctx, &schema.PatchArtifact{
+		PatchID:              "PATCH-t12-tie-z",
+		CapsuleID:            implID,
+		Summary:              "candidate Z",
+		ObligationIDsClaimed: []string{obligation},
+		Status:               schema.PatchCandidate,
+		CreatedAt:            created,
+	}); err != nil {
+		t.Fatalf("SavePatch Z: %v", err)
+	}
+
+	proj, err := New(env.st, config.VerifierConfig{}).CompileReviewer(env.ctx, reviewerID)
+	if err != nil {
+		t.Fatalf("CompileReviewer: %v", err)
+	}
+	if !projectionIncludes(proj, "PATCH-t12-tie-z") {
+		t.Fatalf("reviewer projection missing tie-break winner PATCH-t12-tie-z: %+v", proj.IncludedSections)
+	}
+	if projectionIncludes(proj, "PATCH-t12-tie-a") {
+		t.Fatal("reviewer projection must not include tie-break loser when timestamps are equal")
+	}
+}

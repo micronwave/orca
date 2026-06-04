@@ -77,14 +77,21 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 	if err != nil {
 		return nil, err
 	}
-	evidenceByObligation, evidenceIDs, err := s.loadEvidenceByObligation(ctx, obligations)
-	if err != nil {
-		return nil, err
-	}
+	// T12: load candidate patches first; used by T11 reviewer/tester evidence filter.
 	patches, patchIDs, err := s.loadPatchesByObligation(ctx, obligations)
 	if err != nil {
 		return nil, err
 	}
+	coveredByPatch := obligationsCoveredByPatches(patches)
+	// T11: apply role-specific evidence freshness filtering.
+	evidenceByObligation, evidenceIDs, err := s.loadEvidenceByObligation(ctx, obligations, role, freshnessBase, coveredByPatch)
+	if err != nil {
+		return nil, err
+	}
+	// T10: compute evidence sub-section hash; reuse stored text when evidence is unchanged.
+	evidenceHash := computeSourceHash(evidenceIDs, freshnessBase, nil)
+	evidenceSectionText := s.cachedEvidenceSectionText(ctx, role, evidenceHash, evidenceByObligation)
+
 	failures, failureIDs, err := s.loadFailures(ctx, capsule.AllowedPaths)
 	if err != nil {
 		return nil, err
@@ -101,7 +108,7 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 		{key: "scope_constraints", text: "scope: " + summarizeScope(capsule)},
 		{key: "required_outputs", text: "required outputs: " + summarizeRequiredOutputs(capsule.RequiredOutputs)},
 		{key: "candidate_patches", text: summarizeCandidatePatches(role, patches)},
-		{key: "prior_evidence", text: "prior evidence: " + summarizeEvidence(evidenceByObligation), removable: true},
+		{key: "prior_evidence", text: evidenceSectionText, removable: true},
 		{key: "claims", text: "claims: " + summarizeClaims(claims, freshnessBase), removable: true},
 		{key: "failure_fingerprints", text: "failure fingerprints: " + summarizeFailures(failures), removable: true},
 	}
@@ -157,6 +164,7 @@ func (s *Compiler) compileAgentProjection(ctx context.Context, capsuleID string,
 		TokensAfter:         tokensAfter,
 		OmittedWithReasons:  omittedWithReasons,
 		ReuseKey:            reuseKey,
+		EvidenceHash:        evidenceHash,
 	}
 	if err := s.store.SaveProjection(ctx, projection); err != nil {
 		return nil, fmt.Errorf("projector: save %s projection %s: %w", role, projection.ContextProjectionID, err)
@@ -245,7 +253,7 @@ func (s *Compiler) CompileHumanSummary(ctx context.Context, capsuleID string) (*
 	if err != nil {
 		return nil, err
 	}
-	_, evidenceIDs, err := s.loadEvidenceByObligation(ctx, obligations)
+	_, evidenceIDs, err := s.loadEvidenceByObligation(ctx, obligations, schema.ProjectionRoleHumanSummary, freshnessBase, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -893,6 +901,9 @@ func (s *Compiler) loadCapsuleBundle(
 func (s *Compiler) loadEvidenceByObligation(
 	ctx context.Context,
 	obligations []*schema.Obligation,
+	role schema.ProjectionRole,
+	freshnessBase string,
+	coveredByPatch map[string]bool,
 ) (map[string][]*schema.EvidenceArtifact, []string, error) {
 	out := make(map[string][]*schema.EvidenceArtifact, len(obligations))
 	seenIDs := make(map[string]bool)
@@ -902,6 +913,8 @@ func (s *Compiler) loadEvidenceByObligation(
 		if err != nil {
 			return nil, nil, fmt.Errorf("projector: load evidence for obligation %s: %w", obligation.ObligationID, err)
 		}
+		// T11: role-specific evidence freshness trim.
+		evidence = applyEvidenceFreshnessFilter(evidence, obligation.ObligationID, role, freshnessBase, coveredByPatch)
 		out[obligation.ObligationID] = evidence
 		for _, artifact := range evidence {
 			if seenIDs[artifact.EvidenceID] {
@@ -912,6 +925,108 @@ func (s *Compiler) loadEvidenceByObligation(
 		}
 	}
 	return out, sourceIDs, nil
+}
+
+// applyEvidenceFreshnessFilter applies T11 role-specific evidence trimming.
+// Executor: cap at 3 most recent per obligation. Reviewer: drop stale evidence
+// and evidence for obligations with no candidate patch. Tester: freshness filter
+// plus drop lint_result when test_result evidence already exists.
+func applyEvidenceFreshnessFilter(
+	evidence []*schema.EvidenceArtifact,
+	obligationID string,
+	role schema.ProjectionRole,
+	freshnessBase string,
+	coveredByPatch map[string]bool,
+) []*schema.EvidenceArtifact {
+	switch role {
+	case schema.ProjectionRoleExecutor:
+		if len(evidence) <= 3 {
+			return evidence
+		}
+		sorted := make([]*schema.EvidenceArtifact, len(evidence))
+		copy(sorted, evidence)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+		})
+		return sorted[:3]
+
+	case schema.ProjectionRoleReviewer:
+		if !coveredByPatch[obligationID] {
+			return nil
+		}
+		if freshnessBase == "" {
+			return evidence
+		}
+		out := make([]*schema.EvidenceArtifact, 0, len(evidence))
+		for _, ev := range evidence {
+			if ev.ValidatedAgainst == freshnessBase {
+				out = append(out, ev)
+			}
+		}
+		return out
+
+	case schema.ProjectionRoleTester:
+		if freshnessBase != "" {
+			fresh := make([]*schema.EvidenceArtifact, 0, len(evidence))
+			for _, ev := range evidence {
+				if ev.ValidatedAgainst == freshnessBase {
+					fresh = append(fresh, ev)
+				}
+			}
+			evidence = fresh
+		}
+		hasTest := false
+		for _, ev := range evidence {
+			if ev.Type == schema.EvidenceTestResult {
+				hasTest = true
+				break
+			}
+		}
+		if !hasTest {
+			return evidence
+		}
+		out := make([]*schema.EvidenceArtifact, 0, len(evidence))
+		for _, ev := range evidence {
+			if ev.Type != schema.EvidenceLintResult {
+				out = append(out, ev)
+			}
+		}
+		return out
+	}
+	return evidence
+}
+
+// obligationsCoveredByPatches returns the set of obligation IDs claimed by
+// at least one patch in the slice. Used by T11 reviewer evidence filtering.
+func obligationsCoveredByPatches(patches []*schema.PatchArtifact) map[string]bool {
+	covered := make(map[string]bool, len(patches)*2)
+	for _, patch := range patches {
+		for _, obID := range patch.ObligationIDsClaimed {
+			covered[obID] = true
+		}
+	}
+	return covered
+}
+
+// cachedEvidenceSectionText returns the evidence section text, reusing a prior
+// projection's stored text when the evidence hash matches (T10). Falls back to
+// serializing evidenceByObligation directly when no cached text is found.
+func (s *Compiler) cachedEvidenceSectionText(
+	ctx context.Context,
+	role schema.ProjectionRole,
+	evidenceHash string,
+	evidenceByObligation map[string][]*schema.EvidenceArtifact,
+) string {
+	if evidenceHash != "" {
+		if cached, err := s.store.LoadProjectionByEvidenceHashAndRole(ctx, role, evidenceHash); err == nil {
+			for _, section := range cached.IncludedSections {
+				if strings.HasPrefix(section, "prior evidence: ") {
+					return section
+				}
+			}
+		}
+	}
+	return "prior evidence: " + summarizeEvidence(evidenceByObligation)
 }
 
 func (s *Compiler) loadPatchesByObligation(
@@ -926,13 +1041,21 @@ func (s *Compiler) loadPatchesByObligation(
 		if err != nil {
 			return nil, nil, fmt.Errorf("projector: load patches for obligation %s: %w", obligation.ObligationID, err)
 		}
+		// T12: keep only the most recent candidate patch per obligation.
+		var latest *schema.PatchArtifact
 		for _, patch := range items {
-			if seenIDs[patch.PatchID] {
+			if patch.Status != schema.PatchCandidate {
 				continue
 			}
-			seenIDs[patch.PatchID] = true
-			patches = append(patches, patch)
-			sourceIDs = append(sourceIDs, patch.PatchID)
+			if latest == nil || patch.CreatedAt.After(latest.CreatedAt) ||
+				(patch.CreatedAt.Equal(latest.CreatedAt) && patch.PatchID > latest.PatchID) {
+				latest = patch
+			}
+		}
+		if latest != nil && !seenIDs[latest.PatchID] {
+			seenIDs[latest.PatchID] = true
+			patches = append(patches, latest)
+			sourceIDs = append(sourceIDs, latest.PatchID)
 		}
 	}
 	return patches, sourceIDs, nil
