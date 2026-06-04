@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/micronwave/orca/internal/config"
 	"github.com/micronwave/orca/internal/intake"
@@ -191,5 +192,64 @@ func TestFetch_TitleOnlyWhenBodyEmpty(t *testing.T) {
 	}
 	if got != "Just the title" {
 		t.Errorf("result = %q, want title only", got)
+	}
+}
+
+// TestFetch_HangingServerClientTimeout verifies that Fetch returns an error
+// when the server never responds and the client timeout fires. This proves the
+// timeout mechanism actually fires, not just that the Timeout field is set.
+func TestFetch_HangingServerClientTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the client drops the connection; the timeout fires first.
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := &intake.Fetcher{
+		BaseURL: srv.URL,
+		Client:  &http.Client{Timeout: 150 * time.Millisecond},
+	}
+	cfg := config.IntakeConfig{GitHubToken: "tok", Repo: "o/r"}
+
+	start := time.Now()
+	_, err := f.Fetch(context.Background(), cfg, 1)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Fetch against hanging server: expected error, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Fetch took %v; expected timeout in ~150ms", elapsed)
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "timeout") && !strings.Contains(msg, "deadline") && !strings.Contains(msg, "context") {
+		t.Errorf("Fetch error = %q; expected a timeout or deadline error", err)
+	}
+}
+
+// TestFetch_ContextCancelDuringHang verifies that a caller-cancelled context
+// terminates Fetch promptly even when the server never responds — exercising
+// the http.NewRequestWithContext cancellation path in Fetcher.Fetch.
+func TestFetch_ContextCancelDuringHang(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	f := &intake.Fetcher{BaseURL: srv.URL}
+	cfg := config.IntakeConfig{GitHubToken: "tok", Repo: "o/r"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := f.Fetch(ctx, cfg, 1)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Fetch with cancelled context against hanging server: expected error, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Fetch took %v; expected cancellation in ~150ms", elapsed)
 	}
 }
