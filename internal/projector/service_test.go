@@ -135,8 +135,9 @@ func TestCompileExecutorLabelsReusedPriorEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileExecutor: %v", err)
 	}
-	// Phase C: evidence labels now include cmd= provenance before reused=.
-	if !projectionIncludes(projection, "EV-proj-reused(type=test_result exit=0 cmd=go test ./internal/projector reused=EV-proj-source)") {
+	// Phase C: evidence labels use abbreviated IDs (last 6 chars) with cmd= provenance.
+	// "EV-proj-reused"[8:] = "reused" (14 chars > 8, abbreviated).
+	if !projectionIncludes(projection, "reused(type=test_result exit=0 cmd=go test ./internal/projector reused=EV-proj-source)") {
 		t.Fatalf("projection missing reused evidence label: %+v", projection.IncludedSections)
 	}
 }
@@ -1132,14 +1133,16 @@ func TestProjectionHash_evidenceWithoutCommandNotPreservedAsProof(t *testing.T) 
 		t.Fatalf("CompileExecutor: %v", err)
 	}
 
-	if !projectionIncludes(proj, "EV-prov-cmd") {
-		t.Fatalf("projection missing evidence with command: %+v", proj.IncludedSections)
+	// IDs are abbreviated to last 6 chars (T7): "EV-prov-cmd"[5:] = "ov-cmd".
+	if !projectionIncludes(proj, "ov-cmd") {
+		t.Fatalf("projection missing evidence with command (abbreviated ID 'ov-cmd'): %+v", proj.IncludedSections)
 	}
 	if !projectionIncludes(proj, "cmd=go test ./internal/projector") {
 		t.Fatalf("projection missing cmd= provenance label: %+v", proj.IncludedSections)
 	}
-	if !projectionIncludes(proj, "EV-prov-noprov") {
-		t.Fatalf("projection missing no-provenance evidence ID: %+v", proj.IncludedSections)
+	// "EV-prov-noprov"[8:] = "noprov".
+	if !projectionIncludes(proj, "noprov") {
+		t.Fatalf("projection missing no-provenance evidence ID (abbreviated 'noprov'): %+v", proj.IncludedSections)
 	}
 	if !projectionIncludes(proj, "[no-provenance]") {
 		t.Fatalf("projection must label evidence with empty command as [no-provenance]: %+v", proj.IncludedSections)
@@ -1622,7 +1625,166 @@ func TestProjectionReuse_changedRenderedSourceDoesNotReuseStaleProjection(t *tes
 	if p2.SourceHash == p1.SourceHash {
 		t.Fatalf("SourceHash did not change after rendered source context changed")
 	}
-	if !projectionIncludes(p2, "EV-reuse-source-change") {
-		t.Fatalf("new projection missing newly added evidence: %+v", p2.IncludedSections)
+	// "EV-reuse-source-change"[16:] = "change" (22 chars > 8, abbreviated).
+	if !projectionIncludes(p2, "change(type=test_result") {
+		t.Fatalf("new projection missing newly added evidence (abbreviated 'change'): %+v", p2.IncludedSections)
+	}
+}
+
+// ── T5/T6/T7: content compaction helpers ─────────────────────────────────────
+
+func TestSummarizeClaims_capsLongTextAt200(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 210)
+	claims := []*schema.ClaimArtifact{{
+		ClaimID: "CL-T5",
+		Text:    long,
+		Status:  schema.ClaimVerified,
+	}}
+	got := summarizeClaims(claims, "")
+	if strings.Contains(got, long) {
+		t.Error("full uncapped text must not appear in output")
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected truncated text ending with '...': %q", got)
+	}
+	// text portion: 197 visible chars + "..." = 200 chars
+	if len(got) >= len("CL-T5: ")+211 {
+		t.Errorf("claim text not capped: result len=%d", len(got))
+	}
+}
+
+func TestSummarizeClaims_shortTextNotCapped(t *testing.T) {
+	t.Parallel()
+	claims := []*schema.ClaimArtifact{{
+		ClaimID: "CL-T5-short",
+		Text:    "exact fit",
+		Status:  schema.ClaimVerified,
+	}}
+	got := summarizeClaims(claims, "")
+	if !strings.Contains(got, "exact fit") {
+		t.Errorf("short text must be preserved verbatim: %q", got)
+	}
+}
+
+func TestSummarizeFailures_capsLongSummaryAt150(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("b", 160)
+	failures := []*schema.FailureFingerprint{{
+		FailureID: "FAIL-T6",
+		Summary:   long,
+	}}
+	got := summarizeFailures(failures)
+	if strings.Contains(got, long) {
+		t.Error("full uncapped summary must not appear in output")
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected truncated summary ending with '...': %q", got)
+	}
+}
+
+func TestSummarizeFailures_shortSummaryNotCapped(t *testing.T) {
+	t.Parallel()
+	failures := []*schema.FailureFingerprint{{
+		FailureID: "FAIL-T6-short",
+		Summary:   "quick fail",
+	}}
+	got := summarizeFailures(failures)
+	if !strings.Contains(got, "quick fail") {
+		t.Errorf("short summary must be preserved verbatim: %q", got)
+	}
+}
+
+func TestSummarizeEvidence_abbreviatesLongID(t *testing.T) {
+	t.Parallel()
+	// "EV-01HZ4R9QCXM8F7B3VD6N5T2PW" is 28 chars; last 6 = "N5T2PW".
+	longID := "EV-01HZ4R9QCXM8F7B3VD6N5T2PW"
+	items := map[string][]*schema.EvidenceArtifact{
+		"OB-T7": {{
+			EvidenceID: longID,
+			Type:       schema.EvidenceTestResult,
+			ExitCode:   0,
+			Command:    "go test ./...",
+			Supports:   []string{"OB-T7"},
+		}},
+	}
+	got := summarizeEvidence(items)
+	if strings.Contains(got, longID) {
+		t.Errorf("full evidence ID must be abbreviated, got: %q", got)
+	}
+	if !strings.Contains(got, "N5T2PW") {
+		t.Errorf("abbreviated ID (last 6 'N5T2PW') not in output: %q", got)
+	}
+}
+
+func TestSummarizeEvidence_shortIDNotAbbreviated(t *testing.T) {
+	t.Parallel()
+	// IDs with ≤8 chars are kept verbatim.
+	shortID := "EV-12345"
+	items := map[string][]*schema.EvidenceArtifact{
+		"OB-T7s": {{
+			EvidenceID: shortID,
+			Type:       schema.EvidenceTestResult,
+			ExitCode:   0,
+			Command:    "go build ./...",
+			Supports:   []string{"OB-T7s"},
+		}},
+	}
+	got := summarizeEvidence(items)
+	if !strings.Contains(got, shortID) {
+		t.Errorf("short ID %q must appear verbatim in output: %q", shortID, got)
+	}
+}
+
+func TestSummarizeEvidence_narrowsCommandAt40(t *testing.T) {
+	t.Parallel()
+	longCmd := strings.Repeat("c", 50)
+	items := map[string][]*schema.EvidenceArtifact{
+		"OB-T7c": {{
+			EvidenceID: "EV-T7C",
+			Type:       schema.EvidenceTestResult,
+			ExitCode:   0,
+			Command:    longCmd,
+			Supports:   []string{"OB-T7c"},
+		}},
+	}
+	got := summarizeEvidence(items)
+	// Command truncated to 37 + "..." = 40 chars — 41+ consecutive 'c's must not appear.
+	if strings.Contains(got, strings.Repeat("c", 41)) {
+		t.Errorf("command not truncated at 40 chars: %q", got)
+	}
+	if !strings.Contains(got, "...") {
+		t.Errorf("truncated command must end with '...': %q", got)
+	}
+}
+
+func TestSummarizeEvidence_collisionFallsBackToFullID(t *testing.T) {
+	t.Parallel()
+	id1 := "EV-AAAAAAAAAAABCDEF"
+	id2 := "EV-ZZZZZZZZZZABCDEF"
+	items := map[string][]*schema.EvidenceArtifact{
+		"OB-T7-collision": {
+			{
+				EvidenceID: id1,
+				Type:       schema.EvidenceTestResult,
+				ExitCode:   0,
+				Command:    "go test ./...",
+				Supports:   []string{"OB-T7-collision"},
+			},
+			{
+				EvidenceID: id2,
+				Type:       schema.EvidenceLintResult,
+				ExitCode:   0,
+				Command:    "go vet ./...",
+				Supports:   []string{"OB-T7-collision"},
+			},
+		},
+	}
+	got := summarizeEvidence(items)
+	if !strings.Contains(got, id1+"(type=") {
+		t.Errorf("colliding ID %q must fall back to full form: %q", id1, got)
+	}
+	if !strings.Contains(got, id2+"(type=") {
+		t.Errorf("colliding ID %q must fall back to full form: %q", id2, got)
 	}
 }

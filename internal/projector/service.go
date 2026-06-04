@@ -538,17 +538,35 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 	if len(evidenceByObligation) == 0 {
 		return "none"
 	}
+	shortIDToFull := make(map[string]string)
+	shortIDCollides := make(map[string]bool)
+	for _, evidence := range evidenceByObligation {
+		for _, item := range evidence {
+			short := abbreviateEvidenceID(item.EvidenceID)
+			if existing, ok := shortIDToFull[short]; !ok {
+				shortIDToFull[short] = item.EvidenceID
+				continue
+			} else if existing != item.EvidenceID {
+				shortIDCollides[short] = true
+			}
+		}
+	}
+
 	parts := make([]string, 0, len(evidenceByObligation))
 	for obligationID, evidence := range evidenceByObligation {
 		var supports, weakens []string
 		for _, item := range evidence {
-			label := fmt.Sprintf("%s(type=%s exit=%d", item.EvidenceID, item.Type, item.ExitCode)
+			displayID := abbreviateEvidenceID(item.EvidenceID)
+			if shortIDCollides[displayID] {
+				displayID = item.EvidenceID
+			}
+			label := fmt.Sprintf("%s(type=%s exit=%d", displayID, item.Type, item.ExitCode)
 			// Command provenance: must always accompany an evidence result so
 			// readers know which tool produced it. Evidence without a command is
 			// labeled [no-provenance] and must not be treated as proof.
 			if cmd := strings.TrimSpace(item.Command); cmd != "" {
-				if len(cmd) > 60 {
-					cmd = cmd[:57] + "..."
+				if len(cmd) > 40 {
+					cmd = cmd[:37] + "..."
 				}
 				label += " cmd=" + cmd
 			} else {
@@ -589,6 +607,14 @@ func summarizeEvidence(evidenceByObligation map[string][]*schema.EvidenceArtifac
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "; ")
+}
+
+func abbreviateEvidenceID(id string) string {
+	short := id
+	if len(short) > 8 {
+		short = short[len(short)-6:]
+	}
+	return short
 }
 
 func evidenceWeakens(item *schema.EvidenceArtifact, obligationID string) bool {
@@ -647,7 +673,11 @@ func summarizeClaims(claims []*schema.ClaimArtifact, freshnessBase string) strin
 	}
 	parts := make([]string, 0, len(claims))
 	for _, claim := range claims {
-		parts = append(parts, claimLabel(claim, freshnessBase)+": "+claim.Text)
+		text := claim.Text
+		if len(text) > 200 {
+			text = text[:197] + "..."
+		}
+		parts = append(parts, claimLabel(claim, freshnessBase)+": "+text)
 	}
 	return strings.Join(parts, "; ")
 }
@@ -676,7 +706,11 @@ func summarizeFailures(failures []*schema.FailureFingerprint) string {
 	}
 	parts := make([]string, 0, len(failures))
 	for _, failure := range failures {
-		parts = append(parts, failure.FailureID+": "+failure.Summary)
+		summary := failure.Summary
+		if len(summary) > 150 {
+			summary = summary[:147] + "..."
+		}
+		parts = append(parts, failure.FailureID+": "+summary)
 	}
 	return strings.Join(parts, "; ")
 }
