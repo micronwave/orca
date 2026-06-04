@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/micronwave/orca/internal/config"
 )
@@ -30,7 +31,8 @@ type Fetcher struct {
 	// BaseURL overrides the GitHub API base URL (default https://api.github.com).
 	// Used in tests to point at a local mock server.
 	BaseURL string
-	// Client overrides the HTTP client used for requests. If nil, http.DefaultClient is used.
+	// Client overrides the HTTP client used for requests. If nil, a client with
+	// a 30-second timeout is used.
 	Client *http.Client
 }
 
@@ -45,7 +47,7 @@ func (f *Fetcher) httpClient() *http.Client {
 	if f.Client != nil {
 		return f.Client
 	}
-	return http.DefaultClient
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // Fetch fetches the GitHub issue at issueNumber and returns its title and body
