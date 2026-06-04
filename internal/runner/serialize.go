@@ -34,16 +34,8 @@ func SerializeExecutorProjection(p *schema.ContextProjection) (string, error) {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("## Required Output Contract\n")
-	b.WriteString("- Return sidecar-equivalent output with these keys:\n")
-	b.WriteString("  - obligations_addressed\n")
-	b.WriteString("  - files_changed\n")
-	b.WriteString("  - commands_run\n")
-	b.WriteString("  - assumptions\n")
-	b.WriteString("  - claims (each claim may include contradicts and invalidates claim-ID arrays)\n")
-	b.WriteString("  - risks\n")
-	b.WriteString("  - follow_up_needed\n")
-	b.WriteString("  - evidence_paths\n")
+	b.WriteString("## Output\n")
+	b.WriteString("Return structured sidecar JSON per the provided schema.\n\n")
 	return b.String(), nil
 }
 

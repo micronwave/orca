@@ -231,23 +231,19 @@ func sidecarJSONSchema() string {
   "properties": {
     "obligations_addressed": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "IDs of obligations addressed (OB-xxxx format)"
+      "items": {"type": "string"}
     },
     "files_changed": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Relative paths of files modified or created"
+      "items": {"type": "string"}
     },
     "commands_run": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Shell commands executed"
+      "items": {"type": "string"}
     },
     "assumptions": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Assumptions made during implementation"
+      "items": {"type": "string"}
     },
     "claims": {
       "type": "array",
@@ -258,7 +254,7 @@ func sidecarJSONSchema() string {
         "properties": {
           "claim": {"type": "string"},
           "type": {"type": "string", "enum": ["verified", "proposed"]},
-          "evidence": {"type": "string", "description": "Evidence reference or empty string"},
+          "evidence": {"type": "string"},
           "contradicts": {"type": "array", "items": {"type": "string"}},
           "invalidates": {"type": "array", "items": {"type": "string"}}
         }
@@ -266,22 +262,18 @@ func sidecarJSONSchema() string {
     },
     "risks": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Risks identified"
+      "items": {"type": "string"}
     },
     "follow_up_needed": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Items requiring a follow-up capsule"
+      "items": {"type": "string"}
     },
     "evidence_paths": {
       "type": "array",
-      "items": {"type": "string"},
-      "description": "Paths to evidence artifact files"
+      "items": {"type": "string"}
     },
     "summary": {
-      "type": "string",
-      "description": "Brief summary of what was accomplished"
+      "type": "string"
     }
   }
 }`

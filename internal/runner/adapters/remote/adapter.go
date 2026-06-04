@@ -124,8 +124,16 @@ func (a *Adapter) Execute(ctx context.Context, capsule *schema.ExecutionCapsule,
 		return nil, fmt.Errorf("remote adapter: upload capsule: %w", err)
 	}
 
+	// Upload sidecar schema so Codex can enforce structured output via --output-schema.
+	remoteSchemaPath := remoteDir + "/sidecar_schema.json"
+	if a.agent == schema.AgentCodex {
+		if err := sess.Upload(ctx, remoteSchemaPath, []byte(remoteSidecarJSONSchema())); err != nil {
+			return nil, fmt.Errorf("remote adapter: upload sidecar schema: %w", err)
+		}
+	}
+
 	start := time.Now()
-	cmd := buildAgentCommand(a.agent, remoteDir, briefingPath, capsule.PermissionMode)
+	cmd := buildAgentCommand(a.agent, remoteDir, briefingPath, remoteSchemaPath, capsule.PermissionMode)
 	_, runErr := sess.RunCommand(ctx, cmd)
 
 	// Always try to download transcript for the ExtractFromTranscript fallback.
@@ -171,23 +179,89 @@ func (a *Adapter) ExtractFromTranscript(ctx context.Context, capsule *schema.Exe
 
 // buildAgentCommand returns a shell command that runs the agent on the remote
 // host, writes output to output.json and stderr to transcript.log.
-func buildAgentCommand(agent schema.AgentType, remoteDir, briefingPath string, mode schema.PermissionMode) string {
+// remoteSchemaPath is the remote path to sidecar_schema.json (used by Codex via
+// --output-schema); Claude uses the schema inline via --json-schema.
+func buildAgentCommand(agent schema.AgentType, remoteDir, briefingPath, remoteSchemaPath string, mode schema.PermissionMode) string {
 	switch agent {
 	case schema.AgentCodex:
 		// Codex writes sidecar JSON to -o; we redirect stdout+stderr to transcript.
 		return fmt.Sprintf(
-			"codex exec -s %s --ephemeral -o %s/output.json - < %s > %s/transcript.log 2>&1",
-			remoteCodexSandboxFlag(mode), remoteDir, briefingPath, remoteDir,
+			"codex exec -s %s --ephemeral --output-schema %s -o %s/output.json - < %s > %s/transcript.log 2>&1",
+			remoteCodexSandboxFlag(mode), shellQuote(remoteSchemaPath), remoteDir, briefingPath, remoteDir,
 		)
 	case schema.AgentClaude:
 		// Claude writes JSON envelope to stdout; stderr goes to transcript.
 		return fmt.Sprintf(
-			"claude -p --output-format json --no-session-persistence --permission-mode %s < %s > %s/output.json 2>%s/transcript.log",
-			remoteClaudePermissionMode(mode), briefingPath, remoteDir, remoteDir,
+			"claude -p --output-format json --json-schema %s --no-session-persistence --permission-mode %s < %s > %s/output.json 2>%s/transcript.log",
+			shellQuote(remoteSidecarJSONSchemaInline()), remoteClaudePermissionMode(mode), briefingPath, remoteDir, remoteDir,
 		)
 	default:
 		return fmt.Sprintf("%s < %s > %s/output.json 2>%s/transcript.log", string(agent), briefingPath, remoteDir, remoteDir)
 	}
+}
+
+// remoteSidecarJSONSchema returns the minified Codex sidecar schema for upload
+// to the remote host. Matches the content used by the local Codex adapter.
+func remoteSidecarJSONSchema() string {
+	return `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["obligations_addressed", "files_changed", "commands_run", "assumptions", "claims", "risks", "follow_up_needed", "evidence_paths", "summary"],
+  "properties": {
+    "obligations_addressed": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "commands_run": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "type", "evidence", "contradicts", "invalidates"],
+        "properties": {
+          "claim": {"type": "string"},
+          "type": {"type": "string", "enum": ["verified", "proposed"]},
+          "evidence": {"type": "string"},
+          "contradicts": {"type": "array", "items": {"type": "string"}},
+          "invalidates": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "follow_up_needed": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "summary": {
+      "type": "string"
+    }
+  }
+}`
+}
+
+// remoteSidecarJSONSchemaInline returns the minified Claude sidecar schema as a
+// compact single-line JSON string for inline --json-schema injection.
+func remoteSidecarJSONSchemaInline() string {
+	return `{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","required":["obligations_addressed","files_changed","commands_run","assumptions","claims","risks","follow_up_needed","evidence_paths"],"properties":{"obligations_addressed":{"type":"array","items":{"type":"string"}},"files_changed":{"type":"array","items":{"type":"string"}},"commands_run":{"type":"array","items":{"type":"string"}},"assumptions":{"type":"array","items":{"type":"string"}},"claims":{"type":"array","items":{"type":"object","required":["claim","type"],"properties":{"claim":{"type":"string"},"type":{"type":"string","enum":["verified","proposed"]},"evidence":{"type":"string"},"contradicts":{"type":"array","items":{"type":"string"}},"invalidates":{"type":"array","items":{"type":"string"}}}}},"risks":{"type":"array","items":{"type":"string"}},"follow_up_needed":{"type":"array","items":{"type":"string"}},"evidence_paths":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}}}`
 }
 
 func remoteCodexSandboxFlag(mode schema.PermissionMode) string {

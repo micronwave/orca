@@ -25,8 +25,8 @@ func TestSerializeExecutorProjection(t *testing.T) {
 		"Freshness Base: `SNAP-1`",
 		"goal_conditions",
 		"obligations",
-		"obligations_addressed",
-		"evidence_paths",
+		"## Output",
+		"Return structured sidecar JSON per the provided schema.",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("serialized markdown missing %q\n%s", want, md)
@@ -81,7 +81,8 @@ func TestSerializeExecutorProjectionAcceptsReviewerRole(t *testing.T) {
 	for _, want := range []string{
 		"# Orca Reviewer Briefing",
 		"Freshness Base: `SNAP-r1`",
-		"obligations_addressed",
+		"## Output",
+		"Return structured sidecar JSON per the provided schema.",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("serialized reviewer markdown missing %q\n%s", want, md)

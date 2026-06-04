@@ -166,7 +166,8 @@ func TestPreflight_MissingWorkspace(t *testing.T) {
 	}
 }
 
-// TestExecute_UploadsBriefingAndCapsule verifies both files land on the session.
+// TestExecute_UploadsBriefingAndCapsule verifies briefing, capsule, and (for
+// Codex) the sidecar schema all land on the remote session.
 func TestExecute_UploadsBriefingAndCapsule(t *testing.T) {
 	sess := newFakeSession()
 	remoteDir := "/remote/workspace/CAP-CAP-REMOTE-1"
@@ -179,11 +180,43 @@ func TestExecute_UploadsBriefingAndCapsule(t *testing.T) {
 		t.Fatalf("Execute = %v", err)
 	}
 
-	if _, ok := sess.uploads[remoteDir+"/executor_briefing.md"]; !ok {
-		t.Error("executor_briefing.md was not uploaded")
+	for _, name := range []string{"executor_briefing.md", "capsule.json", "sidecar_schema.json"} {
+		if _, ok := sess.uploads[remoteDir+"/"+name]; !ok {
+			t.Errorf("%s was not uploaded", name)
+		}
 	}
-	if _, ok := sess.uploads[remoteDir+"/capsule.json"]; !ok {
-		t.Error("capsule.json was not uploaded")
+}
+
+// TestExecute_SchemaFlagInAgentCommand verifies the schema flag is injected
+// into the agent command for both Codex (--output-schema) and Claude (--json-schema).
+func TestExecute_SchemaFlagInAgentCommand(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent schema.AgentType
+		want  string
+	}{
+		{name: "codex output-schema flag", agent: schema.AgentCodex, want: "--output-schema"},
+		{name: "claude json-schema flag", agent: schema.AgentClaude, want: "--json-schema"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := newFakeSession()
+			remoteDir := "/remote/workspace/CAP-CAP-REMOTE-1"
+			sess.downloads[remoteDir+"/output.json"] = validSidecar()
+			capsule := testCapsule()
+			capsule.Agent = tt.agent
+
+			a := remote.New(remoteConfig(), tt.agent, t.TempDir(), &fakeDialer{sess: sess})
+			if _, err := a.Execute(context.Background(), capsule, testProjection()); err != nil {
+				t.Fatalf("Execute = %v", err)
+			}
+			if len(sess.commands) != 1 {
+				t.Fatalf("commands len = %d, want 1", len(sess.commands))
+			}
+			if !strings.Contains(sess.commands[0], tt.want) {
+				t.Errorf("command %q missing %q", sess.commands[0], tt.want)
+			}
+		})
 	}
 }
 
