@@ -212,13 +212,14 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 	verdictsByObligation := make(map[string]bool, len(vr.ObligationResults))
 	highRisk := false
 	hasPartialEvidence := false
+	evidenceCache := make(map[string]*schema.EvidenceArtifact)
 
 	if len(vr.ObligationResults) == 0 {
 		reject(&result, fmt.Sprintf("patch %s has no obligation verdicts", patch.PatchID))
 	}
 
 	for _, verdict := range vr.ObligationResults {
-		pvr, err := s.processObligationVerdict(ctx, verdict, in.AllowPartialEvidence)
+		pvr, err := s.processObligationVerdict(ctx, verdict, in.AllowPartialEvidence, evidenceCache)
 		if err != nil {
 			return ReconcileResult{}, err
 		}
@@ -332,7 +333,7 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 		}
 	}
 
-	if err := s.saveBudgetRecords(ctx, goal.GoalID, patch, vr, updatedStatuses, result.PatchAccepted, now); err != nil {
+	if err := s.saveBudgetRecords(ctx, goal.GoalID, patch, vr, updatedStatuses, result.PatchAccepted, now, evidenceCache); err != nil {
 		return ReconcileResult{}, err
 	}
 
@@ -441,15 +442,17 @@ func (s *Reconciler) Reconcile(ctx context.Context, patchID string, opts ...Reco
 // created or satisfied it. Used to enforce the human-gate invariant across
 // multi-patch runs where the final low-risk patch triggers merge readiness.
 func (s *Reconciler) goalHasHighRiskObligations(ctx context.Context, goal *schema.GoalIR) (bool, error) {
-	for _, cond := range goal.GoalConditions {
-		obligations, err := s.store.LoadObligationsForCondition(ctx, cond.ID)
-		if err != nil {
-			return false, fmt.Errorf("reconciler: load obligations for condition %s: %w", cond.ID, err)
-		}
-		for _, obl := range obligations {
-			if obl.Blocking && obl.RiskLevel == schema.RiskHigh {
-				return true, nil
-			}
+	condSet := make(map[string]bool, len(goal.GoalConditions))
+	for _, c := range goal.GoalConditions {
+		condSet[c.ID] = true
+	}
+	all, err := s.store.LoadAllObligations(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reconciler: load all obligations: %w", err)
+	}
+	for _, obl := range all {
+		if condSet[obl.GoalConditionID] && obl.Blocking && obl.RiskLevel == schema.RiskHigh {
+			return true, nil
 		}
 	}
 	return false, nil
@@ -483,6 +486,7 @@ func (s *Reconciler) processObligationVerdict(
 	ctx context.Context,
 	verdict schema.ObligationVerdict,
 	allowPartialEvidence bool,
+	cache map[string]*schema.EvidenceArtifact,
 ) (obligationVerdictResult, error) {
 	obl, err := s.store.LoadObligation(ctx, verdict.ObligationID)
 	if err != nil {
@@ -519,7 +523,7 @@ func (s *Reconciler) processObligationVerdict(
 	}
 
 	for _, evidenceID := range verdict.EvidenceIDs {
-		if _, err := s.store.LoadEvidence(ctx, evidenceID); err != nil {
+		if _, err := s.loadEvidenceCached(ctx, evidenceID, cache); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				if allowPartialEvidence && !obl.Blocking {
 					res.status = schema.ObligationStatusPartiallyMet
@@ -746,6 +750,7 @@ func (s *Reconciler) saveBudgetRecords(
 	updatedStatuses map[string]schema.ObligationStatus,
 	accepted bool,
 	now time.Time,
+	cache map[string]*schema.EvidenceArtifact,
 ) error {
 	if patch == nil || vr == nil {
 		return fmt.Errorf("reconciler: patch and verifier result are required for budget recording")
@@ -758,7 +763,7 @@ func (s *Reconciler) saveBudgetRecords(
 	for _, candidate := range records {
 		recordsByID[candidate.BudgetID] = candidate
 	}
-	metrics, err := s.budgetMetricsForResult(ctx, vr)
+	metrics, err := s.budgetMetricsForResult(ctx, vr, cache)
 	if err != nil {
 		return err
 	}
@@ -838,7 +843,7 @@ func (s *Reconciler) saveBudgetRecords(
 		if !ok {
 			continue
 		}
-		obligationMetrics, err := s.budgetMetricsForEvidenceIDs(ctx, verdict.EvidenceIDs, vr.RecommendedAction)
+		obligationMetrics, err := s.budgetMetricsForEvidenceIDs(ctx, verdict.EvidenceIDs, vr.RecommendedAction, cache)
 		if err != nil {
 			return err
 		}
@@ -960,14 +965,14 @@ func countDischarged(statuses map[string]schema.ObligationStatus) int {
 }
 
 func (s *Reconciler) lastEventForGoal(ctx context.Context, goalID string) (schema.Event, error) {
-	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
+	e, ok, err := s.log.LastEventForGoal(ctx, goalID)
 	if err != nil {
-		return schema.Event{}, fmt.Errorf("reconciler: read events for goal %s: %w", goalID, err)
+		return schema.Event{}, fmt.Errorf("reconciler: last event for goal %s: %w", goalID, err)
 	}
-	if len(events) == 0 {
+	if !ok {
 		return schema.Event{}, fmt.Errorf("reconciler: no events for goal %s: %w", goalID, store.ErrNotFound)
 	}
-	return events[len(events)-1], nil
+	return e, nil
 }
 
 func patchDecision(accepted bool) string {
@@ -1004,7 +1009,7 @@ type budgetMetrics struct {
 	humanInterventions      int
 }
 
-func (s *Reconciler) budgetMetricsForResult(ctx context.Context, vr *schema.VerifierResult) (budgetMetrics, error) {
+func (s *Reconciler) budgetMetricsForResult(ctx context.Context, vr *schema.VerifierResult, cache map[string]*schema.EvidenceArtifact) (budgetMetrics, error) {
 	evidenceSet := make(map[string]bool)
 	for _, verdict := range vr.ObligationResults {
 		for _, evidenceID := range verdict.EvidenceIDs {
@@ -1015,13 +1020,33 @@ func (s *Reconciler) budgetMetricsForResult(ctx context.Context, vr *schema.Veri
 	for evidenceID := range evidenceSet {
 		evidenceIDs = append(evidenceIDs, evidenceID)
 	}
-	return s.budgetMetricsForEvidenceIDs(ctx, evidenceIDs, vr.RecommendedAction)
+	return s.budgetMetricsForEvidenceIDs(ctx, evidenceIDs, vr.RecommendedAction, cache)
+}
+
+// loadEvidenceCached loads evidence by ID, returning the cached copy when
+// available. On a cache miss the artifact is loaded from the store and stored
+// in cache before returning. A nil cache disables caching.
+func (s *Reconciler) loadEvidenceCached(ctx context.Context, evidenceID string, cache map[string]*schema.EvidenceArtifact) (*schema.EvidenceArtifact, error) {
+	if cache != nil {
+		if ev, ok := cache[evidenceID]; ok {
+			return ev, nil
+		}
+	}
+	ev, err := s.store.LoadEvidence(ctx, evidenceID)
+	if err != nil {
+		return nil, err
+	}
+	if cache != nil {
+		cache[evidenceID] = ev
+	}
+	return ev, nil
 }
 
 func (s *Reconciler) budgetMetricsForEvidenceIDs(
 	ctx context.Context,
 	evidenceIDs []string,
 	action schema.RecommendedAction,
+	cache map[string]*schema.EvidenceArtifact,
 ) (budgetMetrics, error) {
 	var metrics budgetMetrics
 	seen := make(map[string]bool)
@@ -1030,7 +1055,7 @@ func (s *Reconciler) budgetMetricsForEvidenceIDs(
 			continue
 		}
 		seen[evidenceID] = true
-		evidence, err := s.store.LoadEvidence(ctx, evidenceID)
+		evidence, err := s.loadEvidenceCached(ctx, evidenceID, cache)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				continue

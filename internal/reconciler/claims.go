@@ -137,13 +137,22 @@ func (s *Reconciler) detectClaimDisputes(ctx context.Context, goalID string, goa
 }
 
 func (s *Reconciler) decisionInvalidations(ctx context.Context, goalID string) (map[string][]string, error) {
-	events, err := s.log.ReadForGoal(ctx, goalID, 0, 0)
+	snap, snapErr := s.store.LoadLatestSnapshot(ctx, goalID)
+	var afterSeq int64
+	if errors.Is(snapErr, store.ErrNotFound) {
+		afterSeq = 0
+	} else if snapErr != nil {
+		return nil, fmt.Errorf("decisionInvalidations: load snapshot for goal %s: %w", goalID, snapErr)
+	} else if snap != nil {
+		afterSeq = snap.SequenceNum
+	}
+	events, err := s.log.ReadByType(ctx, schema.EventDecisionRecordCreated, afterSeq, 0)
 	if err != nil {
 		return nil, fmt.Errorf("reconciler: read decision events for goal %s: %w", goalID, err)
 	}
 	out := make(map[string][]string)
 	for _, event := range events {
-		if event.Type != schema.EventDecisionRecordCreated {
+		if event.GoalID != goalID {
 			continue
 		}
 		var decision schema.DecisionRecord

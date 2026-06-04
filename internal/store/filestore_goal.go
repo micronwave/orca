@@ -193,6 +193,13 @@ func (s *FileStore) LoadObligationsForCondition(ctx context.Context, conditionID
 	return out, nil
 }
 
+// LoadAllObligations returns every obligation in the store.
+func (s *FileStore) LoadAllObligations(ctx context.Context) ([]*schema.Obligation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
+}
+
 func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID string, status schema.ObligationStatus, satisfiedBy *[]string) error {
 	if err := validateArtifactID("obligation", obligationID); err != nil {
 		return err

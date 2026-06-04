@@ -398,6 +398,71 @@ func (l *FileLog) scan(ctx context.Context, afterSeq int64, limit int, pred func
 	return out, nil
 }
 
+// LastEventForGoal returns the last event in the log whose GoalID matches
+// goalID. It walks the offset index backwards so in the common single-goal
+// case the answer is found in O(1): the last event belongs to that goal.
+// Returns (zero, false, nil) when no matching event exists.
+func (l *FileLog) LastEventForGoal(ctx context.Context, goalID string) (schema.Event, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return schema.Event{}, false, err
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.done {
+		return schema.Event{}, false, ErrClosed
+	}
+	if l.err != nil {
+		return schema.Event{}, false, l.err
+	}
+	if l.seq == 0 {
+		return schema.Event{}, false, nil
+	}
+	f, err := os.Open(l.path)
+	if err != nil {
+		return schema.Event{}, false, fmt.Errorf("eventlog: open %s: %w", l.path, err)
+	}
+	defer f.Close()
+	for i := int(l.seq) - 1; i >= 0; i-- {
+		expectedSeq := int64(i + 1)
+		if err := ctx.Err(); err != nil {
+			return schema.Event{}, false, err
+		}
+		if _, err := f.Seek(l.offsets[i], io.SeekStart); err != nil {
+			return schema.Event{}, false, fmt.Errorf("eventlog: seek: %w", err)
+		}
+		r := bufio.NewReaderSize(f, 4096)
+		line, readErr := r.ReadBytes('\n')
+		if len(line) == 0 && errors.Is(readErr, io.EOF) {
+			return schema.Event{}, false, fmt.Errorf("eventlog: indexed event seq %d missing line", expectedSeq)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return schema.Event{}, false, fmt.Errorf("eventlog: tail read: %w", readErr)
+		}
+		if len(line) == 0 {
+			return schema.Event{}, false, fmt.Errorf("eventlog: indexed event seq %d empty line", expectedSeq)
+		}
+		terminated := line[len(line)-1] == '\n'
+		line = bytesTrimRightNewline(line)
+		if !terminated {
+			return schema.Event{}, false, fmt.Errorf("eventlog: indexed event seq %d truncated", expectedSeq)
+		}
+		if len(line) == 0 {
+			return schema.Event{}, false, fmt.Errorf("eventlog: indexed event seq %d empty payload", expectedSeq)
+		}
+		var e schema.Event
+		if err := json.Unmarshal(line, &e); err != nil {
+			return schema.Event{}, false, fmt.Errorf("eventlog: parse event: %w", err)
+		}
+		if e.SequenceNum != expectedSeq {
+			return schema.Event{}, false, fmt.Errorf("eventlog: sequence ordering violation: got seq %d at indexed seq %d", e.SequenceNum, expectedSeq)
+		}
+		if e.GoalID == goalID {
+			return e, true, nil
+		}
+	}
+	return schema.Event{}, false, nil
+}
+
 // newEventID returns a random UUID v4 using crypto/rand.
 func newEventID() (string, error) {
 	var b [16]byte
