@@ -125,7 +125,7 @@ func (s *FileStore) SavePatch(ctx context.Context, p *schema.PatchArtifact) erro
 	if err := ensureArtifactAbsent("patch", s.artifactPath(dirPatches, p.PatchID), p.PatchID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, p.CapsuleID)
+	goalID, err := s.goalIDForCapsuleLocked(ctx, p.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SavePatch: %w", err)
 	}
@@ -158,7 +158,7 @@ func (s *FileStore) UpdatePatchStatus(ctx context.Context, patchID string, statu
 	if err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, p.CapsuleID)
+	goalID, err := s.goalIDForCapsuleLocked(ctx, p.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: UpdatePatchStatus: %w", err)
 	}
@@ -223,7 +223,7 @@ func (s *FileStore) SaveEvidence(ctx context.Context, e *schema.EvidenceArtifact
 	if err := ensureArtifactAbsent("evidence", s.artifactPath(dirEvidence, e.EvidenceID), e.EvidenceID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForEvidence(ctx, e)
+	goalID, err := s.goalIDForEvidenceLocked(ctx, e)
 	if err != nil {
 		return fmt.Errorf("store: SaveEvidence: %w", err)
 	}

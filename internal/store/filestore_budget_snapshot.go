@@ -10,6 +10,36 @@ import (
 	"github.com/micronwave/orca/internal/schema"
 )
 
+// initLatestSnapshotIndex scans the snapshots directory at startup and
+// populates latestSnap with the highest-SequenceNum snapshot per goalID.
+// Caller must NOT hold s.mu (called from New before the store is published).
+func (s *FileStore) initLatestSnapshotIndex(ctx context.Context) error {
+	snaps, err := scanDir[schema.StateSnapshot](ctx, filepath.Join(s.root, dirSnapshots))
+	if err != nil {
+		return err
+	}
+	for _, snap := range snaps {
+		if cur := s.latestSnap[snap.GoalID]; cur == nil || snap.SequenceNum > cur.SequenceNum {
+			s.latestSnap[snap.GoalID] = cloneStateSnapshot(snap)
+		}
+	}
+	return nil
+}
+
+// initBudgetIndex scans the budgets directory at startup and populates
+// budgetsByGoal with all BudgetRecords grouped by GoalID.
+// Caller must NOT hold s.mu (called from New before the store is published).
+func (s *FileStore) initBudgetIndex(ctx context.Context) error {
+	records, err := scanDir[schema.BudgetRecord](ctx, filepath.Join(s.root, dirBudgets))
+	if err != nil {
+		return err
+	}
+	for _, b := range records {
+		s.budgetsByGoal[b.GoalID] = append(s.budgetsByGoal[b.GoalID], cloneBudgetRecord(b))
+	}
+	return nil
+}
+
 // ── Budget Records ───────────────────────────────────────────────────────────
 
 func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord) error {
@@ -34,7 +64,11 @@ func (s *FileStore) SaveBudgetRecord(ctx context.Context, b *schema.BudgetRecord
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirBudgets, b.BudgetID), b))
+	if err := s.writeFile(ctx, s.artifactPath(dirBudgets, b.BudgetID), b); err != nil {
+		return materializationError(ev, err)
+	}
+	s.budgetsByGoal[b.GoalID] = append(s.budgetsByGoal[b.GoalID], cloneBudgetRecord(b))
+	return nil
 }
 
 func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*schema.BudgetRecord, error) {
@@ -48,17 +82,9 @@ func (s *FileStore) LoadBudgetRecord(ctx context.Context, budgetID string) (*sch
 
 func (s *FileStore) LoadBudgetForGoal(ctx context.Context, goalID string) ([]*schema.BudgetRecord, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	all, err := scanDir[schema.BudgetRecord](ctx, filepath.Join(s.root, dirBudgets))
-	if err != nil {
-		return nil, err
-	}
-	var out []*schema.BudgetRecord
-	for _, b := range all {
-		if b.GoalID == goalID {
-			out = append(out, b)
-		}
-	}
+	records := s.budgetsByGoal[goalID]
+	out := cloneBudgetRecords(records)
+	s.mu.RUnlock()
 	return out, nil
 }
 
@@ -99,7 +125,18 @@ func (s *FileStore) UpdateBudgetRecord(ctx context.Context, b *schema.BudgetReco
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(ctx, path, b))
+	if err := s.writeFile(ctx, path, b); err != nil {
+		return materializationError(ev, err)
+	}
+	records := s.budgetsByGoal[b.GoalID]
+	for i, r := range records {
+		if r.BudgetID == b.BudgetID {
+			s.budgetsByGoal[b.GoalID][i] = cloneBudgetRecord(b)
+			return nil
+		}
+	}
+	s.budgetsByGoal[b.GoalID] = append(records, cloneBudgetRecord(b))
+	return nil
 }
 
 // ── State Snapshots ──────────────────────────────────────────────────────────
@@ -126,31 +163,25 @@ func (s *FileStore) SaveSnapshot(ctx context.Context, snap *schema.StateSnapshot
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirSnapshots, snap.SnapshotID), snap))
+	if err := s.writeFile(ctx, s.artifactPath(dirSnapshots, snap.SnapshotID), snap); err != nil {
+		return materializationError(ev, err)
+	}
+	if cur := s.latestSnap[snap.GoalID]; cur == nil || snap.SequenceNum > cur.SequenceNum {
+		s.latestSnap[snap.GoalID] = cloneStateSnapshot(snap)
+	}
+	return nil
 }
 
 // LoadLatestSnapshot returns the StateSnapshot for goalID with the highest
 // SequenceNum, representing the most recent checkpoint.
 func (s *FileStore) LoadLatestSnapshot(ctx context.Context, goalID string) (*schema.StateSnapshot, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	all, err := scanDir[schema.StateSnapshot](ctx, filepath.Join(s.root, dirSnapshots))
-	if err != nil {
-		return nil, err
-	}
-	var latest *schema.StateSnapshot
-	for _, snap := range all {
-		if snap.GoalID != goalID {
-			continue
-		}
-		if latest == nil || snap.SequenceNum > latest.SequenceNum {
-			latest = snap
-		}
-	}
-	if latest == nil {
+	snap := s.latestSnap[goalID]
+	s.mu.RUnlock()
+	if snap == nil {
 		return nil, ErrNotFound
 	}
-	return latest, nil
+	return cloneStateSnapshot(snap), nil
 }
 
 func (s *FileStore) LoadSnapshot(ctx context.Context, snapshotID string) (*schema.StateSnapshot, error) {
@@ -188,6 +219,33 @@ func cloneStrings(in []string) []string {
 	out := make([]string, len(in))
 	copy(out, in)
 	return out
+}
+
+func cloneBudgetRecord(in *schema.BudgetRecord) *schema.BudgetRecord {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneBudgetRecords(in []*schema.BudgetRecord) []*schema.BudgetRecord {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*schema.BudgetRecord, len(in))
+	for i, record := range in {
+		out[i] = cloneBudgetRecord(record)
+	}
+	return out
+}
+
+func cloneStateSnapshot(in *schema.StateSnapshot) *schema.StateSnapshot {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func sortTopologyOutcomes(records []*schema.TopologyOutcomeRecord) {

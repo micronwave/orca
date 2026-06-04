@@ -35,7 +35,7 @@ func (s *FileStore) SaveClaim(ctx context.Context, c *schema.ClaimArtifact) erro
 		}
 		goalID = c.GoalID
 	} else if strings.TrimSpace(c.SourceCapsuleID) != "" {
-		resolved, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
+		resolved, err := s.goalIDForCapsuleLocked(ctx, c.SourceCapsuleID)
 		if err != nil {
 			return fmt.Errorf("store: SaveClaim: %w", err)
 		}
@@ -111,7 +111,7 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(ctx, goalID)
+	exists, err := s.goalExistsLocked(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (s *FileStore) LoadClaimsForGoal(ctx context.Context, goalID string) ([]*sc
 			}
 			continue
 		}
-		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
+		claimGoalID, err := s.goalIDForCapsuleLocked(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -156,7 +156,7 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(ctx, goalID)
+	exists, err := s.goalExistsLocked(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +182,7 @@ func (s *FileStore) LoadClaimsByStatus(ctx context.Context, goalID string, statu
 			}
 			continue
 		}
-		claimGoalID, err := s.goalIDForCapsule(ctx, claim.SourceCapsuleID)
+		claimGoalID, err := s.goalIDForCapsuleLocked(ctx, claim.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -221,7 +221,7 @@ func (s *FileStore) claimGoalIDNoLock(ctx context.Context, c *schema.ClaimArtifa
 		return c.GoalID, nil
 	}
 	if strings.TrimSpace(c.SourceCapsuleID) != "" {
-		goalID, err := s.goalIDForCapsule(ctx, c.SourceCapsuleID)
+		goalID, err := s.goalIDForCapsuleLocked(ctx, c.SourceCapsuleID)
 		if err == nil {
 			return goalID, nil
 		}
@@ -363,7 +363,7 @@ func (s *FileStore) SaveFailure(ctx context.Context, f *schema.FailureFingerprin
 	if err := ensureArtifactAbsent("failure", s.artifactPath(dirFailures, f.FailureID), f.FailureID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, f.SourceCapsuleID)
+	goalID, err := s.goalIDForCapsuleLocked(ctx, f.SourceCapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveFailure: %w", err)
 	}
@@ -436,7 +436,7 @@ func (s *FileStore) LoadAllFailures(ctx context.Context, goalID string) ([]*sche
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(ctx, goalID)
+	exists, err := s.goalExistsLocked(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +449,7 @@ func (s *FileStore) LoadAllFailures(ctx context.Context, goalID string) ([]*sche
 	}
 	var out []*schema.FailureFingerprint
 	for _, f := range all {
-		resolvedGoalID, err := s.goalIDForCapsule(ctx, f.SourceCapsuleID)
+		resolvedGoalID, err := s.goalIDForCapsuleLocked(ctx, f.SourceCapsuleID)
 		if err != nil {
 			// Skip orphaned failures (capsule or obligation files missing) but
 			// propagate genuine I/O or corruption errors so callers are not
@@ -473,7 +473,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 	if goalID == "" {
 		return nil, ErrNotFound
 	}
-	exists, err := s.goalExists(ctx, goalID)
+	exists, err := s.goalExistsLocked(ctx, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +515,7 @@ func (s *FileStore) LoadFailuresBySignature(ctx context.Context, goalID string, 
 		if seen[failure.FailureID] || failure.ErrorSignature != errorSignature {
 			continue
 		}
-		resolvedGoalID, err := s.goalIDForCapsule(ctx, failure.SourceCapsuleID)
+		resolvedGoalID, err := s.goalIDForCapsuleLocked(ctx, failure.SourceCapsuleID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}

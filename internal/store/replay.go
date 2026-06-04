@@ -76,7 +76,14 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("goal", v.GoalID); err != nil {
 			return err
 		}
-		return s.writeFileReplay(ctx, s.artifactPath(dirGoals, v.GoalID), &v)
+		if err := s.writeFileReplay(ctx, s.artifactPath(dirGoals, v.GoalID), &v); err != nil {
+			return err
+		}
+		s.knownGoals[v.GoalID] = true
+		for _, c := range v.GoalConditions {
+			s.condToGoal[c.ID] = v.GoalID
+		}
+		return nil
 
 	case schema.EventObligationCreated:
 		var v schema.Obligation
@@ -90,7 +97,7 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 			return err
 		}
 		if v.Status == schema.ObligationOpen && v.GoalConditionID != "" {
-			goalID, err := s.findGoalIDForCondition(ctx, v.GoalConditionID)
+			goalID, err := s.findGoalIDForConditionLocked(ctx, v.GoalConditionID)
 			if err != nil {
 				return fmt.Errorf("resolve goal for obligation %s: %w", v.ObligationID, err)
 			}
@@ -198,7 +205,18 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("budget", v.BudgetID); err != nil {
 			return err
 		}
-		return s.writeFileReplay(ctx, s.artifactPath(dirBudgets, v.BudgetID), &v)
+		if err := s.writeFileReplay(ctx, s.artifactPath(dirBudgets, v.BudgetID), &v); err != nil {
+			return err
+		}
+		// Upsert: replace existing entry (re-replay resilience) or append.
+		for i, r := range s.budgetsByGoal[v.GoalID] {
+			if r.BudgetID == v.BudgetID {
+				s.budgetsByGoal[v.GoalID][i] = cloneBudgetRecord(&v)
+				return nil
+			}
+		}
+		s.budgetsByGoal[v.GoalID] = append(s.budgetsByGoal[v.GoalID], cloneBudgetRecord(&v))
+		return nil
 
 	case schema.EventStateSnapshotSaved:
 		var v schema.StateSnapshot
@@ -208,7 +226,13 @@ func applyEvent(ctx context.Context, s *FileStore, e schema.Event) error {
 		if err := validateArtifactID("snapshot", v.SnapshotID); err != nil {
 			return err
 		}
-		return s.writeFileReplay(ctx, s.artifactPath(dirSnapshots, v.SnapshotID), &v)
+		if err := s.writeFileReplay(ctx, s.artifactPath(dirSnapshots, v.SnapshotID), &v); err != nil {
+			return err
+		}
+		if cur := s.latestSnap[v.GoalID]; cur == nil || v.SequenceNum > cur.SequenceNum {
+			s.latestSnap[v.GoalID] = cloneStateSnapshot(&v)
+		}
+		return nil
 
 	case schema.EventTopologyOutcomeRecorded:
 		var v schema.TopologyOutcomeRecord
@@ -460,7 +484,7 @@ func (s *FileStore) updateObligationStatusNoLock(ctx context.Context, obligation
 		return err
 	}
 	if conditionID != "" {
-		goalID, err := s.findGoalIDForCondition(ctx, conditionID)
+		goalID, err := s.findGoalIDForConditionLocked(ctx, conditionID)
 		if err != nil {
 			return fmt.Errorf("resolve goal for obligation %s: %w", obligationID, err)
 		}

@@ -39,7 +39,14 @@ func (s *FileStore) SaveGoal(ctx context.Context, g *schema.GoalIR) error {
 	if err != nil {
 		return err
 	}
-	return materializationError(ev, s.writeFile(ctx, s.artifactPath(dirGoals, g.GoalID), g))
+	if err := s.writeFile(ctx, s.artifactPath(dirGoals, g.GoalID), g); err != nil {
+		return &MaterializationError{Event: ev, Err: err}
+	}
+	s.knownGoals[g.GoalID] = true
+	for _, c := range g.GoalConditions {
+		s.condToGoal[c.ID] = g.GoalID
+	}
+	return nil
 }
 
 func (s *FileStore) LoadGoal(ctx context.Context, goalID string) (*schema.GoalIR, error) {
@@ -120,7 +127,7 @@ func (s *FileStore) SaveObligation(ctx context.Context, o *schema.Obligation) er
 	if err := ensureArtifactAbsent("obligation", s.artifactPath(dirObligations, o.ObligationID), o.ObligationID); err != nil {
 		return err
 	}
-	goalID, err := s.findGoalIDForCondition(ctx, o.GoalConditionID)
+	goalID, err := s.findGoalIDForConditionLocked(ctx, o.GoalConditionID)
 	if err != nil {
 		return fmt.Errorf("store: SaveObligation: %w", err)
 	}
@@ -196,7 +203,7 @@ func (s *FileStore) UpdateObligationStatus(ctx context.Context, obligationID str
 	if err != nil {
 		return err
 	}
-	goalID, err := s.findGoalIDForCondition(ctx, o.GoalConditionID)
+	goalID, err := s.findGoalIDForConditionLocked(ctx, o.GoalConditionID)
 	if err != nil {
 		return fmt.Errorf("store: UpdateObligationStatus: %w", err)
 	}
@@ -247,7 +254,7 @@ func (s *FileStore) goalIDForCapsuleFromObligation(ctx context.Context, c *schem
 	if len(c.ObligationIDs) == 0 {
 		return "", fmt.Errorf("store: capsule %s has no obligation IDs", c.CapsuleID)
 	}
-	return s.goalIDForObligation(ctx, c.ObligationIDs[0])
+	return s.goalIDForObligationLocked(ctx, c.ObligationIDs[0])
 }
 
 func (s *FileStore) LoadCapsule(ctx context.Context, capsuleID string) (*schema.ExecutionCapsule, error) {
@@ -297,7 +304,7 @@ func (s *FileStore) UpdateCapsuleProjectionID(ctx context.Context, capsuleID, pr
 	if len(c.ObligationIDs) == 0 {
 		return fmt.Errorf("store: UpdateCapsuleProjectionID: capsule %s has no obligation IDs", capsuleID)
 	}
-	goalID, err := s.goalIDForObligation(ctx, c.ObligationIDs[0])
+	goalID, err := s.goalIDForObligationLocked(ctx, c.ObligationIDs[0])
 	if err != nil {
 		return fmt.Errorf("store: UpdateCapsuleProjectionID: %w", err)
 	}

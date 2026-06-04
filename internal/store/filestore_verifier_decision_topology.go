@@ -22,7 +22,7 @@ func (s *FileStore) SaveVerifierResult(ctx context.Context, r *schema.VerifierRe
 	if err := ensureArtifactAbsent("verifier result", s.artifactPath(dirVerifierResults, r.VerifierResultID), r.VerifierResultID); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, r.CapsuleID)
+	goalID, err := s.goalIDForCapsuleLocked(ctx, r.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: SaveVerifierResult: %w", err)
 	}
@@ -73,7 +73,7 @@ func (s *FileStore) UpdateVerifierResult(ctx context.Context, r *schema.Verifier
 	if _, err := readFile[schema.VerifierResult](ctx, path); err != nil {
 		return err
 	}
-	goalID, err := s.goalIDForCapsule(ctx, r.CapsuleID)
+	goalID, err := s.goalIDForCapsuleLocked(ctx, r.CapsuleID)
 	if err != nil {
 		return fmt.Errorf("store: UpdateVerifierResult: %w", err)
 	}

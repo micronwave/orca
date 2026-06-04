@@ -112,6 +112,25 @@ type FileStore struct {
 	// Maintained under mu.Lock for writes; read under mu.RLock.
 	// Built from disk on New and updated on every obligation save/status change.
 	openOblIdx map[string]map[string]bool
+
+	// condToGoal maps conditionID → goalID. Conditions are write-once at goal
+	// creation time, so this cache is valid for the store's lifetime.
+	// Populated at init; updated under mu.Lock on SaveGoal.
+	condToGoal map[string]string
+
+	// latestSnap maps goalID → snapshot with the highest SequenceNum.
+	// Populated at init; updated under mu.Lock on SaveSnapshot.
+	// Read under mu.RLock in LoadLatestSnapshot.
+	latestSnap map[string]*schema.StateSnapshot
+
+	// budgetsByGoal maps goalID → all BudgetRecords for that goal.
+	// Populated at init; maintained under mu.Lock on SaveBudgetRecord/UpdateBudgetRecord.
+	// Read under mu.RLock in LoadBudgetForGoal.
+	budgetsByGoal map[string][]*schema.BudgetRecord
+
+	// knownGoals is the set of goal IDs that exist on disk. Monotonically grows —
+	// goals are never deleted. Populated at init; updated under mu.Lock on SaveGoal.
+	knownGoals map[string]bool
 }
 
 // New creates or opens the FileStore at root, building the required directory
@@ -135,25 +154,39 @@ func New(root string, log *eventlog.FileLog) (*FileStore, error) {
 		}
 	}
 	ctx := context.Background()
-	s := &FileStore{root: root, log: log, openOblIdx: make(map[string]map[string]bool)}
+	s := &FileStore{
+		root:          root,
+		log:           log,
+		openOblIdx:    make(map[string]map[string]bool),
+		condToGoal:    make(map[string]string),
+		latestSnap:    make(map[string]*schema.StateSnapshot),
+		budgetsByGoal: make(map[string][]*schema.BudgetRecord),
+		knownGoals:    make(map[string]bool),
+	}
 	if err := s.initOpenObligationsIndex(ctx); err != nil {
 		return nil, fmt.Errorf("store: build open-obligations index: %w", err)
+	}
+	if err := s.initLatestSnapshotIndex(ctx); err != nil {
+		return nil, fmt.Errorf("store: build snapshot index: %w", err)
+	}
+	if err := s.initBudgetIndex(ctx); err != nil {
+		return nil, fmt.Errorf("store: build budget index: %w", err)
 	}
 	return s, nil
 }
 
 // initOpenObligationsIndex scans the goals and obligations directories once at
-// startup and populates openOblIdx with every obligation whose status is Open.
+// startup and populates openOblIdx, condToGoal, and knownGoals.
 // Caller must NOT hold s.mu (called from New before the store is published).
 func (s *FileStore) initOpenObligationsIndex(ctx context.Context) error {
 	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 	if err != nil {
 		return err
 	}
-	condToGoal := make(map[string]string)
 	for _, g := range goals {
+		s.knownGoals[g.GoalID] = true
 		for _, c := range g.GoalConditions {
-			condToGoal[c.ID] = g.GoalID
+			s.condToGoal[c.ID] = g.GoalID
 		}
 	}
 	obligations, err := scanDir[schema.Obligation](ctx, filepath.Join(s.root, dirObligations))
@@ -162,7 +195,7 @@ func (s *FileStore) initOpenObligationsIndex(ctx context.Context) error {
 	}
 	for _, o := range obligations {
 		if o.Status == schema.ObligationOpen {
-			goalID := condToGoal[o.GoalConditionID]
+			goalID := s.condToGoal[o.GoalConditionID]
 			if goalID == "" {
 				return fmt.Errorf("store: open obligation %s references unknown condition %s: %w",
 					o.ObligationID, o.GoalConditionID, ErrNotFound)
@@ -392,9 +425,40 @@ func (s *FileStore) ensureProjectionAbsent(id string) error {
 
 // ── GoalID resolution helpers (no locking) ──────────────────────────────────
 
-// findGoalIDForCondition scans all goal files and returns the GoalID of the
-// goal whose GoalConditions list contains conditionID.
+// findGoalIDForCondition returns the goalID for conditionID from the in-memory
+// cache, falling back to a disk scan only when the cache misses (should not
+// occur in normal operation). Safe for callers that do not already hold s.mu.
 func (s *FileStore) findGoalIDForCondition(ctx context.Context, conditionID string) (string, error) {
+	s.mu.RLock()
+	goalID, ok := s.condToGoal[conditionID]
+	s.mu.RUnlock()
+	if ok {
+		return goalID, nil
+	}
+	goalID, err := s.findGoalIDForConditionSlow(ctx, conditionID)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	if _, ok := s.condToGoal[conditionID]; !ok {
+		s.condToGoal[conditionID] = goalID
+	}
+	s.mu.Unlock()
+	return goalID, nil
+}
+
+// findGoalIDForConditionLocked is the lock-held variant of
+// findGoalIDForCondition. Caller must hold s.mu (read or write).
+func (s *FileStore) findGoalIDForConditionLocked(ctx context.Context, conditionID string) (string, error) {
+	if goalID, ok := s.condToGoal[conditionID]; ok {
+		return goalID, nil
+	}
+	return s.findGoalIDForConditionSlow(ctx, conditionID)
+}
+
+// findGoalIDForConditionSlow is the O(N) fallback for findGoalIDForCondition.
+// Should not be reached in normal operation.
+func (s *FileStore) findGoalIDForConditionSlow(ctx context.Context, conditionID string) (string, error) {
 	goals, err := scanDir[schema.GoalIR](ctx, filepath.Join(s.root, dirGoals))
 	if err != nil {
 		return "", err
@@ -409,7 +473,37 @@ func (s *FileStore) findGoalIDForCondition(ctx context.Context, conditionID stri
 	return "", fmt.Errorf("store: no goal contains condition %s: %w", conditionID, ErrNotFound)
 }
 
+// goalExists reports whether goalID exists, checking the in-memory cache first.
+// Safe for callers that do not already hold s.mu.
 func (s *FileStore) goalExists(ctx context.Context, goalID string) (bool, error) {
+	s.mu.RLock()
+	ok := s.knownGoals[goalID]
+	s.mu.RUnlock()
+	if ok {
+		return true, nil
+	}
+	exists, err := s.goalExistsSlow(ctx, goalID)
+	if err != nil || !exists {
+		return exists, err
+	}
+	s.mu.Lock()
+	s.knownGoals[goalID] = true
+	s.mu.Unlock()
+	return true, nil
+}
+
+// goalExistsLocked is the lock-held variant of goalExists.
+// Caller must hold s.mu (read or write).
+func (s *FileStore) goalExistsLocked(ctx context.Context, goalID string) (bool, error) {
+	if s.knownGoals[goalID] {
+		return true, nil
+	}
+	return s.goalExistsSlow(ctx, goalID)
+}
+
+// goalExistsSlow checks the disk when the knownGoals cache misses.
+// Should not be reached in normal operation.
+func (s *FileStore) goalExistsSlow(ctx context.Context, goalID string) (bool, error) {
 	_, err := readFile[schema.GoalIR](ctx, s.artifactPath(dirGoals, goalID))
 	if err == nil {
 		return true, nil
@@ -424,7 +518,7 @@ func (s *FileStore) requireExistingGoal(ctx context.Context, goalID string) erro
 	if err := validateArtifactID("goal", goalID); err != nil {
 		return err
 	}
-	exists, err := s.goalExists(ctx, goalID)
+	exists, err := s.goalExistsLocked(ctx, goalID)
 	if err != nil {
 		return err
 	}
@@ -445,6 +539,17 @@ func (s *FileStore) goalIDForObligation(ctx context.Context, obligationID string
 	return s.findGoalIDForCondition(ctx, obl.GoalConditionID)
 }
 
+func (s *FileStore) goalIDForObligationLocked(ctx context.Context, obligationID string) (string, error) {
+	if err := validateArtifactID("obligation", obligationID); err != nil {
+		return "", err
+	}
+	obl, err := readFile[schema.Obligation](ctx, s.artifactPath(dirObligations, obligationID))
+	if err != nil {
+		return "", fmt.Errorf("store: load obligation %s: %w", obligationID, err)
+	}
+	return s.findGoalIDForConditionLocked(ctx, obl.GoalConditionID)
+}
+
 // goalIDForCapsule follows capsule → obligation → condition → goal.
 func (s *FileStore) goalIDForCapsule(ctx context.Context, capsuleID string) (string, error) {
 	if err := validateArtifactID("capsule", capsuleID); err != nil {
@@ -458,6 +563,20 @@ func (s *FileStore) goalIDForCapsule(ctx context.Context, capsuleID string) (str
 		return "", fmt.Errorf("store: capsule %s has no obligation IDs", capsuleID)
 	}
 	return s.goalIDForObligation(ctx, c.ObligationIDs[0])
+}
+
+func (s *FileStore) goalIDForCapsuleLocked(ctx context.Context, capsuleID string) (string, error) {
+	if err := validateArtifactID("capsule", capsuleID); err != nil {
+		return "", err
+	}
+	c, err := readFile[schema.ExecutionCapsule](ctx, s.artifactPath(dirCapsules, capsuleID))
+	if err != nil {
+		return "", fmt.Errorf("store: load capsule %s: %w", capsuleID, err)
+	}
+	if len(c.ObligationIDs) == 0 {
+		return "", fmt.Errorf("store: capsule %s has no obligation IDs", capsuleID)
+	}
+	return s.goalIDForObligationLocked(ctx, c.ObligationIDs[0])
 }
 
 func (s *FileStore) goalIDForEvidence(ctx context.Context, ev *schema.EvidenceArtifact) (string, error) {
@@ -476,6 +595,24 @@ func (s *FileStore) goalIDForEvidence(ctx context.Context, ev *schema.EvidenceAr
 	return "", fmt.Errorf("store: evidence %s has no resolvable obligation reference", ev.EvidenceID)
 }
 
+func (s *FileStore) goalIDForEvidenceLocked(ctx context.Context, ev *schema.EvidenceArtifact) (string, error) {
+	for _, obligationID := range append(append([]string{}, ev.Supports...), ev.Weakens...) {
+		if obligationID == "" {
+			continue
+		}
+		goalID, err := s.goalIDForObligationLocked(ctx, obligationID)
+		if err == nil {
+			return goalID, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("store: evidence %s has no resolvable obligation reference", ev.EvidenceID)
+}
+
+// goalIDForProjectionSources resolves a goal from a projection's source IDs.
+// Caller must hold s.mu (read or write).
 func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []string) (string, error) {
 	if len(sourceIDs) == 0 {
 		return "", fmt.Errorf("store: projection source_artifact_ids are required to resolve goal")
@@ -486,7 +623,7 @@ func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []
 		}
 	}
 	for _, id := range sourceIDs {
-		goalID, err := s.goalIDForCapsule(ctx, id)
+		goalID, err := s.goalIDForCapsuleLocked(ctx, id)
 		if err == nil {
 			return goalID, nil
 		}
@@ -495,7 +632,7 @@ func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []
 		}
 	}
 	for _, id := range sourceIDs {
-		goalID, err := s.goalIDForObligation(ctx, id)
+		goalID, err := s.goalIDForObligationLocked(ctx, id)
 		if err == nil {
 			return goalID, nil
 		}
@@ -504,7 +641,7 @@ func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []
 		}
 	}
 	for _, id := range sourceIDs {
-		exists, err := s.goalExists(ctx, id)
+		exists, err := s.goalExistsLocked(ctx, id)
 		if err != nil {
 			return "", err
 		}
@@ -515,6 +652,8 @@ func (s *FileStore) goalIDForProjectionSources(ctx context.Context, sourceIDs []
 	return "", fmt.Errorf("store: no projection source resolves to a goal")
 }
 
+// goalIDForRelatedIDs resolves a goal from a decision record's related IDs.
+// Caller must hold s.mu (read or write).
 func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string) (string, error) {
 	if len(relatedIDs) == 0 {
 		return "", fmt.Errorf("store: related_ids are required to resolve goal")
@@ -526,7 +665,7 @@ func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string
 	}
 	resolvers := []func(string) (string, error){
 		func(id string) (string, error) {
-			exists, err := s.goalExists(ctx, id)
+			exists, err := s.goalExistsLocked(ctx, id)
 			if err != nil {
 				return "", err
 			}
@@ -535,42 +674,42 @@ func (s *FileStore) goalIDForRelatedIDs(ctx context.Context, relatedIDs []string
 			}
 			return id, nil
 		},
-		func(id string) (string, error) { return s.goalIDForObligation(ctx, id) },
-		func(id string) (string, error) { return s.goalIDForCapsule(ctx, id) },
+		func(id string) (string, error) { return s.goalIDForObligationLocked(ctx, id) },
+		func(id string) (string, error) { return s.goalIDForCapsuleLocked(ctx, id) },
 		func(id string) (string, error) {
 			p, err := readFile[schema.PatchArtifact](ctx, s.artifactPath(dirPatches, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(ctx, p.CapsuleID)
+			return s.goalIDForCapsuleLocked(ctx, p.CapsuleID)
 		},
 		func(id string) (string, error) {
 			c, err := readFile[schema.ClaimArtifact](ctx, s.artifactPath(dirClaims, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(ctx, c.SourceCapsuleID)
+			return s.goalIDForCapsuleLocked(ctx, c.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
 			f, err := readFile[schema.FailureFingerprint](ctx, s.artifactPath(dirFailures, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(ctx, f.SourceCapsuleID)
+			return s.goalIDForCapsuleLocked(ctx, f.SourceCapsuleID)
 		},
 		func(id string) (string, error) {
 			r, err := readFile[schema.VerifierResult](ctx, s.artifactPath(dirVerifierResults, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForCapsule(ctx, r.CapsuleID)
+			return s.goalIDForCapsuleLocked(ctx, r.CapsuleID)
 		},
 		func(id string) (string, error) {
 			ev, err := readFile[schema.EvidenceArtifact](ctx, s.artifactPath(dirEvidence, id))
 			if err != nil {
 				return "", err
 			}
-			return s.goalIDForEvidence(ctx, ev)
+			return s.goalIDForEvidenceLocked(ctx, ev)
 		},
 	}
 	for _, resolve := range resolvers {
