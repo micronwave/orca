@@ -22,6 +22,8 @@ import (
 	"github.com/micronwave/orca/internal/eventlog"
 	"github.com/micronwave/orca/internal/gate"
 	"github.com/micronwave/orca/internal/intake"
+	"github.com/micronwave/orca/internal/runner"
+	"github.com/micronwave/orca/internal/runner/adapters/stub"
 	"github.com/micronwave/orca/internal/schema"
 	"github.com/micronwave/orca/internal/store"
 	"github.com/micronwave/orca/internal/ui"
@@ -1401,6 +1403,81 @@ func TestPRCreationSkippedWhenNotEnabled(t *testing.T) {
 	}
 }
 
+func TestRunCapsuleWithRecoveryRefusesTerminalInPlaceRetry(t *testing.T) {
+	orcaDir := seedOrcaDir(t, false)
+	worktree := initTempGitRepo(t)
+	log, st := openStoreForTest(t, orcaDir)
+	defer log.Close()
+	now := time.Now().UTC()
+	ctx := context.Background()
+	if err := st.SaveObligation(ctx, &schema.Obligation{
+		ObligationID:     "OB-terminal-retry",
+		GoalConditionID:  "GC-1",
+		Description:      "prove terminal retry guard",
+		EvidenceRequired: []string{string(schema.EvidenceTestResult)},
+		Blocking:         true,
+		RiskLevel:        schema.RiskLow,
+		Status:           schema.ObligationOpen,
+	}); err != nil {
+		t.Fatalf("SaveObligation: %v", err)
+	}
+	if err := st.SaveProjection(ctx, &schema.ContextProjection{
+		ContextProjectionID: "CTX-terminal-retry",
+		Role:                schema.ProjectionRoleExecutor,
+		SourceArtifactIDs:   []string{"OB-terminal-retry"},
+		TokenBudget:         1200,
+		CreatedAt:           now,
+	}); err != nil {
+		t.Fatalf("SaveProjection: %v", err)
+	}
+	capsule := &schema.ExecutionCapsule{
+		CapsuleID:           "CAP-terminal-retry",
+		ObligationIDs:       []string{"OB-terminal-retry"},
+		Agent:               schema.AgentCodex,
+		Role:                schema.RoleExecutor,
+		ContextProjectionID: "CTX-terminal-retry",
+		AllowedPaths:        []string{"."},
+		Budget: schema.CapsuleBudget{
+			MaxTokens:          4096,
+			MaxWallTimeSeconds: 60,
+			MaxRetries:         3,
+		},
+		Sandbox: schema.CapsuleSandbox{
+			WorktreePath: worktree,
+			Network:      schema.NetworkDeny,
+			WriteScope:   "worktree_only",
+		},
+		State: schema.CapsuleStatePending,
+	}
+	if err := st.SaveCapsule(ctx, capsule); err != nil {
+		t.Fatalf("SaveCapsule: %v", err)
+	}
+	rt := &runtime{
+		store:    st,
+		eventLog: log,
+		runner:   runner.New(st, log, orcaDir, stub.New(schema.AgentCodex)),
+	}
+	_, err := rt.runCapsuleWithRecovery(ctx, "G-1", capsule, runner.RunOptions{})
+	if err == nil {
+		t.Fatal("runCapsuleWithRecovery error = nil, want terminal retry refusal")
+	}
+	if !strings.Contains(err.Error(), "refusing in-place retry") {
+		t.Fatalf("runCapsuleWithRecovery error = %q, want terminal retry refusal", err.Error())
+	}
+	events, readErr := log.ReadByType(ctx, schema.EventCapsuleStarted, 0, 0)
+	if readErr != nil {
+		t.Fatalf("ReadByType capsule_started: %v", readErr)
+	}
+	started := 0
+	for _, ev := range events {
+		if ev.ArtifactID == capsule.CapsuleID {
+			started++
+		}
+	}
+	if started != 1 {
+		t.Fatalf("capsule_started events for %s = %d, want 1", capsule.CapsuleID, started)
+	}
+}
 func TestResolveHeadBranch_FailsWhenWorktreeInDetachedHEAD(t *testing.T) {
 	repoDir := initTempGitRepoDetached(t)
 	orcaDir := seedOrcaDir(t, true)

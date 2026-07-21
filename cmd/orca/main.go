@@ -769,6 +769,14 @@ func (rt *runtime) runCapsuleWithRecovery(ctx context.Context, goalID string, ca
 			return runResult, fmt.Errorf("orca: capsule %s failed and max_retries=%d exhausted: %w; %s",
 				capsule.CapsuleID, maxRetries, runErr, recEntry.EscalationReason)
 		}
+		currentCapsule, loadErr := rt.store.LoadCapsule(ctx, capsule.CapsuleID)
+		if loadErr != nil {
+			return runResult, errors.Join(runErr, fmt.Errorf("orca: load capsule %s after failed run: %w", capsule.CapsuleID, loadErr))
+		}
+		if currentCapsule.State == schema.CapsuleStateFailed || currentCapsule.State == schema.CapsuleStateCompleted {
+			return runResult, fmt.Errorf("orca: capsule %s is terminal (%s) after failed run; refusing in-place retry because it would replay an invalid terminal-state transition: %w",
+				capsule.CapsuleID, currentCapsule.State, runErr)
+		}
 		rt.emit(ctx, UIEvent{
 			Kind:      EventKindCapsuleRunning,
 			GoalID:    goalID,
