@@ -168,6 +168,41 @@ func TestRunFillsWallTimeWhenAdapterReturnsZero(t *testing.T) {
 	}
 }
 
+func TestRunCollectsOutputAfterAgentBudgetContextExpires(t *testing.T) {
+	env := newRunnerEnv(t)
+	capsuleID := saveRunnerScenario(t, env)
+	capsule, err := env.st.LoadCapsule(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("LoadCapsule: %v", err)
+	}
+	capsule.Budget.MaxWallTimeSeconds = 1
+	if err := os.WriteFile(filepath.Join(env.orcaDir, "state", "capsules", capsuleID+".json"), mustJSON(t, capsule), 0o644); err != nil {
+		t.Fatalf("rewrite capsule budget: %v", err)
+	}
+	adapter := &fakeAdapter{
+		agent: schema.AgentCodex,
+		executeFn: func(ctx context.Context, capsule *schema.ExecutionCapsule, projection *schema.ContextProjection) (*schema.AgentSidecarOutput, error) {
+			<-ctx.Done()
+			if err := os.WriteFile(filepath.Join(capsule.Sandbox.WorktreePath, "README.txt"), []byte("updated after deadline"), 0o644); err != nil {
+				t.Fatalf("write file in execute: %v", err)
+			}
+			return &schema.AgentSidecarOutput{
+				ObligationsAddressed: []string{"OB-1"},
+				FilesChanged:         []string{"README.txt"},
+				CommandsRun:          []string{"go test ./..."},
+				Claims:               []schema.SidecarClaim{{Claim: "late output collected", Type: schema.SidecarClaimVerified}},
+				Summary:              "runner collected output after the agent budget expired",
+			}, nil
+		},
+	}
+	result, err := New(env.st, env.log, env.orcaDir, adapter).Run(env.ctx, capsuleID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.PatchID == "" {
+		t.Fatalf("PatchID is empty after late output collection: %+v", result)
+	}
+}
 func TestRunPreservesClaimDisputeEdgesAndLeavesVerificationToReconciler(t *testing.T) {
 	env := newRunnerEnv(t)
 	capsuleID := saveRunnerScenario(t, env)

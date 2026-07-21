@@ -273,7 +273,9 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 	result.TokensUsed = output.TokensUsed
 	result.WallTimeSeconds = output.WallTimeSeconds
 
-	diffPath, changedFiles, err := buildPatchDiff(runCtx, s.orcaDir, capsule.CapsuleID, capsule.Sandbox.WorktreePath)
+	outputCtx, outputCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer outputCancel()
+	diffPath, changedFiles, err := buildPatchDiff(outputCtx, s.orcaDir, capsule.CapsuleID, capsule.Sandbox.WorktreePath)
 	if err != nil {
 		return result, fmt.Errorf("runner: build patch diff for capsule %s: %w", capsule.CapsuleID, err)
 	}
@@ -289,7 +291,7 @@ func (s *Runner) run(ctx context.Context, capsuleID string, opts RunOptions) (re
 	scopeViolations := findScopeViolations(changedFiles, capsule.AllowedPaths, capsule.ForbiddenPaths)
 
 	if !evidenceOnly {
-		baseCommit, err := currentCommit(runCtx, capsule.Sandbox.WorktreePath)
+		baseCommit, err := currentCommit(outputCtx, capsule.Sandbox.WorktreePath)
 		if err != nil {
 			return result, err
 		}
